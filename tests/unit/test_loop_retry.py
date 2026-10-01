@@ -30,6 +30,7 @@ from aios.harness.loop import (
     _is_terminal_model_error,
     _provider_error_detail,
     _retry_delay_for_attempt,
+    _terminal_error_stop_message,
     run_session_step,
 )
 from aios.harness.window import WindowedEvents
@@ -556,6 +557,10 @@ class TestRunSessionStepOnTerminalModelError:
         # the diagnostic visible there as well as available in structured form.
         assert "BadRequestError (HTTP 400)" in reason["message"]
         assert "request_too_large" in reason["message"]
+        # The actual cause replaces the old four-guess ``e.g.`` list (#2049).
+        assert "e.g." not in reason["message"]
+        assert "content policy" not in reason["message"]
+        assert "post a message to the session" in reason["message"]
 
     @pytest.mark.parametrize("cls", _TRANSIENT_ERROR_CLASSES)
     async def test_transient_class_keeps_backoff_ladder(
@@ -852,7 +857,7 @@ class TestRunSessionStepOnContextOverflow:
         stop_reasons = [
             call.args[2] for call in mock_step_dependencies.set_stop_reason.call_args_list
         ]
-        assert {"type": "error"} in stop_reasons
+        assert any(reason.get("type") == "error" for reason in stop_reasons)
         # No further rescheduling stop_reason recorded on the terminal attempt.
         assert not any(reason.get("context_overflow") is True for reason in stop_reasons)
 
@@ -1069,3 +1074,65 @@ class TestOverflowLadderProgressesToExhaustion:
         # The stop_reason handed to the next build tracked the same ladder.
         overflow_stops = [s for s in stop_reasons if s.get("context_overflow") is True]
         assert [s["context_shrink_factor"] for s in overflow_stops] == shrinks
+
+
+class TestTerminalErrorStopMessage:
+    """The rendered stop message states the real provider cause (#2049)."""
+
+    def test_renders_provider_message_not_guess_list(self) -> None:
+        message = _terminal_error_stop_message(
+            {
+                "exception_class": "BadRequestError",
+                "http_status": 400,
+                "message": "Your input exceeds the context window of this model.",
+            }
+        )
+        assert "BadRequestError (HTTP 400): Your input exceeds the context window" in message
+        assert "e.g." not in message
+        assert "auth" not in message
+        assert "content policy" not in message
+        assert "post a message to the session" in message
+
+    @pytest.mark.parametrize(
+        "detail",
+        [
+            None,
+            {"exception_class": "BadRequestError", "http_status": None, "message": ""},
+            {"exception_class": "BadRequestError", "http_status": None, "message": "   "},
+        ],
+    )
+    def test_missing_message_says_so_honestly(self, detail: dict[str, Any] | None) -> None:
+        message = _terminal_error_stop_message(detail)
+        assert "the provider returned no error detail" in message
+        assert "e.g." not in message
+
+
+class TestContextOverflowExhaustedSurfacesProviderMessage:
+    async def test_exhausted_overflow_stop_reason_carries_provider_message(
+        self, mock_step_dependencies: Any
+    ) -> None:
+        request = httpx.Request("POST", "https://example.test/v1")
+        response = httpx.Response(400, request=request)
+        error = litellm_exceptions.BadRequestError(
+            message="Your input exceeds the context window of this model.",
+            model="x",
+            llm_provider="openai",
+            response=response,
+        )
+        mock_step_dependencies.stream_litellm.side_effect = error
+
+        with patch(
+            "aios.harness.loop._count_consecutive_context_overflow",
+            AsyncMock(return_value=len(_RETRY_BACKOFF_SECONDS)),
+        ):
+            await run_session_step("sess_x")
+
+        reason = next(
+            call.args[2]
+            for call in mock_step_dependencies.set_stop_reason.call_args_list
+            if call.args[2].get("type") == "error"
+        )
+        assert reason["provider_error"]["message"] == str(error)
+        assert "Your input exceeds the context window of this model" in reason["message"]
+        assert "larger context window" in reason["message"]
+        assert "e.g." not in reason["message"]

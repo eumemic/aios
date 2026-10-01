@@ -233,23 +233,79 @@ def _is_terminal_model_error(exc: BaseException) -> bool:
     return isinstance(exc, _TERMINAL_MODEL_ERRORS)
 
 
-_MODEL_TERMINAL_ERROR_STOP_REASON_MESSAGE = (
-    "The model call failed with a terminal error that retrying cannot fix "
-    "(e.g. invalid request, context-window exceeded, content policy, or auth). "
+_MODEL_TERMINAL_ERROR_HEADLINE = (
+    "The model call failed with a terminal error that retrying cannot fix"
+)
+_MODEL_TERMINAL_ERROR_RECOVERY_HINT = (
     "To recover, post a message to the session, optionally after switching the "
     "agent's model or trimming the conversation."
 )
+_CONTEXT_OVERFLOW_HEADLINE = (
+    "The model call exceeded the model's context window, and adaptive context "
+    "shrinking did not bring the request under the limit"
+)
+_CONTEXT_OVERFLOW_RECOVERY_HINT = (
+    "To recover, trim the conversation or switch the agent to a model with a "
+    "larger context window, then post a message to the session."
+)
+# Said verbatim when the provider gave us nothing to show: an honest "no detail"
+# beats a plausible-looking list of guesses (#2049).
+_NO_PROVIDER_ERROR_DETAIL = "the provider returned no error detail"
 
 
-def _terminal_error_stop_message(provider_error: dict[str, Any]) -> str:
-    """Include the provider diagnosis in the console-visible failure message."""
-    exception_class = provider_error["exception_class"]
-    http_status = provider_error["http_status"]
-    status = f" (HTTP {http_status})" if http_status is not None else ""
-    return (
-        f"{_MODEL_TERMINAL_ERROR_STOP_REASON_MESSAGE}\n\n"
-        f"Provider error: {exception_class}{status}: {provider_error['message']}"
-    )
+def _terminal_error_stop_message(
+    provider_error: dict[str, Any] | None,
+    *,
+    headline: str = _MODEL_TERMINAL_ERROR_HEADLINE,
+    recovery_hint: str = _MODEL_TERMINAL_ERROR_RECOVERY_HINT,
+) -> str:
+    """Render the console-visible failure message from the ACTUAL provider error.
+
+    States the provider's own message (with exception class + HTTP status when
+    known) rather than a list of possible causes; when no message is available
+    it says so explicitly instead of guessing (#2049).
+    """
+    message = (provider_error or {}).get("message")
+    if not isinstance(message, str) or not message.strip():
+        cause = _NO_PROVIDER_ERROR_DETAIL
+    else:
+        cause = message.strip()
+    if provider_error is not None:
+        exception_class = provider_error.get("exception_class")
+        http_status = provider_error.get("http_status")
+        status = f" (HTTP {http_status})" if http_status is not None else ""
+        if exception_class:
+            cause = f"{exception_class}{status}: {cause}"
+    return f"{headline}: {cause}\n\n{recovery_hint}"
+
+
+def _workflow_error_detail(
+    error: dict[str, Any] | None, outcome: str | None = None
+) -> dict[str, Any] | None:
+    """Map a bound model-workflow run's ``{kind, message, ...}`` error to a detail dict.
+
+    The run's reported ``kind`` (e.g. ``"cancelled"``, which ``await_task``
+    produces for every cancelled run) is part of the concrete cause and is
+    always carried into the rendered message: ``"kind: message"`` when both are
+    present, the bare kind when the message is empty. When the error dict has
+    neither, the run's non-ok ``outcome`` is used so the message never claims
+    "no error detail" while the run reported a cause.
+    """
+    error = error or {}
+    message = error.get("message")
+    if not isinstance(message, str):
+        message = ""
+    message = message.strip()
+    kind = error.get("kind")
+    kind = kind.strip() if isinstance(kind, str) else ""
+    if not kind and isinstance(outcome, str) and outcome.strip() and outcome != "ok":
+        kind = outcome.strip()
+    cause = f"{kind}: {message}" if kind and message else kind or message
+    if not cause:
+        return None
+    if len(cause) > _PROVIDER_ERROR_MESSAGE_MAX_CHARS:
+        cause = cause[:_PROVIDER_ERROR_MESSAGE_MAX_CHARS] + "…"
+    return {"message": cause}
 
 
 def _retry_delay_for_attempt(attempt: int) -> float | None:
@@ -1329,7 +1385,9 @@ async def _run_session_step_body(
                 pool,
                 session_id,
                 error_kind="model_workflow_run_errored",
-                stop_message=_MODEL_TERMINAL_ERROR_STOP_REASON_MESSAGE,
+                stop_message=_terminal_error_stop_message(
+                    _workflow_error_detail(harvested.error, harvested.outcome)
+                ),
                 account_id=account_id,
             )
             # Consume the park AFTER the errored latch lands: the session is now
@@ -1360,7 +1418,7 @@ async def _run_session_step_body(
                 pool,
                 session_id,
                 error_kind="model_workflow_invalid_shape",
-                stop_message=_MODEL_TERMINAL_ERROR_STOP_REASON_MESSAGE,
+                stop_message=_terminal_error_stop_message(_provider_error_detail(exc)),
                 account_id=account_id,
             )
             await _append_harvest_consumed_marker(
@@ -1526,24 +1584,29 @@ async def _run_session_step_body(
         except Exception as exc:
             if _is_context_overflow(exc):
                 log.warning("step.model_context_overflow", session_id=session_id)
+                provider_error = _provider_error_detail(exc)
                 await _append_model_request_error_span(
                     pool,
                     session_id,
                     start_event_id=start_event.id,
                     account_id=account_id,
-                    provider_error=_provider_error_detail(exc),
+                    provider_error=provider_error,
                 )
                 return _model_error_step_result(
-                    await _apply_context_overflow_retry(pool, session_id, account_id=account_id),
+                    await _apply_context_overflow_retry(
+                        pool, session_id, account_id=account_id, provider_error=provider_error
+                    ),
                     archive_when_idle=session.archive_when_idle,
                 )
             if _is_terminal_model_error(exc):
+                provider_error = _provider_error_detail(exc)
                 log.warning(
                     "step.model_terminal_error",
                     session_id=session_id,
                     error_class=type(exc).__name__,
+                    http_status=provider_error["http_status"],
+                    error_message=provider_error["message"],
                 )
-                provider_error = _provider_error_detail(exc)
                 await _append_model_request_error_span(
                     pool,
                     session_id,
@@ -2648,7 +2711,11 @@ async def _handle_streaming_model_deadline(
 
 
 async def _apply_context_overflow_retry(
-    pool: Any, session_id: str, *, account_id: str
+    pool: Any,
+    session_id: str,
+    *,
+    account_id: str,
+    provider_error: dict[str, Any] | None = None,
 ) -> float | None:
     """Schedule a strictly-smaller retry after a provider context overflow.
 
@@ -2667,7 +2734,16 @@ async def _apply_context_overflow_retry(
     delay = _retry_delay_for_attempt(attempt)
     if delay is None:
         await _latch_errored_turn(
-            pool, session_id, error_kind="context_overflow", account_id=account_id
+            pool,
+            session_id,
+            error_kind="context_overflow",
+            stop_message=_terminal_error_stop_message(
+                provider_error,
+                headline=_CONTEXT_OVERFLOW_HEADLINE,
+                recovery_hint=_CONTEXT_OVERFLOW_RECOVERY_HINT,
+            ),
+            provider_error=provider_error,
+            account_id=account_id,
         )
         return None
     shrink_factor = round(_CONTEXT_OVERFLOW_SHRINK_BASE ** (attempt + 1), 4)
