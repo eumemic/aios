@@ -76,8 +76,9 @@ class AgentError(Exception):
     ``"timeout"`` if the call outran its wall-clock budget without responding,
     ``"no_return"`` for an idle-without-responding child (see
     :class:`AgentNoReturnError`), ``"agent_not_found"`` if the named agent does not
-    exist, and ``"bad_agent_call"`` for a malformed call (a non-string ``agent_id``
-    or an invalid ``output_schema``).
+    exist, ``"bad_agent_call"`` for a malformed call (a non-string ``agent_id``
+    or an invalid ``output_schema``), and ``"input_too_large"`` for an ``input``
+    over the delivery limit (see :func:`agent`).
     """
 
     def __init__(
@@ -172,6 +173,15 @@ def agent(
     surface. ``agent_id`` supplied spawns that named agent. ``input`` is required and
     must not be None; ``model`` is a per-call model override; ``label`` is an
     observability annotation and does not enter the call key.
+
+    **Input size limit.** ``input`` is delivered to the child whole or not at all —
+    never truncated. The limit is 1,000,000 characters (Unicode code points; the
+    public message limit ``MAX_USER_MESSAGE_CHARS``) of the *serialized* input: a
+    string counts as-is, any other value is measured after ``json.dumps`` (so JSON
+    syntax and escaping count). An oversized input is refused before the child is
+    created and raises :class:`AgentError` with ``kind="input_too_large"`` at the
+    ``await``, naming the actual size and the limit. The child's model context
+    window is a separate, model-dependent bound.
     """
     if input is None:
         raise ValueError("agent() requires a non-None input (the child's first message)")

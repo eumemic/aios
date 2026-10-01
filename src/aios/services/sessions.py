@@ -636,6 +636,44 @@ async def stimulate(pool: asyncpg.Pool[Any], stim: Stimulus, *, account_id: str)
     return await _stimulate_existing_tell(pool, stim, account_id=account_id)
 
 
+def request_content(input: Any) -> str:
+    """Serialize a request ``input`` into the servicer's first user-message content.
+
+    A string is delivered verbatim; anything else is ``json.dumps``-ed. This is the
+    exact text the servicer receives, so it is also the text the request-size limit
+    (:data:`~aios.models.sessions.MAX_USER_MESSAGE_CHARS`) is measured against.
+    """
+    return input if isinstance(input, str) else json.dumps(input)
+
+
+def request_input_too_large(content: str) -> str | None:
+    """The fail-loud message for a request whose content exceeds the delivery limit.
+
+    Returns ``None`` when ``content`` fits. The limit is
+    :data:`~aios.models.sessions.MAX_USER_MESSAGE_CHARS` measured in **characters
+    (Unicode code points) of the serialized content** — for a non-string input that
+    includes JSON syntax and escaping. The same bound the public message endpoint
+    enforces; a request is delivered whole or refused, never truncated (#2122).
+    """
+    if len(content) <= MAX_USER_MESSAGE_CHARS:
+        return None
+    return (
+        f"request input is {len(content):,} characters once serialized, over the "
+        f"{MAX_USER_MESSAGE_CHARS:,}-character limit; it was refused rather than "
+        "truncated — split the input or pass a reference to it"
+    )
+
+
+def _check_request_content(content: str) -> None:
+    """Raise :class:`PayloadTooLargeError` if ``content`` exceeds the request limit."""
+    message = request_input_too_large(content)
+    if message is not None:
+        raise PayloadTooLargeError(
+            message,
+            detail={"max_chars": MAX_USER_MESSAGE_CHARS, "got_chars": len(content)},
+        )
+
+
 def _obligation_summary(content: str) -> str:
     """The verbatim request input carried by the durable obligation edge.
 
@@ -692,7 +730,8 @@ async def create_child_session(
     """
     awaited = isinstance(stim, AskNewSession)
     output_schema = stim.output_schema if isinstance(stim, AskNewSession) else None
-    content = stim.input if isinstance(stim.input, str) else json.dumps(stim.input)
+    content = request_content(stim.input)
+    _check_request_content(content)
     async with pool.acquire() as conn, conn.transaction():
         child = await queries.insert_child_session(
             conn,
@@ -784,7 +823,8 @@ async def _stimulate_existing_ask(
     """
 
     session = stim.session
-    content = stim.input if isinstance(stim.input, str) else json.dumps(stim.input)
+    content = request_content(stim.input)
+    _check_request_content(content)
     request_meta: dict[str, Any] = {"request_id": stim.request_id}
     if stim.output_schema is not None:
         request_meta["output_schema"] = stim.output_schema
@@ -923,6 +963,9 @@ async def invoke(
                 "environment_id is required for target_kind=agent",
                 detail={"target_kind": target_kind},
             )
+        # Refuse an oversized request BEFORE the servicer session exists, so a 413
+        # never leaves an orphaned, request-less child behind (#2122).
+        _check_request_content(request_content(input))
         launcher_agent: StepSurface | None = None
         child_agent: Any = None
         if launcher_session_id is not None:
