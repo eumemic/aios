@@ -926,6 +926,8 @@ def _event_token_delta(
     * user message → ``render_user_event(...)`` paired with an assistant
       separator (pre-paying for ``merge_adjacent_user_messages``), counted
       together;
+    * tool result → ``render_tool_result(...)`` (pre-paying for the
+      ``[received=…]`` envelope ``build_messages`` stamps on it, #2282);
     * any other message → ``approx_tokens([data])``.
 
     ``render_user_event``/``approx_tokens`` are imported lazily to preserve
@@ -933,7 +935,11 @@ def _event_token_delta(
     """
     if kind != "message":
         return 0
-    from aios.harness.context import _USER_MESSAGE_SEPARATOR_CONTENT, render_user_event
+    from aios.harness.context import (
+        _USER_MESSAGE_SEPARATOR_CONTENT,
+        render_tool_result,
+        render_user_event,
+    )
     from aios.harness.tokens import approx_tokens
 
     if data.get("role") == "user":
@@ -943,6 +949,10 @@ def _event_token_delta(
         rendered = render_user_event(data, orig_channel, focal_at_arrival, datetime.now(UTC))
         separator = {"role": "assistant", "content": _USER_MESSAGE_SEPARATOR_CONTENT}
         return approx_tokens([rendered, separator], baseline=baseline)
+    if data.get("role") == "tool":
+        # Same now() stand-in as the user arm: the envelope's width is fixed
+        # for a given zone, so the drift is in the digits, not the count.
+        return approx_tokens([render_tool_result(data, datetime.now(UTC))], baseline=baseline)
     return approx_tokens([data], baseline=baseline)
 
 
