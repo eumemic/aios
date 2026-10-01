@@ -124,17 +124,19 @@ RETIRED_GOAL_OUTCOME_BUILTINS = Retirement(
 
 #: Obligation/call-surface vocabulary unification (#1516). The task-named
 #: outgoing view and cancel verb are renamed to the source-agnostic call-edge
-#: terminology. Persisted surfaces are migrated through the retirement lifecycle:
-#: 0183 expand, 0184 backfill, 0185 contract (in-transaction residue abort-guard).
-#: ``contract_rev`` names 0185 so the boot gate enforces it and the read-tolerance
-#: validator stops accepting ``stop_task``/``list_tasks`` (same as 0122 / 0155).
+#: terminology. Persisted surfaces are migrated by ONE retirement revision, 0183:
+#: the backfill, then the contract residue abort-guard, in the same transaction
+#: (the expand step is a data no-op and is not emitted). ``contract_rev`` names
+#: 0183 so the boot gate enforces it and the read-tolerance validator stops
+#: accepting ``stop_task``/``list_tasks`` (same as 0122, which is also
+#: introduced and contracted at one rev).
 TASK_TO_CALL_BUILTIN_RENAMES = Retirement(
     domain=TOOL_SURFACE_DOMAIN,
     action="rename",
     mappings=(("stop_task", "cancel_call"), ("list_tasks", "list_calls")),
     surfaces=TOOL_SURFACES,
     introduced_rev="0183",
-    contract_rev="0185",
+    contract_rev="0183",
     sla_days=30,
 )
 

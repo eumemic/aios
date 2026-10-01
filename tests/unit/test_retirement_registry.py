@@ -160,15 +160,15 @@ def test_registry_is_importable_as_single_source() -> None:
     assert all(isinstance(r, Retirement) for r in reg.REGISTRY)
 
 
-def test_task_to_call_descriptor_is_contracted_at_0185() -> None:
-    """#1516: the task→call rename ships its own contract migration (0185); the
+def test_task_to_call_descriptor_is_contracted_at_0183() -> None:
+    """#1516: the task→call rename ships its own single retirement migration (0183); the
     descriptor must name it so the boot gate enforces it and the read shim
     stops tolerating ``stop_task``/``list_tasks`` (same as 0122 / 0155)."""
     r = reg.TASK_TO_CALL_BUILTIN_RENAMES
     assert r.action == "rename"
     assert r.token_map() == {"stop_task": "cancel_call", "list_tasks": "list_calls"}
     assert r.introduced_rev == "0183"
-    assert r.contract_rev == "0185"
+    assert r.contract_rev == "0183"
 
 
 def test_task_to_call_legacy_names_are_not_tolerated_after_contract() -> None:

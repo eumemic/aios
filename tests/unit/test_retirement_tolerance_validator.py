@@ -181,6 +181,6 @@ def test_telemetry_not_consulted_as_gate() -> None:
 
 @pytest.mark.parametrize("legacy", ["stop_task", "list_tasks"])
 def test_live_registry_rejects_contracted_task_names(legacy: str) -> None:
-    """#1516 contract (0185): the real registry no longer tolerates the task-named builtins."""
+    """#1516 contract (0183): the real registry no longer tolerates the task-named builtins."""
     with pytest.raises(ValidationError):
         ToolSpec.model_validate({"type": legacy})

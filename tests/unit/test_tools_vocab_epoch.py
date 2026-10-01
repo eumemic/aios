@@ -86,9 +86,9 @@ def test_epoch_ignores_other_domains() -> None:
 
 def test_live_epoch_matches_registry_latest_tool_surface_contract() -> None:
     # The shipped constant tracks the live registry — the latest declared
-    # tool_surface contract (rev 0185, the #1516 task→call rename contract).
+    # tool_surface contract (rev 0183, the #1516 task→call rename retirement).
     assert epoch_mod.latest_backfill_rev(reg.TOOL_SURFACE_DOMAIN) == epoch_mod.TOOLS_VOCAB_EPOCH
-    assert epoch_mod.TOOLS_VOCAB_EPOCH == 185
+    assert epoch_mod.TOOLS_VOCAB_EPOCH == 183
 
 
 # ── registry: dropped_tokens helper ──────────────────────────────────────────

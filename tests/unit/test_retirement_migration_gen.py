@@ -34,6 +34,7 @@ from aios.retirements.migration_gen import (
     GeneratedChain,
     current_head,
     generate,
+    generate_single,
     next_revisions,
     resolve_descriptor,
 )
@@ -336,14 +337,110 @@ def test_backfill_suspends_immutable_table_guard_around_its_update() -> None:
     )
 
 
-def test_committed_task_to_call_migrations_match_generator() -> None:
-    """The on-disk 0183-0185 chain is exactly what the generator emits today."""
+def test_committed_task_to_call_migration_matches_generator() -> None:
+    """The on-disk 0183 is exactly the single-revision form the generator emits today,
+    and the old three-file 0183-0185 chain is gone (one branch-only rev, aios#2488)."""
 
     from aios.retirements.registry import TASK_TO_CALL_BUILTIN_RENAMES
 
-    chain = generate(
+    single = generate_single(
         TASK_TO_CALL_BUILTIN_RENAMES, "0182", descriptor_name="TASK_TO_CALL_BUILTIN_RENAMES"
     )
-    for migration in chain:
-        on_disk = (_MIGRATIONS_DIR / "versions" / migration.filename).read_text()
-        assert on_disk == migration.source, f"{migration.filename} drifted from the generator"
+    assert single.revision == "0183"
+    on_disk = (_MIGRATIONS_DIR / "versions" / single.filename).read_text()
+    assert on_disk == single.source, f"{single.filename} drifted from the generator"
+    assert TASK_TO_CALL_BUILTIN_RENAMES.introduced_rev == single.revision
+    assert TASK_TO_CALL_BUILTIN_RENAMES.contract_rev == single.revision
+    leftovers = sorted(
+        p.name
+        for p in (_MIGRATIONS_DIR / "versions").glob("018[3-5]_*.py")
+        if p.name != single.filename
+    )
+    assert leftovers == []
+
+
+# ── Single-revision form (backfill + contract guard, no empty expand) ─────────
+
+
+def _single(retirement: Retirement, head: str = "0123"):  # type: ignore[no-untyped-def]
+    return generate_single(retirement, head, descriptor_name="UNDER_TEST")
+
+
+def _upgrade_calls(source: str) -> list[str]:
+    """The SQL string of every top-level ``op.execute`` in ``upgrade()``, in order."""
+
+    module = _module(source)
+    (upgrade,) = [n for n in module.body if isinstance(n, ast.FunctionDef) and n.name == "upgrade"]
+    out = []
+    for stmt in upgrade.body:
+        assert isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call)
+        assert ast.unparse(stmt.value.func) == "op.execute"
+        out.append(ast.literal_eval(stmt.value.args[0]))
+    return out
+
+
+def test_single_is_one_revision_on_head() -> None:
+    m = _single(LEGACY_BUILTIN_RENAMES, head="0123")
+    assert m.revision == "0124"
+    assert 'revision: str = "0124"' in m.source
+    assert 'down_revision: str | None = "0123"' in m.source
+    assert m.filename == "0124_retire_under_test.py"
+    # No empty expand: upgrade() does real work.
+    assert "    pass\n\n\ndef downgrade" not in m.source
+
+
+@pytest.mark.parametrize("retirement", REGISTRY)
+def test_single_runs_backfill_then_guard_last(retirement: Retirement) -> None:
+    calls = _upgrade_calls(_single(retirement).source)
+    assert "CREATE FUNCTION" in calls[0]
+    drop = next(i for i, sql in enumerate(calls) if sql.startswith("DROP FUNCTION"))
+    # Every surface is rewritten before the transform is dropped ...
+    for surface in retirement.surfaces:
+        update = next(i for i, sql in enumerate(calls) if f"UPDATE {surface.table} SET" in sql)
+        assert 0 < update < drop
+    # ... and the residue abort-guard is the final statement, after the backfill.
+    assert drop == len(calls) - 2
+    assert "RAISE EXCEPTION" in calls[-1]
+    assert "residue > 0" in calls[-1]
+    for surface in retirement.surfaces:
+        assert f"SELECT count(*) FROM {surface.table}" in calls[-1]
+
+
+def test_single_keeps_trigger_bracket_and_batching() -> None:
+    m = _single(LEGACY_BUILTIN_RENAMES, head="0123")
+    calls = _upgrade_calls(m.source)
+    for table, trigger in IMMUTABLE_TABLE_TRIGGERS.items():
+        disable = calls.index(f"ALTER TABLE {table} DISABLE TRIGGER {trigger}")
+        enable = calls.index(f"ALTER TABLE {table} ENABLE TRIGGER {trigger}")
+        update = next(i for i, sql in enumerate(calls) if f"UPDATE {table} SET" in sql)
+        assert disable < update < enable
+    for surface in LEGACY_BUILTIN_RENAMES.surfaces:
+        block = _surface_block(m.source, surface.table)
+        if surface.table in HIGH_CARDINALITY_TABLES:
+            assert "LOOP" in block and "LIMIT" in block and "ctid" in block
+    # The epoch stamped is the single revision's own number.
+    assert m.source.count(f", {EPOCH_COLUMN} = {m.revision}") == len(
+        LEGACY_BUILTIN_RENAMES.surfaces
+    )
+
+
+@pytest.mark.parametrize("retirement", REGISTRY)
+def test_single_downgrade_is_a_noop(retirement: Retirement) -> None:
+    module = _module(_single(retirement).source)
+    (downgrade,) = [
+        n for n in module.body if isinstance(n, ast.FunctionDef) and n.name == "downgrade"
+    ]
+    assert all(isinstance(stmt, (ast.Pass, ast.Expr)) for stmt in downgrade.body)
+
+
+def test_single_keeps_ladder_single_headed(tmp_path: Path) -> None:
+    dst = tmp_path / "migrations"
+    (dst / "versions").mkdir(parents=True)
+    for fname in ("env.py", "script.py.mako"):
+        (dst / fname).write_text((_MIGRATIONS_DIR / fname).read_text())
+    for f in (_MIGRATIONS_DIR / "versions").glob("*.py"):
+        (dst / "versions" / f.name).write_text(f.read_text())
+    head = current_head(str(dst))
+    m = generate_single(LEGACY_BUILTIN_RENAMES, head, descriptor_name="LEGACY_BUILTIN_RENAMES")
+    (dst / "versions" / m.filename).write_text(m.source)
+    assert current_head(str(dst)) == m.revision
