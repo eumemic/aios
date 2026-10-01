@@ -124,14 +124,17 @@ RETIRED_GOAL_OUTCOME_BUILTINS = Retirement(
 
 #: Obligation/call-surface vocabulary unification (#1516). The task-named
 #: outgoing view and cancel verb are renamed to the source-agnostic call-edge
-#: terminology. Persisted surfaces are migrated through the retirement lifecycle.
+#: terminology. Persisted surfaces are migrated through the retirement lifecycle:
+#: 0183 expand, 0184 backfill, 0185 contract (in-transaction residue abort-guard).
+#: ``contract_rev`` names 0185 so the boot gate enforces it and the read-tolerance
+#: validator stops accepting ``stop_task``/``list_tasks`` (same as 0122 / 0155).
 TASK_TO_CALL_BUILTIN_RENAMES = Retirement(
     domain=TOOL_SURFACE_DOMAIN,
     action="rename",
     mappings=(("stop_task", "cancel_call"), ("list_tasks", "list_calls")),
     surfaces=TOOL_SURFACES,
     introduced_rev="0183",
-    contract_rev=None,
+    contract_rev="0185",
     sla_days=30,
 )
 
@@ -164,7 +167,17 @@ def rename_map(
         for token, successor in retirement.token_map().items():
             if successor is not None:
                 out[token] = successor
-    return out
+    # Resolve chained renames to the FINAL successor (``cancel_run`` → ``stop_task`` →
+    # ``cancel_call``): an upcast must never land on an intermediate name that a later
+    # retirement has itself contracted, or the restored row would fail validation.
+    resolved: dict[str, str] = {}
+    for token, successor in out.items():
+        seen = {token}
+        while successor in out and successor not in seen:
+            seen.add(successor)
+            successor = out[successor]
+        resolved[token] = successor
+    return resolved
 
 
 def tolerated_rename_map(

@@ -208,7 +208,7 @@ async def test_list_open_tasks_only_open_and_own(
 
 
 async def test_list_calls_handler_shape(env: tuple[asyncpg.Pool[Any], str]) -> None:
-    """The list_calls tool returns the open roster as a JSON ``{tasks: [...]}`` envelope."""
+    """The list_calls tool returns the open roster as a JSON ``{calls: [...]}`` envelope."""
     pool, _account_id = env
     caller = await _seed_session(pool, "lt-caller")
     servicer = await _seed_session(pool, "lt-srv")
@@ -221,9 +221,9 @@ async def test_list_calls_handler_shape(env: tuple[asyncpg.Pool[Any], str]) -> N
     )
 
     out = await task_tools.list_calls_handler(caller, {})
-    assert list(out) == ["tasks"]
-    assert len(out["tasks"]) == 1
-    entry = out["tasks"][0]
+    assert list(out) == ["calls"]
+    assert len(out["calls"]) == 1
+    entry = out["calls"][0]
     assert entry["tool_call_id"] == "tc_a"
     assert entry["kind"] == "session"
     assert entry["target"] == servicer
@@ -303,7 +303,7 @@ async def test_cancel_call_foreign_tool_call_id_errors(
     out = await task_tools.cancel_call_handler(caller, {"tool_call_id": "tc_otherown"})
     assert isinstance(out, ToolResult)
     assert out.is_error is True
-    assert isinstance(out.content, str) and "no open task" in out.content
+    assert isinstance(out.content, str) and "no open call" in out.content
 
     # No cancel-marker leaked onto the foreign servicer.
     async with pool.acquire() as conn:

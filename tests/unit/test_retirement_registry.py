@@ -28,7 +28,7 @@ EXPECTED_TOOL_SURFACES = {
 }
 
 
-def test_registry_seeds_two_descriptors() -> None:
+def test_registry_seeds_three_descriptors() -> None:
     assert len(reg.REGISTRY) == 3
     assert reg.LEGACY_BUILTIN_RENAMES in reg.REGISTRY
     assert reg.RETIRED_GOAL_OUTCOME_BUILTINS in reg.REGISTRY
@@ -160,8 +160,29 @@ def test_registry_is_importable_as_single_source() -> None:
     assert all(isinstance(r, Retirement) for r in reg.REGISTRY)
 
 
-def test_task_to_call_retirement_descriptor() -> None:
+def test_task_to_call_descriptor_is_contracted_at_0185() -> None:
+    """#1516: the task→call rename ships its own contract migration (0185); the
+    descriptor must name it so the boot gate enforces it and the read shim
+    stops tolerating ``stop_task``/``list_tasks`` (same as 0122 / 0155)."""
     r = reg.TASK_TO_CALL_BUILTIN_RENAMES
     assert r.action == "rename"
     assert r.token_map() == {"stop_task": "cancel_call", "list_tasks": "list_calls"}
-    assert r.contract_rev is None
+    assert r.introduced_rev == "0183"
+    assert r.contract_rev == "0185"
+
+
+def test_task_to_call_legacy_names_are_not_tolerated_after_contract() -> None:
+    """With the contract declared, the live tolerated map no longer remaps the legacy names."""
+    tolerated = reg.tolerated_rename_map()
+    assert "stop_task" not in tolerated
+    assert "list_tasks" not in tolerated
+
+
+def test_rename_map_resolves_chained_renames_to_the_final_successor() -> None:
+    """``cancel_run``→``stop_task``→``cancel_call``: a restore of a pre-0155 snapshot must
+    upcast straight to the CURRENT name, not to the now-retired intermediate ``stop_task``."""
+    m = reg.rename_map()
+    assert m["cancel_run"] == "cancel_call"
+    assert m["stop_task"] == "cancel_call"
+    assert m["list_tasks"] == "list_calls"
+    assert set(m.values()).isdisjoint(m)  # no successor is itself a retired token
