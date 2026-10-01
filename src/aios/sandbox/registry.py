@@ -3157,14 +3157,15 @@ class SandboxRegistry:
                 # never clear/convert that durable pointer as a side effect.
                 sid = v.session_id
                 state = states.get(sid) if sid is not None else None
-                durable_cache = (
-                    isinstance(self._store, TarballStore)
+                store = self._store
+                durable_ref = state.snapshot_ref if state is not None else None
+                if not (
+                    isinstance(store, TarballStore)
                     and v.is_canonical
-                    and state is not None
-                    and state.snapshot_ref is not None
-                    and not self._store.is_legacy_ref(state.snapshot_ref)
-                )
-                if not durable_cache or sid is None:
+                    and sid is not None
+                    and durable_ref is not None
+                    and not store.is_legacy_ref(durable_ref)
+                ):
                     retained.append(v)
                     continue
                 async with self._lock_for(sid):
@@ -3175,13 +3176,10 @@ class SandboxRegistry:
                     durable_exists = False
                     if (
                         fresh is not None
-                        and fresh.snapshot_ref is not None
-                        and state is not None
-                        and fresh.snapshot_ref == state.snapshot_ref
+                        and fresh.snapshot_ref == durable_ref
+                        and not store.is_legacy_ref(durable_ref)
                     ):
-                        is_legacy = getattr(self._store, "is_legacy_ref", None)
-                        if not (is_legacy and is_legacy(fresh.snapshot_ref)):
-                            durable_exists = await self._store.exists(fresh.snapshot_ref)
+                        durable_exists = await store.exists(durable_ref)
                     if not durable_exists or not await self._backend.remove_image(v.removal_ref):
                         retained.append(v)
                 continue
