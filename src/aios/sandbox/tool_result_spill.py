@@ -148,7 +148,8 @@ def _spill_stub(content: str, sandbox_path: str) -> str:
         f"[Tool result truncated: the full output ({n_chars:,} characters, "
         f"{n_bytes:,} bytes, {n_lines:,} {line_word}) exceeded the inline result "
         f"limit and was saved to {sandbox_path}. Use the read tool to view it "
-        f"(or grep it). Preview of the first {len(preview):,} characters:]"
+        f"(results are paged to fit; continue from the next_offset it returns) "
+        f"or grep it. Preview of the first {len(preview):,} characters:]"
     )
     sep = "" if preview.endswith("\n") else "\n"
     footer = f"[End of preview; {n_chars - len(preview):,} more characters in {sandbox_path}.]"

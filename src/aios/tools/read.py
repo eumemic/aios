@@ -13,6 +13,7 @@ an explanatory ``ToolResult``.
 from __future__ import annotations
 
 import base64
+import json
 import os
 import shlex
 from dataclasses import dataclass
@@ -61,6 +62,8 @@ READ_DESCRIPTION = (
     "format. Use `offset` and `limit` to page through large files — "
     "`offset` is a 1-indexed line number to start from (default 1), "
     "`limit` is the max number of lines to return (default 2000). "
+    "Output that would exceed the inline result limit is cut at a line "
+    "boundary and marked `truncated` with a `next_offset` to continue from. "
     "Paths may be absolute or relative to /workspace. Prefer this "
     "over `cat`/`head`/`tail` via the bash tool when you want "
     "structured line-numbered output; use bash for one-off inspection. "
@@ -182,12 +185,89 @@ async def read_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, 
             detail={"path": path},
         )
 
+    budget = settings.tool_result_max_chars
     if target is None:
-        return {"path": path, "content": result.stdout}
+        return _fit_text_result(path, result.stdout, offset=offset, budget=budget)
 
     sha_line, _, content = result.stdout.partition("\n")
     runtime.set_read_sha(session_id, target.store_id, target.store_path, sha_line.strip())
-    return {"path": path, "content": content}
+    return _fit_text_result(path, content, offset=offset, budget=budget)
+
+
+def _json_len(value: Any) -> int:
+    # Same serialization ``_shape_tool_result`` applies to a dict result, so the
+    # measured size is exactly what the append-boundary cap compares.
+    return len(json.dumps(value, ensure_ascii=False))
+
+
+def _fit_text_result(path: str, content: str, *, offset: int, budget: int) -> dict[str, Any]:
+    """Bound a text read so its serialized result fits ``budget`` chars.
+
+    The append boundary spills any tool result longer than
+    ``tool_result_max_chars`` to a file the model is told to ``read``.  If
+    ``read`` itself could exceed that bound, following a spill stub would
+    spill again — into another file, growing every hop (``cat -n`` prefixes
+    and JSON escaping make the read larger than the file it reads).  So read
+    pages instead: it returns whole numbered lines up to the budget and names
+    the ``offset`` to continue from.  A single line too long to fit on its own
+    is hard-cut, with a pointer to bash for the remainder of that line.
+    """
+    full: dict[str, Any] = {"path": path, "content": content}
+    if _json_len(full) <= budget:
+        return full
+
+    lines = content.splitlines(keepends=True)
+
+    def shaped(kept: str, next_offset: int, line_cut: bool) -> dict[str, Any]:
+        if line_cut:
+            note = (
+                f"Output truncated to fit the inline result limit: line {next_offset - 1} "
+                f"is too long to show whole and was cut. Continue with offset={next_offset}; "
+                f"view the rest of line {next_offset - 1} with bash "
+                f"(e.g. sed -n '{next_offset - 1}p' FILE | cut -c START-END) or grep."
+            )
+        else:
+            note = (
+                f"Output truncated to fit the inline result limit after line "
+                f"{next_offset - 1}. Continue with offset={next_offset} (or grep the file)."
+            )
+        return {
+            "path": path,
+            "content": kept,
+            "truncated": True,
+            "next_offset": next_offset,
+            "note": note,
+        }
+
+    # Upper bound on the non-content overhead (worst-case note / numbers).
+    overhead = _json_len(shaped("", offset + len(lines) + 1, True))
+    room = budget - overhead
+    kept_lines: list[str] = []
+    used = 0
+    for line in lines:
+        cost = _json_len(line) - 2
+        if used + cost > room:
+            break
+        kept_lines.append(line)
+        used += cost
+
+    if kept_lines:
+        out = shaped("".join(kept_lines), offset + len(kept_lines), False)
+    else:
+        # The first line alone exceeds the budget: hard-cut it.
+        first = lines[0] if lines else ""
+        lo, hi = 0, len(first)
+        while lo < hi:  # longest prefix whose escaped form fits ``room``
+            mid = (lo + hi + 1) // 2
+            if _json_len(first[:mid]) - 2 <= room:
+                lo = mid
+            else:
+                hi = mid - 1
+        out = shaped(first[:lo], offset + 1, True)
+    # Defensive: never hand back something the append boundary would re-spill.
+    while _json_len(out) > budget and out["content"]:
+        out["content"] = out["content"][: max(0, len(out["content"]) - 256)]
+    return out
 
 
 async def _detect_image_mime(
