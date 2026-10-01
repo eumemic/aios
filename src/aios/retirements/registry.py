@@ -122,12 +122,32 @@ RETIRED_GOAL_OUTCOME_BUILTINS = Retirement(
 )
 
 
+#: Obligation/call-surface vocabulary unification (#1516). The task-named
+#: outgoing view and cancel verb are renamed to the source-agnostic call-edge
+#: terminology. Persisted surfaces are migrated by ONE retirement revision, 0183:
+#: the backfill, then the contract residue abort-guard, in the same transaction
+#: (the expand step is a data no-op and is not emitted). ``contract_rev`` names
+#: 0183 so the boot gate enforces it and the read-tolerance validator stops
+#: accepting ``stop_task``/``list_tasks`` (same as 0122, which is also
+#: introduced and contracted at one rev).
+TASK_TO_CALL_BUILTIN_RENAMES = Retirement(
+    domain=TOOL_SURFACE_DOMAIN,
+    action="rename",
+    mappings=(("stop_task", "cancel_call"), ("list_tasks", "list_calls")),
+    surfaces=TOOL_SURFACES,
+    introduced_rev="0183",
+    contract_rev="0183",
+    sla_days=30,
+)
+
+
 #: The registry: the single list of declared retirements. Append new descriptors
 #: here; downstream tooling (validator / boot-gate / migration generator)
 #: consults this and nothing else.
 REGISTRY: tuple[Retirement, ...] = (
     LEGACY_BUILTIN_RENAMES,
     RETIRED_GOAL_OUTCOME_BUILTINS,
+    TASK_TO_CALL_BUILTIN_RENAMES,
 )
 
 
@@ -149,7 +169,17 @@ def rename_map(
         for token, successor in retirement.token_map().items():
             if successor is not None:
                 out[token] = successor
-    return out
+    # Resolve chained renames to the FINAL successor (``cancel_run`` → ``stop_task`` →
+    # ``cancel_call``): an upcast must never land on an intermediate name that a later
+    # retirement has itself contracted, or the restored row would fail validation.
+    resolved: dict[str, str] = {}
+    for token, successor in out.items():
+        seen = {token}
+        while successor in out and successor not in seen:
+            seen.add(successor)
+            successor = out[successor]
+        resolved[token] = successor
+    return resolved
 
 
 def tolerated_rename_map(

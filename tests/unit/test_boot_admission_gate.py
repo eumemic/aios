@@ -281,3 +281,20 @@ async def test_nullable_surface_guards_is_not_null(
     conn = _FakeConn(version=_AHEAD_REV)
     await assert_retirements_admissible(_FakePool(conn))
     assert any("IS NOT NULL" in sql for sql, _token in conn.count_queries)
+
+
+async def test_live_registry_enforces_task_to_call_contract() -> None:
+    """#1516: with the LIVE registry, a DB behind 0183 is refused on the task→call contract."""
+    pool = _FakePool(_FakeConn(version="0182"))
+    with pytest.raises(DatabaseBehindContract, match="'0183'"):
+        await assert_retirements_admissible(pool)
+
+
+async def test_live_registry_scans_task_to_call_residue() -> None:
+    """#1516: at/after 0183 the gate scans every surface for stop_task/list_tasks residue."""
+    conn = _FakeConn(version="0183")
+    await assert_retirements_admissible(_FakePool(conn))
+    scanned = {(sql.split()[3], tok) for sql, tok in conn.count_queries}
+    for table in ("agents", "sessions", "connectors", "wf_runs"):
+        assert (table, "stop_task") in scanned
+        assert (table, "list_tasks") in scanned

@@ -127,7 +127,7 @@ def test_telemetry_is_keyed_per_token(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         agents_mod,
         "tolerated_rename_map",
-        lambda: {"invoke": "call_session", "cancel_run": "stop_task"},
+        lambda: {"invoke": "call_session", "cancel_run": "cancel_call"},
     )
     ToolSpec.model_validate({"type": "invoke"})
     ToolSpec.model_validate({"type": "cancel_run"})
@@ -177,3 +177,10 @@ def test_telemetry_not_consulted_as_gate() -> None:
     telemetry.record_tolerance_hit("call_workflow")  # nonsense corroboration for a canonical name
     # call_workflow is canonical; it is never remapped regardless of any recorded hits.
     assert ToolSpec.model_validate({"type": "call_workflow"}).type == "call_workflow"
+
+
+@pytest.mark.parametrize("legacy", ["stop_task", "list_tasks"])
+def test_live_registry_rejects_contracted_task_names(legacy: str) -> None:
+    """#1516 contract (0183): the real registry no longer tolerates the task-named builtins."""
+    with pytest.raises(ValidationError):
+        ToolSpec.model_validate({"type": legacy})
