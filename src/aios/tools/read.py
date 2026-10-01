@@ -15,6 +15,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import shlex
 from dataclasses import dataclass
 from typing import Any
@@ -216,7 +217,10 @@ def _fit_text_result(path: str, content: str, *, offset: int, budget: int) -> di
     if _json_len(full) <= budget:
         return full
 
-    lines = content.splitlines(keepends=True)
+    # Split on ``\n`` only: ``cat -n``/``sed`` count lines by ``\n``, whereas
+    # ``str.splitlines`` also breaks on ``\r``, ``\x0b``, ``\x0c``, ``\x1c``-``\x1e``,
+    # ``\x85``, ``\u2028``/``\u2029`` and would make ``next_offset`` skip lines.
+    lines = [line for line in re.split(r"(?<=\n)", content) if line]
 
     def shaped(kept: str, next_offset: int, line_cut: bool) -> dict[str, Any]:
         if line_cut:

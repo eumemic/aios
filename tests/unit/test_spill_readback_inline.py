@@ -94,6 +94,7 @@ async def _dispatch_read(call_id: str, args: dict[str, Any]) -> tuple[str, Any]:
         shaped["content"],
         max_chars=get_settings().tool_result_max_chars,
     )
+    assert isinstance(capped.content, str)
     return capped.content, capped.attachment
 
 
