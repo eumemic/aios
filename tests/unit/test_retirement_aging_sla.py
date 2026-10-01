@@ -14,7 +14,11 @@ on is computed here, deterministically and injectably.
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 
@@ -158,7 +162,7 @@ def test_real_registry_is_scannable_with_resolved_dates() -> None:
 def test_cli_that_cannot_resolve_dates_is_blind_not_a_verdict(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Unresolvable landing dates (e.g. shallow clone) exit 2, never 0 or 1.
+    """Unresolvable landing dates exit 2, never 0 or 1.
 
     An uncaught exception exits 1 — the SAME code as "breach" — so the caller
     could not tell "aged past SLA" from "could not measure age at all".
@@ -175,3 +179,59 @@ def test_cli_that_cannot_resolve_dates_is_blind_not_a_verdict(
     assert captured.out == ""
     assert "BLIND" in captured.err
     assert "no git history" in captured.err
+
+
+def _shallow_clone(tmp_path: Path) -> Path:
+    from aios.retirements import aging
+
+    root = Path(aging.__file__).resolve().parents[3]
+    shallow = tmp_path / "shallow"
+    subprocess.run(
+        ["git", "clone", "-q", "--depth", "1", f"file://{root}", str(shallow)],
+        check=True,
+        capture_output=True,
+    )
+    return shallow
+
+
+def test_shallow_clone_landing_dates_are_refused(tmp_path: Path) -> None:
+    """A truncated history must never yield a landing date (#2317).
+
+    ``git log`` in a depth-1 clone returns the graft commit, dating every
+    migration "today" — so an open descriptor months past its SLA would look
+    compliant. Date resolution must refuse instead.
+    """
+    import dataclasses
+
+    from aios.retirements import aging
+    from aios.retirements.registry import REGISTRY
+
+    shallow = _shallow_clone(tmp_path)
+    reg = (dataclasses.replace(REGISTRY[0], contract_rev=None),)
+    with pytest.raises(RuntimeError, match="truncated"):
+        aging.resolve_rev_dates(reg, migrations_dir=shallow / "migrations" / "versions")
+
+
+def test_cli_in_shallow_clone_is_blind_not_compliant(tmp_path: Path) -> None:
+    """``python -m aios.retirements.aging`` in a real depth-1 clone exits BLIND."""
+    import shutil
+
+    from aios.retirements import aging
+
+    shallow = _shallow_clone(tmp_path)
+    # Run the code under test (the working tree), not whatever HEAD the clone got.
+    shutil.copytree(
+        Path(aging.__file__).resolve().parents[1], shallow / "src" / "aios", dirs_exist_ok=True
+    )
+    env = {**os.environ, "PYTHONPATH": str(shallow / "src")}
+    proc = subprocess.run(
+        [sys.executable, "-m", "aios.retirements.aging"],
+        cwd=shallow,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 2, (proc.returncode, proc.stdout, proc.stderr)
+    assert proc.stdout == ""
+    assert "BLIND" in proc.stderr
+    assert "truncated" in proc.stderr
