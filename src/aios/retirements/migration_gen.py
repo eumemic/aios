@@ -67,6 +67,17 @@ HIGH_CARDINALITY_TABLES: frozenset[str] = frozenset({"wf_runs", "agent_versions"
 #: count sane on a big table.
 DEFAULT_BATCH_SIZE = 5000
 
+#: Surfaces whose tables carry an insert-only ``BEFORE UPDATE ... RAISE`` guard
+#: trigger (table → trigger name). A backfill ``UPDATE`` on such a table aborts
+#: the whole migration unless the guard is suspended around it, so the generator
+#: brackets the statement with ``DISABLE``/``ENABLE TRIGGER`` — the same
+#: migration-owned exemption 0154/0155 take for ``workflow_versions`` (0112).
+#: Both ALTERs run in the migration's transaction, so a failed rewrite rolls the
+#: DISABLE back too and the guard can never be left switched off.
+IMMUTABLE_TABLE_TRIGGERS: dict[str, str] = {
+    "workflow_versions": "workflow_versions_no_update",
+}
+
 #: The epoch column the backfill stamps (additive migration #1576).
 EPOCH_COLUMN = "tools_vocab_epoch"
 
@@ -277,6 +288,22 @@ def _backfill_statement(surface: Surface, retirement: Retirement, fn: str, revis
     exists = _exists_predicate(surface, retirement)
     null_guard = f"{surface.jsonb_col} IS NOT NULL AND " if surface.nullable else ""
     set_clause = f"{surface.jsonb_col} = {fn}({surface.jsonb_col}), {EPOCH_COLUMN} = {revision}"
+
+    statement = _backfill_update(surface, set_clause, null_guard, exists)
+    trigger = IMMUTABLE_TABLE_TRIGGERS.get(surface.table)
+    if trigger is None:
+        return statement
+    return f"""    # {surface.table} is insert-only at runtime (trigger {trigger}); suspend
+    # the guard for this migration-owned canonicalisation, as 0154/0155 do.
+    op.execute("ALTER TABLE {surface.table} DISABLE TRIGGER {trigger}")
+
+{statement}
+
+    op.execute("ALTER TABLE {surface.table} ENABLE TRIGGER {trigger}")"""
+
+
+def _backfill_update(surface: Surface, set_clause: str, null_guard: str, exists: str) -> str:
+    """The surface's rewrite statement(s), without any trigger bracketing."""
 
     if surface.table in HIGH_CARDINALITY_TABLES:
         # Batched: rewrite at most DEFAULT_BATCH_SIZE rows per statement, looping

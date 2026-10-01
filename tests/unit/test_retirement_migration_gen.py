@@ -30,6 +30,7 @@ from aios.retirements import Retirement
 from aios.retirements.migration_gen import (
     EPOCH_COLUMN,
     HIGH_CARDINALITY_TABLES,
+    IMMUTABLE_TABLE_TRIGGERS,
     GeneratedChain,
     current_head,
     generate,
@@ -317,3 +318,32 @@ def _surface_block(src: str, table: str) -> str:
     after = src.find("op.execute(", pos)
     end = after if after != -1 else len(src)
     return src[start:end]
+
+
+def test_backfill_suspends_immutable_table_guard_around_its_update() -> None:
+    """``workflow_versions`` rejects every UPDATE (0112 trigger); the backfill must
+    disable the guard before rewriting it and re-enable it afterwards."""
+
+    src = _chain(LEGACY_BUILTIN_RENAMES).backfill.source
+    for table, trigger in IMMUTABLE_TABLE_TRIGGERS.items():
+        disable = src.index(f"ALTER TABLE {table} DISABLE TRIGGER {trigger}")
+        update = src.index(f"UPDATE {table} SET")
+        enable = src.index(f"ALTER TABLE {table} ENABLE TRIGGER {trigger}")
+        assert disable < update < enable
+    # Mutable surfaces are not bracketed.
+    assert src.count("DISABLE TRIGGER") == len(
+        [s for s in LEGACY_BUILTIN_RENAMES.surfaces if s.table in IMMUTABLE_TABLE_TRIGGERS]
+    )
+
+
+def test_committed_task_to_call_migrations_match_generator() -> None:
+    """The on-disk 0183-0185 chain is exactly what the generator emits today."""
+
+    from aios.retirements.registry import TASK_TO_CALL_BUILTIN_RENAMES
+
+    chain = generate(
+        TASK_TO_CALL_BUILTIN_RENAMES, "0182", descriptor_name="TASK_TO_CALL_BUILTIN_RENAMES"
+    )
+    for migration in chain:
+        on_disk = (_MIGRATIONS_DIR / "versions" / migration.filename).read_text()
+        assert on_disk == migration.source, f"{migration.filename} drifted from the generator"

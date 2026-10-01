@@ -89,11 +89,17 @@ def upgrade() -> None:
         WHERE EXISTS(SELECT 1 FROM jsonb_array_elements(tools) e WHERE e->>'type' IN ('stop_task', 'list_tasks'))
     """)
 
+    # workflow_versions is insert-only at runtime (trigger workflow_versions_no_update); suspend
+    # the guard for this migration-owned canonicalisation, as 0154/0155 do.
+    op.execute("ALTER TABLE workflow_versions DISABLE TRIGGER workflow_versions_no_update")
+
     # workflow_versions.tools: single EXISTS-guarded set-based UPDATE.
     op.execute("""
         UPDATE workflow_versions SET tools = _aios_retire_tool_surface_rename_0184(tools), tools_vocab_epoch = 0184
         WHERE EXISTS(SELECT 1 FROM jsonb_array_elements(tools) e WHERE e->>'type' IN ('stop_task', 'list_tasks'))
     """)
+
+    op.execute("ALTER TABLE workflow_versions ENABLE TRIGGER workflow_versions_no_update")
 
     # wf_runs.tools: high-cardinality → batched to bound
     # lock-hold (the 0066 lesson). Loop until no residue remains.
