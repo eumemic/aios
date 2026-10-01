@@ -160,44 +160,19 @@ log = get_logger(__name__)
 # validator is deliberate: it travels to every `ToolSpec.model_validate` site automatically (the
 # eight read sites), so no loader choke-point is needed and the per-site property is preserved.
 
-# Read-tolerance for RETIRED builtins that have NO canonical successor (#1562). Unlike a
-# rename (mapped above), a retired builtin's persisted ``tools`` entry is DROPPED on read —
-# there is no model-listed tool to remap it to. #1525 (unify-obligations #2) removed
-# ``complete_goal``/``fail_goal`` from ``BuiltinToolType`` + the registry but shipped neither a
-# read shim nor a data migration, so any long-lived agent whose ``agents.tools`` JSONB still
-# listed them failed ``ToolSpec.model_validate`` on every wake — a pre-context-build throw that
-# wedged the agent into an infinite reschedule (only the live kedalion-ultron agent hit it).
-# ``return``/``error`` are general step verbs, not model-listed builtins, so there is no
-# successor — REMOVE, do not remap. The data migration (0122) rewrites persisted rows; this set
-# + :func:`load_tool_specs` cover the post-deploy/pre-migrate window and any future respawn from
-# an unmigrated row. (Teardown can drop both once 0122 has run everywhere.)
-_RETIRED_BUILTINS: frozenset[str] = frozenset({"complete_goal", "fail_goal"})
-
 
 def load_tool_specs(raw: Iterable[Any]) -> list[ToolSpec]:
-    """Validate a persisted ``tools`` JSONB array into ``ToolSpec``\\ s, with read-tolerance.
+    """Validate a persisted ``tools`` JSONB array into ``ToolSpec``\\ s.
 
-    The DB read path persists historical ``tools`` arrays; an entry whose ``type`` is a
-    :data:`_RETIRED_BUILTINS` member (a builtin removed from ``BuiltinToolType`` + the registry
-    with no canonical successor — #1562's ``complete_goal``/``fail_goal``) is **dropped**, not
-    remapped: there is no model-listed tool to validate it against, and ``ToolSpec.model_validate``
-    would otherwise raise on the now-illegal Literal, poisoning the whole row's hydration.
-
-    This is the list-level counterpart to the per-entry ``mode="before"`` *rename* shim
-    (:meth:`ToolSpec._map_legacy_builtin_names`, now registry-driven via
-    :func:`aios.retirements.registry.tolerated_rename_map`): a rename can be done in-place inside a
-    single ``ToolSpec``, but dropping an element must happen where the array is iterated. Order is
-    preserved; a row
-    that listed only retired builtins hydrates to ``[]``. Use this anywhere a persisted ``tools``
-    array is loaded so the tolerance is uniform across agents / agent_versions / workflows /
-    workflow_versions / wf_runs / sessions.
+    The single list-level loader every DB read path uses (agents / agent_versions / workflows /
+    workflow_versions / wf_runs / sessions / sweep). It carries NO list-level tolerance: the
+    retired ``complete_goal``/``fail_goal`` builtins (#1525) were scrubbed from every persisted
+    surface by migration 0122, and the fail-closed boot-admission gate (#1575) re-proves zero
+    residue at every boot, so their former drop-shim was removed (#1569). A persisted entry
+    carrying a type outside the current vocabulary RAISES — migrate-and-clean-break, no silent
+    fallback. Order is preserved.
     """
-    out: list[ToolSpec] = []
-    for entry in raw:
-        if isinstance(entry, dict) and entry.get("type") in _RETIRED_BUILTINS:
-            continue
-        out.append(ToolSpec.model_validate(entry))
-    return out
+    return [ToolSpec.model_validate(entry) for entry in raw]
 
 
 # Header names the MCP streamable-http transport authors on every request

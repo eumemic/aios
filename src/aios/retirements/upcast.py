@@ -10,8 +10,8 @@ stale and waiting for the boot gate to notice.
 Canonicalization is registry-driven: renames come from
 :func:`aios.retirements.registry.rename_map` (including contracted descriptors,
 so old snapshots remain importable) and drops come from
-:func:`aios.retirements.registry.dropped_tokens` (the same set
-``load_tool_specs`` drops). There is no parallel rename/drop table here — if a
+:func:`aios.retirements.registry.dropped_tokens` (retired
+tokens with no successor; the read path no longer tolerates them, #1569). There is no parallel rename/drop table here — if a
 token is retired in the registry it is upcast here, by construction.
 
 **Honest limit (carry from the issue):** this hook only helps a restore/import
@@ -51,8 +51,8 @@ def canonicalize_tool_blob(
 ) -> list[Any]:
     """Apply registry-declared renames + drops to a ``tools`` JSONB array.
 
-    Mirrors the read-path tolerance so the persisted form a restore produces is
-    identical to what the read shims would have yielded:
+    Rewrites a (possibly pre-contract) snapshot into the current vocabulary so
+    the persisted form a restore produces validates on the read path:
 
     * a ``rename`` token's ``type`` is rewritten to its canonical successor, then
       builtin entries are de-duplicated first-occurrence-wins (a rename can fold
