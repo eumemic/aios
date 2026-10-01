@@ -317,7 +317,7 @@ async def get_workflow_script_contract_handler(
     the contract into a single unreadable line. That would be especially perverse
     here: this document exists to be READ as formatted prose, with a code block.
     It also keeps the contract spillable as a real multi-line file if it ever
-    outgrows ``tool_result_max_chars`` (#2292 lowers that to 16k).
+    outgrows ``tool_result_max_chars`` (16k by default, #2292).
     """
     tool_input(_NoArgs, arguments)
     return ToolResult(content=WORKFLOW_SCRIPT_CONTRACT)

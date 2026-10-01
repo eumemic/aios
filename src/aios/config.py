@@ -555,12 +555,13 @@ class Settings(BaseSettings):
         "authenticates whatever answers.",
     )
     tool_result_max_chars: int = Field(
-        default=200_000,
+        default=16_000,
         ge=1_000,
         description="Maximum characters of a tool result stored inline in the "
         "event log. A larger result is spilled to a file under the session's "
-        "attachments mount and replaced inline with a stub pointing the model "
-        "to read it, so a single oversized result can't exceed the context window.",
+        "attachments mount and replaced inline with a stub previewing its head "
+        "and pointing the model to read/grep it, so large results are queried "
+        "on demand instead of flooding the context window (~4k tokens default).",
     )
     upload_max_size_bytes: int = Field(
         default=50 * 1024 * 1024,

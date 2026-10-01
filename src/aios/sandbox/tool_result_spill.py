@@ -86,8 +86,9 @@ async def cap_tool_result_content(
     session_id: str, tool_call_id: str, content: str, *, max_chars: int
 ) -> CappedToolResult:
     """Return ``content`` unchanged if within ``max_chars``; otherwise spill the
-    full body to ``<attachments>/tool_results/<tool_call_id>.txt`` and return a
-    stub string referencing the in-sandbox path + the ``read`` tool, paired
+    full body (verbatim) to ``<attachments>/tool_results/<tool_call_id>.txt``
+    and return a stub string previewing the leading content and naming the
+    size, line count, in-sandbox path + the ``read`` tool (#2292), paired
     with the ``metadata.attachments`` record the caller must persist so the
     spill file is protected from the orphan GC (#1093)."""
     if len(content) <= max_chars:
@@ -96,11 +97,7 @@ async def cap_tool_result_content(
     sandbox_path = f"/mnt/attachments/{_SPILL_SUBDIR}/{fname}"
     size = len(content)
     await asyncio.to_thread(_write_spill, session_id, fname, content)
-    stub = (
-        f"[Tool result truncated: the full output ({size:,} characters) "
-        f"exceeded the inline result limit and was saved to {sandbox_path}. "
-        f"Use the read tool to view it.]"
-    )
+    stub = _spill_stub(content, sandbox_path)
     attachment = {
         "filename": fname,
         "content_type": "text/plain",
@@ -111,6 +108,52 @@ async def cap_tool_result_content(
         "source": "tool_result_spill",
     }
     return CappedToolResult(content=stub, attachment=attachment)
+
+
+# Size of the content preview embedded in a spill stub (#2292).  Enough of the
+# head of the result for the model to aim its first ``grep``/``read`` at the
+# spill file without a blind round-trip, while keeping the stub itself small.
+_PREVIEW_CHARS = 1_500
+
+
+def _preview(content: str) -> str:
+    """Leading slice of ``content`` of at most ``_PREVIEW_CHARS`` chars, cut at
+    the last line boundary in the window when one falls in its back half
+    (otherwise a hard cut — e.g. a single very long line)."""
+    window = content[:_PREVIEW_CHARS]
+    cut = window.rfind("\n")
+    if cut >= _PREVIEW_CHARS // 2:
+        return window[: cut + 1]
+    return window
+
+
+def _count_lines(content: str) -> int:
+    """Line count with a trailing unterminated line counted (``wc -l`` + 1 when
+    the content doesn't end in a newline)."""
+    if not content:
+        return 0
+    return content.count("\n") + (0 if content.endswith("\n") else 1)
+
+
+def _spill_stub(content: str, sandbox_path: str) -> str:
+    """Inline replacement for a spilled ``str`` result: header with total
+    size (chars + UTF-8 bytes) / line count / spill path / read-tool pointer,
+    followed by a preview of the leading content (#2292)."""
+    n_chars = len(content)
+    n_bytes = len(content.encode("utf-8"))
+    n_lines = _count_lines(content)
+    preview = _preview(content)
+    line_word = "line" if n_lines == 1 else "lines"
+    header = (
+        f"[Tool result truncated: the full output ({n_chars:,} characters, "
+        f"{n_bytes:,} bytes, {n_lines:,} {line_word}) exceeded the inline result "
+        f"limit and was saved to {sandbox_path}. Use the read tool to view it "
+        f"(results are paged to fit; continue from the next_offset it returns) "
+        f"or grep it. Preview of the first {len(preview):,} characters:]"
+    )
+    sep = "" if preview.endswith("\n") else "\n"
+    footer = f"[End of preview; {n_chars - len(preview):,} more characters in {sandbox_path}.]"
+    return f"{header}\n{preview}{sep}{footer}"
 
 
 # Bound on the number of content parts in one parts-list tool result.  Well
@@ -217,5 +260,6 @@ def _write_spill(session_id: str, fname: str, content: str) -> None:
     ensure_owned_dir(spill_dir)
     target = spill_dir / fname
     tmp = target.with_name(target.name + ".part")
-    tmp.write_text(content, encoding="utf-8")
+    # Verbatim: write the exact UTF-8 bytes (no newline translation, #2292).
+    tmp.write_bytes(content.encode("utf-8"))
     tmp.replace(target)  # atomic rename

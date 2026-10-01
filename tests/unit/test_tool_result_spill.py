@@ -127,6 +127,105 @@ async def test_no_part_temp_left_behind(tmp_path: Path, monkeypatch: pytest.Monk
     assert names == [f"{_TOOL_CALL_ID}.txt"]
 
 
+def _multiline_content(target_chars: int) -> str:
+    lines: list[str] = []
+    total = 0
+    i = 0
+    while total < target_chars:
+        line = f"row {i:05d} | some payload text for row {i}"
+        lines.append(line)
+        total += len(line) + 1
+        i += 1
+    return "\n".join(lines) + "\n"
+
+
+async def test_default_threshold_spills_20kb_with_preview_stub(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2292 acceptance 1+3: under the default threshold a 20KB result spills,
+    its stub previews the leading content (cut on a line boundary) and reports
+    byte size, line count and path; the spill file is verbatim."""
+    monkeypatch.setattr(get_settings(), "workspace_root", tmp_path)
+    content = _multiline_content(20_000)
+    max_chars = get_settings().tool_result_max_chars
+
+    result = await cap_tool_result_content(_SESSION_ID, _TOOL_CALL_ID, content, max_chars=max_chars)
+
+    assert isinstance(result.content, str)
+    stub = result.content
+    assert result.attachment is not None
+    first_line = content.split("\n", 1)[0]
+    assert first_line in stub
+    assert "row 00001 | some payload text for row 1\n" in stub
+    n_bytes = len(content.encode("utf-8"))
+    n_lines = content.count("\n")
+    assert f"{n_bytes:,} bytes" in stub
+    assert f"{n_lines:,} lines" in stub
+    assert "/mnt/attachments/tool_results/tc_unit_1.txt" in stub
+    assert "read tool" in stub
+    # Preview is bounded (~1-2KB) and never the whole body.
+    assert len(stub) < 2_500
+    # Preview cut on a line boundary: every previewed row is complete.
+    preview_rows = [ln for ln in stub.splitlines() if ln.startswith("row ")]
+    assert preview_rows
+    assert all(ln in content.splitlines() for ln in preview_rows)
+
+    spill = _spill_path(_SESSION_ID, _TOOL_CALL_ID)
+    assert spill.read_bytes() == content.encode("utf-8")
+
+
+async def test_default_threshold_keeps_10kb_inline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2292 acceptance 2: a 10KB result stays inline, unchanged."""
+    monkeypatch.setattr(get_settings(), "workspace_root", tmp_path)
+    content = _multiline_content(10_000)
+    max_chars = get_settings().tool_result_max_chars
+
+    result = await cap_tool_result_content(_SESSION_ID, _TOOL_CALL_ID, content, max_chars=max_chars)
+
+    assert result.content == content
+    assert result.attachment is None
+    assert not _spill_path(_SESSION_ID, _TOOL_CALL_ID).exists()
+
+
+def test_default_threshold_is_16k() -> None:
+    from aios.config import Settings
+
+    assert Settings.model_fields["tool_result_max_chars"].default == 16_000
+
+
+async def test_preview_hard_cuts_single_long_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No line boundary in the preview window → hard cut, still bounded."""
+    monkeypatch.setattr(get_settings(), "workspace_root", tmp_path)
+    content = "q" * 50_000
+
+    result = await cap_tool_result_content(_SESSION_ID, _TOOL_CALL_ID, content, max_chars=16_000)
+
+    assert isinstance(result.content, str)
+    assert "qqqq" in result.content
+    assert len(result.content) < 2_500
+    assert "1 line" in result.content
+    assert "50,000 bytes" in result.content
+
+
+async def test_preview_byte_size_counts_utf8(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(get_settings(), "workspace_root", tmp_path)
+    content = "é\n" * 1_000  # 2,000 chars, 3,000 UTF-8 bytes
+
+    result = await cap_tool_result_content(_SESSION_ID, _TOOL_CALL_ID, content, max_chars=1_000)
+
+    assert isinstance(result.content, str)
+    assert "2,000 characters" in result.content
+    assert "3,000 bytes" in result.content
+    assert "1,000 lines" in result.content
+    assert _spill_path(_SESSION_ID, _TOOL_CALL_ID).read_bytes() == content.encode("utf-8")
+
+
 class TestRecordSpillAttachment:
     """``record_spill_attachment`` is the single seam both tool-result append
     sinks use to register a spill file under ``metadata.attachments`` — the
