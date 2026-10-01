@@ -1000,3 +1000,38 @@ async def test_durable_cache_removal_refused_when_any_legacy_check_says_legacy(
     assert len(calls) == legacy_from_call
     assert retained == [verdict]
     assert backend.removed_image_refs == []
+
+
+@pytest.mark.asyncio
+async def test_cache_retained_when_pointer_moved_under_lock(tmp_path: Path) -> None:
+    """Generation guard: if the durable pointer moved between scan (gen1) and
+    the under-lock re-read (gen2), the cache must be retained — existence of the
+    stale generation does not verify the session's current generation."""
+    backend, registry, verdict, state = _durable_cache_registry(tmp_path, "sess_cache/gen1.tar")
+    registry._fresh_session_state = AsyncMock(  # type: ignore[method-assign]
+        return_value=replace(state, snapshot_ref="sess_cache/gen2.tar")
+    )
+
+    retained = await registry._gc_image_pass(
+        [verdict], {"sess_cache": state}, get_settings().instance_id
+    )
+
+    assert retained == [verdict]
+    assert backend.removed_image_refs == []
+
+
+@pytest.mark.asyncio
+async def test_cache_retained_when_durable_artifact_absent(tmp_path: Path) -> None:
+    """Existence guard: if the durable store confirms the current generation's
+    tarball is absent, the Docker image is the only copy and must be retained."""
+    backend, registry, verdict, state = _durable_cache_registry(tmp_path, "sess_cache/gen.tar")
+    exists = AsyncMock(return_value=False)
+    registry._store.exists = exists  # type: ignore[method-assign]
+
+    retained = await registry._gc_image_pass(
+        [verdict], {"sess_cache": state}, get_settings().instance_id
+    )
+
+    exists.assert_awaited_once_with("sess_cache/gen.tar")
+    assert retained == [verdict]
+    assert backend.removed_image_refs == []
