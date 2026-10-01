@@ -7,6 +7,11 @@ arguments), :func:`aios.tools.workflow_completion._validate_value` (a
 :func:`aios.workflows.step._validate_output_against_schema` for a workflow
 run's terminal output), and :func:`aios.tools.invoke_session._validate_output`
 (a ``call_session``/``call_workflow`` caller checking a peer/run's answer).
+The three OUTPUT-boundary wrappers (``_validate_value``,
+``_validate_output_against_schema``, ``_validate_output``) all delegate to
+:func:`normalize_and_format_schema_violation` — none of them may call
+:func:`format_schema_violation` directly, or that boundary would go strict while
+the others repair, re-opening the path-dependent divergence #2096 closed (#2178).
 Before this module each site rolled its own message by reusing jsonschema's
 stock ``err.message``, which embeds a full ``repr()`` of the failing instance
 — and *also* echoed the whole argument/value payload a second time via

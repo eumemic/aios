@@ -40,10 +40,7 @@ from aios.logging import get_logger
 from aios.models.sessions import Err, Ok, Outcome
 from aios.services import sessions as sessions_service
 from aios.tools.registry import ToolResult, openai_tool_entry, registry
-from aios.tools.schema_errors import (
-    format_schema_violation,
-    normalize_and_format_schema_violation,
-)
+from aios.tools.schema_errors import normalize_and_format_schema_violation
 
 log = get_logger(__name__)
 
@@ -184,25 +181,28 @@ async def _finish(
     return {"status": "errored" if isinstance(outcome, Err) else "returned"}
 
 
-def _validate_value(value: Any, schema: dict[str, Any]) -> str | None:
-    """Validate a ``return`` ``value`` against the request's ``output_schema``.
+def _validate_value(value: Any, schema: dict[str, Any]) -> tuple[Any, str | None]:
+    """The ``return``-tool output-schema gate: normalize, then validate ``value``.
 
-    ``None`` on success; otherwise a model-facing ``output_schema_violation`` error
-    built by the shared no-echo formatter
-    (:func:`aios.tools.schema_errors.format_schema_violation` — #1769 spec v2:
-    never echoes the full ``value``, states expected-vs-got JSON types, and
-    includes the schema) so the child self-corrects and calls ``return`` again
-    through the normal tool-error loop. This is the single servicer-side schema
-    gate every obligation answered with ``return`` passes — self-goals (opened by
-    ``create_goal``) included, since their persisted ``output_schema`` is read off
-    the same ``request_opened`` edge.
+    Returns ``(normalized_value, error)``. ``error`` is ``None`` on success;
+    otherwise a model-facing ``output_schema_violation`` message (no-echo, #1769
+    spec v2) so the child self-corrects and calls ``return`` again. The
+    normalized value is what the caller MUST persist — acceptance and
+    transformation never split.
+
+    Delegates to the ONE shared output gate
+    (:func:`aios.tools.schema_errors.normalize_and_format_schema_violation`,
+    #2096 / #2178) — there is deliberately no strict-only variant, so this
+    boundary can never diverge from the workflow-run and caller-side boundaries.
+    This is the single servicer-side schema gate every obligation answered with
+    ``return`` passes — self-goals (opened by ``create_goal``) included.
     """
-    return format_schema_violation(
+    return normalize_and_format_schema_violation(
         value,
         schema,
         root="value",
         intro="output_schema_violation: `value` does not conform to the request's output_schema.",
-        retry_hint="Provide `value` as a conforming object and call `return` again.",
+        retry_hint="Fix `value` to match the required schema, then call `return` again.",
         site="workflow_completion.return",
     )
 
@@ -235,14 +235,7 @@ async def _enforce_output_schema(
         schema = await queries.get_request_output_schema(conn, session_id, request_id=request_id)
     if schema is None:
         return value, None
-    return normalize_and_format_schema_violation(
-        value,
-        schema,
-        root="value",
-        intro="output_schema_violation: `value` does not conform to the request's output_schema.",
-        retry_hint="Fix `value` to match the required schema, then call `return` again.",
-        site="workflow_completion.return",
-    )
+    return _validate_value(value, schema)
 
 
 def _closed_request_message(outcome: Outcome | None = None, closed_at: Any | None = None) -> str:
