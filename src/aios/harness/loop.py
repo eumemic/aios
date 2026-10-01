@@ -279,16 +279,33 @@ def _terminal_error_stop_message(
     return f"{headline}: {cause}\n\n{recovery_hint}"
 
 
-def _workflow_error_detail(error: dict[str, Any] | None) -> dict[str, Any] | None:
-    """Map a bound model-workflow run's ``{kind, message, ...}`` error to a detail dict."""
-    if not error:
-        return None
+def _workflow_error_detail(
+    error: dict[str, Any] | None, outcome: str | None = None
+) -> dict[str, Any] | None:
+    """Map a bound model-workflow run's ``{kind, message, ...}`` error to a detail dict.
+
+    The run's reported ``kind`` (e.g. ``"cancelled"``, which ``await_task``
+    produces for every cancelled run) is part of the concrete cause and is
+    always carried into the rendered message: ``"kind: message"`` when both are
+    present, the bare kind when the message is empty. When the error dict has
+    neither, the run's non-ok ``outcome`` is used so the message never claims
+    "no error detail" while the run reported a cause.
+    """
+    error = error or {}
     message = error.get("message")
     if not isinstance(message, str):
         message = ""
-    if len(message) > _PROVIDER_ERROR_MESSAGE_MAX_CHARS:
-        message = message[:_PROVIDER_ERROR_MESSAGE_MAX_CHARS] + "…"
-    return {"message": message}
+    message = message.strip()
+    kind = error.get("kind")
+    kind = kind.strip() if isinstance(kind, str) else ""
+    if not kind and isinstance(outcome, str) and outcome.strip() and outcome != "ok":
+        kind = outcome.strip()
+    cause = f"{kind}: {message}" if kind and message else kind or message
+    if not cause:
+        return None
+    if len(cause) > _PROVIDER_ERROR_MESSAGE_MAX_CHARS:
+        cause = cause[:_PROVIDER_ERROR_MESSAGE_MAX_CHARS] + "…"
+    return {"message": cause}
 
 
 def _retry_delay_for_attempt(attempt: int) -> float | None:
@@ -1368,7 +1385,9 @@ async def _run_session_step_body(
                 pool,
                 session_id,
                 error_kind="model_workflow_run_errored",
-                stop_message=_terminal_error_stop_message(_workflow_error_detail(harvested.error)),
+                stop_message=_terminal_error_stop_message(
+                    _workflow_error_detail(harvested.error, harvested.outcome)
+                ),
                 account_id=account_id,
             )
             # Consume the park AFTER the errored latch lands: the session is now
