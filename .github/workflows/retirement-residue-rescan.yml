@@ -81,8 +81,28 @@ jobs:
             exit 1
           fi
           echo "findings:"; cat findings.json
-          ENABLED=$(uv run python -c "import json; print(json.load(open('findings.json')).get('enabled', False))")
-          COUNT=$(uv run python -c "import json; print(len(json.load(open('findings.json')).get('findings', [])))")
+          # Exit 0/1 is NOT proof of a verdict: Python also exits 1 on any
+          # uncaught exception (ImportError, CancelledError, ...) with nothing on
+          # stdout. Only a parseable {"enabled": bool, "findings": [...]} payload
+          # whose shape agrees with the exit code counts; anything else is BLIND.
+          if ! VERDICT=$(RC="${rc}" uv run python -c "
+          import json, os, sys
+          rc = int(os.environ['RC'])
+          try:
+              d = json.load(open('findings.json'))
+          except Exception as exc:
+              sys.exit(f'unparseable payload: {type(exc).__name__}: {exc}')
+          if not isinstance(d, dict) or not isinstance(d.get('findings'), list) or not isinstance(d.get('enabled'), bool):
+              sys.exit('payload is not a {\"enabled\": bool, \"findings\": [...]} document')
+          n = len(d['findings'])
+          if (rc == 1) != (d['enabled'] and n > 0):
+              sys.exit(f'exit code {rc} disagrees with payload (enabled={d[\"enabled\"]}, findings={n})')
+          print(d['enabled'], n)
+          "); then
+            echo "::error::BLIND: residue re-scan exited ${rc} without a valid findings payload; the scan did NOT run (not clean)."
+            exit 1
+          fi
+          read -r ENABLED COUNT <<< "${VERDICT}"
           echo "enabled=${ENABLED}" >> "$GITHUB_OUTPUT"
           echo "count=${COUNT}" >> "$GITHUB_OUTPUT"
 

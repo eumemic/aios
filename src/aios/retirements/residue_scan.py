@@ -241,21 +241,23 @@ def _main(argv: list[str]) -> int:
         )
         return EXIT_BLIND
 
-    import anyio
-    import asyncpg
-
-    from aios.db.pool import normalize_dsn
-
-    async def _scan() -> list[ResidueFinding]:
-        conn = await asyncpg.connect(normalize_dsn(dsn))
-        try:
-            return await _run_residue_scan_async(conn)
-        finally:
-            await conn.close()
-
     try:
+        import anyio
+        import asyncpg
+
+        from aios.db.pool import normalize_dsn
+
+        async def _scan() -> list[ResidueFinding]:
+            conn = await asyncpg.connect(normalize_dsn(dsn))
+            try:
+                return await _run_residue_scan_async(conn)
+            finally:
+                await conn.close()
+
         findings = anyio.run(_scan)
-    except Exception as exc:
+    except SystemExit:
+        raise
+    except BaseException as exc:  # incl. CancelledError/KeyboardInterrupt: still BLIND
         print(
             f"::error::BLIND: residue re-scan could not read prod; the scan did NOT run: "
             f"{type(exc).__name__}: {exc}",
