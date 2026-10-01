@@ -150,3 +150,28 @@ def test_real_registry_is_scannable_with_resolved_dates() -> None:
     rev_dates = {rev: _now() for rev in revs}
     # Should not raise (every introduced_rev resolves) and produce a list.
     assert sla_breaches(REGISTRY, rev_dates=rev_dates, now=_now()) == []
+
+
+# ── Blind is not compliant, and not "breach" (#2317) ─────────────────────────
+
+
+def test_cli_that_cannot_resolve_dates_is_blind_not_a_verdict(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Unresolvable landing dates (e.g. shallow clone) exit 2, never 0 or 1.
+
+    An uncaught exception exits 1 — the SAME code as "breach" — so the caller
+    could not tell "aged past SLA" from "could not measure age at all".
+    """
+    from aios.retirements import aging
+
+    def _boom(*_a: object, **_k: object) -> object:
+        raise RuntimeError("no git history for migrations/versions/0116_x.py")
+
+    monkeypatch.setattr(aging, "resolve_rev_dates", _boom)
+
+    assert aging._main(["aging"]) == aging.EXIT_BLIND == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "BLIND" in captured.err
+    assert "no git history" in captured.err

@@ -238,3 +238,32 @@ def test_async_scan_translates_bind_and_reports_nonzero() -> None:
     findings = anyio.run(lambda: _run_residue_scan_async(conn, registry=(_ret(),)))
     assert {(f.table, f.token, f.count) for f in findings} == {("agents", "invoke", 5)}
     assert len(conn.seen) == 4
+
+
+# ── Blind is not clean, and not "residue found" (#2317) ──────────────────────
+
+
+def test_cli_scan_that_cannot_connect_is_blind_not_a_verdict(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An unreachable DB must exit 2 (could-not-read), never 0 (clean) or 1 (residue).
+
+    An uncaught exception exits 1 — the SAME code as "residue found" — and the
+    workflow previously swallowed it with ``|| true`` and rendered green.
+    """
+    import asyncpg
+
+    from aios.retirements import residue_scan as rs
+
+    async def _refuse(*_a: object, **_k: object) -> object:
+        raise OSError("connection refused")
+
+    monkeypatch.setenv(rs.RESCAN_ENABLED_ENV, "1")
+    monkeypatch.setenv(rs.RESCAN_DSN_ENV, "postgresql://ro@127.0.0.1:1/x")
+    monkeypatch.setattr(asyncpg, "connect", _refuse)
+
+    assert rs._main(["residue_scan"]) == rs.EXIT_BLIND == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""  # no findings JSON a caller could mistake for clean
+    assert "BLIND" in captured.err
+    assert "connection refused" in captured.err

@@ -73,11 +73,18 @@ jobs:
       - name: Compute aging-SLA verdict
         id: verdict
         # The aging CLI prints {"breaches": [...]} and exits 1 on any breach. We
-        # capture the JSON regardless of exit code (|| true) so the next step can
-        # build the issue body, then fail the job explicitly at the end.
+        # capture the JSON on exit 0/1 so the next step can build the issue body,
+        # then fail the job explicitly at the end. Exit 2 (EXIT_BLIND) means the
+        # verdict could NOT be computed: fail loudly here rather than letting an
+        # unread run look like a compliant one (#2317).
         run: |
           set -uo pipefail
-          uv run python -m aios.retirements.aging > breaches.json || true
+          rc=0
+          uv run python -m aios.retirements.aging > breaches.json || rc=$?
+          if [ "${rc}" -ne 0 ] && [ "${rc}" -ne 1 ]; then
+            echo "::error::BLIND: aging-SLA check exited ${rc}; the check did NOT run (not a pass)."
+            exit 1
+          fi
           echo "breaches:"; cat breaches.json
           COUNT=$(uv run python -c "import json,sys; print(len(json.load(open('breaches.json'))['breaches']))")
           echo "count=${COUNT}" >> "$GITHUB_OUTPUT"

@@ -193,3 +193,78 @@ def test_watchdog_cli_fails_and_writes_unknown_for_insufficient_history(tmp_path
         "completed_runs": 19,
         "required_runs": 20,
     }
+
+
+# ── Blind is not healthy (#2317) ──────────────────────────────────────────────
+#
+# A monitor that cannot read its source must say so. GitHub's 401 body is VALID
+# JSON (``{"message": "Bad credentials"}``); a watchdog that crashes on it exits 1,
+# which this workflow reads as "breach" — and one that defaulted the absent field
+# to ``[]`` would read as "healthy". Both are lies. An absent required field is a
+# failed read: exit 2 (cannot-determine) with an explicit BLIND message.
+
+
+def _run_cli(tmp_path: Path, payload: object) -> subprocess.CompletedProcess[str]:
+    input_path = tmp_path / "runs.json"
+    input_path.write_text(json.dumps(payload))
+    return subprocess.run(
+        [
+            sys.executable,
+            str(_ROOT / "scripts/ci_queue_watchdog.py"),
+            str(input_path),
+            "--output",
+            str(tmp_path / "result.json"),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_watchdog_cli_reports_blind_on_auth_error_body(tmp_path: Path) -> None:
+    result = _run_cli(tmp_path, {"message": "Bad credentials", "documentation_url": "x"})
+
+    assert result.returncode == 2, result.stderr
+    assert "BLIND" in result.stderr
+    assert "Bad credentials" in result.stderr
+    assert "Traceback" not in result.stderr
+    assert json.loads((tmp_path / "result.json").read_text()) == {
+        "status": "unreadable",
+        "reason": "runs payload has no workflow_runs list: Bad credentials",
+    }
+
+
+def test_watchdog_cli_reports_blind_on_non_list_runs(tmp_path: Path) -> None:
+    result = _run_cli(tmp_path, {"workflow_runs": None})
+
+    assert result.returncode == 2
+    assert "BLIND" in result.stderr
+
+
+def test_watchdog_cli_reports_blind_on_unparseable_body(tmp_path: Path) -> None:
+    input_path = tmp_path / "runs.json"
+    input_path.write_text("<html>502 Bad Gateway</html>")
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(_ROOT / "scripts/ci_queue_watchdog.py"),
+            str(input_path),
+            "--output",
+            str(tmp_path / "result.json"),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert "BLIND" in result.stderr
+    assert "Traceback" not in result.stderr
+
+
+def test_watchdog_cli_healthy_empty_runs_is_still_a_verdict(tmp_path: Path) -> None:
+    """A real, present, empty list is a legitimate "nothing pending" verdict."""
+    result = _run_cli(tmp_path, {"total_count": 0, "workflow_runs": []})
+
+    assert result.returncode == 0
+    assert json.loads((tmp_path / "result.json").read_text()) is None

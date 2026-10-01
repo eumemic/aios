@@ -65,14 +65,21 @@ jobs:
         # The CLI is itself the gate: when AIOS_RETIREMENT_RESCAN_ENABLED is
         # off/absent it prints {"enabled": false, ...} and exits 0 WITHOUT
         # connecting anywhere (no-new-egress). When on, it connects to the RO DSN,
-        # scans, and exits 1 on any residue. We capture the JSON regardless of
-        # exit (|| true) and decide alert/fail below.
+        # scans, and exits 1 on any residue. We capture the JSON on exit 0/1 and
+        # decide alert/fail below. Any other exit (2 = EXIT_BLIND: enabled but the
+        # scan could not read prod) fails HERE: with no findings.json the later
+        # steps would otherwise skip and the run would render green (#2317).
         env:
           AIOS_RETIREMENT_RESCAN_ENABLED: ${{ vars.AIOS_RETIREMENT_RESCAN_ENABLED }}
           AIOS_RETIREMENT_RESCAN_DSN: ${{ secrets.AIOS_RETIREMENT_RESCAN_DSN }}
         run: |
           set -uo pipefail
-          uv run python -m aios.retirements.residue_scan > findings.json || true
+          rc=0
+          uv run python -m aios.retirements.residue_scan > findings.json || rc=$?
+          if [ "${rc}" -ne 0 ] && [ "${rc}" -ne 1 ]; then
+            echo "::error::BLIND: residue re-scan exited ${rc}; the scan did NOT run (not clean)."
+            exit 1
+          fi
           echo "findings:"; cat findings.json
           ENABLED=$(uv run python -c "import json; print(json.load(open('findings.json')).get('enabled', False))")
           COUNT=$(uv run python -c "import json; print(len(json.load(open('findings.json')).get('findings', [])))")

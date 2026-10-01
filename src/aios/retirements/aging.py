@@ -48,6 +48,12 @@ from aios.retirements.registry import REGISTRY
 #: of exactly one file (e.g. ``0116`` → ``0116_normalize_legacy_tool_names.py``).
 _MIGRATIONS_DIR = Path(__file__).resolve().parents[3] / "migrations" / "versions"
 
+#: CLI exit code for "could not compute the verdict" (e.g. a shallow clone with no
+#: git history to date a migration). Distinct from 0 (compliant) and 1 (breach):
+#: an uncaught exception exits 1, which would masquerade as a breach, and a caller
+#: that tolerates nonzero would otherwise render a blind run as green (#2317).
+EXIT_BLIND = 2
+
 
 @dataclass(frozen=True)
 class SlaBreach:
@@ -215,10 +221,21 @@ def _main(argv: list[str]) -> int:
     dates from git, computes breaches against the live registry, prints
     ``{"breaches": [...]}``, and returns ``1`` if any descriptor has aged past
     its SLA (so the workflow step fails master) or ``0`` if all are compliant.
+    Returns :data:`EXIT_BLIND` (printing nothing to stdout) if the verdict could
+    not be computed at all.
     """
 
-    rev_dates = resolve_rev_dates()
-    breaches = sla_breaches(REGISTRY, rev_dates=rev_dates)
+    try:
+        rev_dates = resolve_rev_dates()
+        breaches = sla_breaches(REGISTRY, rev_dates=rev_dates)
+    except Exception as exc:
+        # No JSON on stdout: nothing a caller could mistake for "no breaches".
+        print(
+            f"::error::BLIND: aging-SLA check could not compute a verdict; the check did "
+            f"NOT run: {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+        return EXIT_BLIND
     payload = {"breaches": [asdict(b) for b in breaches]}
     json.dump(payload, sys.stdout, indent=2)
     sys.stdout.write("\n")
