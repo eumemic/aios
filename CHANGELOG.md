@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- **`tool` CLI always writes parseable JSON to stdout on transport failure
+  (#2227).** A broker request that timed out used to print a Python traceback
+  and nothing on stdout, so callers doing `json.loads` saw `Expecting value`,
+  and a lenient caller read the timeout as an empty result. Timeouts, an
+  unreachable broker, a missing socket, non-JSON broker responses and non-2xx
+  broker replies now write one JSON line to stdout, e.g.
+  `{"error": {"kind": "timeout", "timeout_s": 30.0, "path": "/builtins/http_request"}}`,
+  and exit non-zero (2 for transport failures, 1 for broker HTTP errors). The
+  human-readable message goes to stderr. Successful calls are unchanged, and the
+  30 s timeout is unchanged too.
+
 - **Agents can address a role instead of a cached agent id (#1940).** New
   `resolve_role(role)` model tool (grantable as `{"type": "resolve_role"}`)
   returns the live agent id holding a role in the caller's account. An agent
