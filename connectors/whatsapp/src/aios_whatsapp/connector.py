@@ -62,6 +62,9 @@ class WhatsappConnector(WhatsappManagementMixin, HttpConnector):
             store_dir=store_dir,
         ) as daemon:
             self.state[connection_id] = _WhatsappConnectionState(phone=phone, daemon=daemon)
+            # Entering the daemon context establishes its notification
+            # listener; state publication completes the inbound receive path.
+            self.mark_transport_ready(connection_id)
             log.info(
                 "whatsapp.connection.ready",
                 connection_id=connection_id,

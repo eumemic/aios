@@ -12,7 +12,7 @@ from typing import Any
 import asyncpg
 
 from aios.db import queries
-from aios.errors import ForbiddenError
+from aios.errors import ConflictError, ForbiddenError, NotFoundError
 from aios.models.agents import (
     Agent,
     AgentBinding,
@@ -189,6 +189,30 @@ async def list_agents(
         return await queries.list_agents(
             conn, limit=limit, after=after, name=name, account_id=account_id
         )
+
+
+async def resolve_role(pool: asyncpg.Pool[Any], role: str, *, account_id: str) -> Agent:
+    """Resolve ``role`` to the single live agent of ``account_id`` holding it (#1940).
+
+    A role is held by the live agent whose ``name`` or ``metadata.role`` equals it.
+    Resolution is read at call time, so callers address the role and never cache
+    the agent id — an archive + re-create (re-spawn) moves the role to the new id.
+
+    Fails loud, never empty: no holder is a ``NotFoundError`` ("no live binding
+    for role …"); more than one is a ``ConflictError`` listing the candidate ids.
+    """
+    async with pool.acquire() as conn:
+        candidates = await queries.list_agents_for_role(conn, role, account_id=account_id)
+    if not candidates:
+        raise NotFoundError(f"no live binding for role {role!r}", detail={"role": role})
+    if len(candidates) > 1:
+        ids = [a.id for a in candidates]
+        raise ConflictError(
+            f"role {role!r} is ambiguous: held by {len(ids)} live agents {ids} "
+            "(match on name or metadata.role); give it to exactly one agent",
+            detail={"role": role, "agent_ids": ids},
+        )
+    return candidates[0]
 
 
 async def archive_agent(pool: asyncpg.Pool[Any], agent_id: str, *, account_id: str) -> None:

@@ -33,4 +33,5 @@ RUN uv pip install --system --no-cache --no-sources \
     /app/packages/aios-connector-http \
     /app/connectors/slack
 
+HEALTHCHECK --interval=10s --timeout=5s --retries=3 CMD ["python", "-m", "aios_connector_http.healthcheck"]
 CMD ["python", "-m", "aios_slack"]

@@ -95,6 +95,7 @@ BuiltinToolName = Literal[
     "get_run",
     "list_runs",
     "list_run_events",
+    "resolve_role",
     "invoke",
     "invoke_agent",
     "invoke_workflow",

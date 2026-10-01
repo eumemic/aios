@@ -236,6 +236,33 @@ async def list_agents(
     )
 
 
+# Cap on the candidate rows a role lookup reads. Resolution only needs to tell
+# "exactly one" from "none" / "many"; the cap bounds the ambiguity report.
+_ROLE_CANDIDATE_LIMIT = 10
+
+
+async def list_agents_for_role(
+    conn: asyncpg.Connection[Any], role: str, *, account_id: str
+) -> list[Agent]:
+    """Live (non-archived) agents of ``account_id`` that hold ``role``.
+
+    An agent holds a role when its ``name`` equals it or its ``metadata.role``
+    is a JSON *string* equal to it. ``->>`` renders any JSON value as text
+    (``42`` -> ``'42'``, ``true`` -> ``'true'``), so the ``jsonb_typeof`` guard
+    keeps non-string ``metadata.role`` values from binding a role. Newest first, capped at ``_ROLE_CANDIDATE_LIMIT``. The caller
+    (``services.agents.resolve_role``) decides what zero / many candidates mean.
+    """
+    rows = await conn.fetch(
+        "SELECT * FROM agents WHERE account_id = $1 AND archived_at IS NULL "
+        "AND (name = $2 OR (jsonb_typeof(metadata->'role') = 'string' "
+        "AND metadata->>'role' = $2)) ORDER BY id DESC LIMIT $3",
+        account_id,
+        role,
+        _ROLE_CANDIDATE_LIMIT,
+    )
+    return [_row_to_agent(r) for r in rows]
+
+
 async def archive_agent(conn: asyncpg.Connection[Any], agent_id: str, *, account_id: str) -> None:
     await _archive_scoped(
         conn,

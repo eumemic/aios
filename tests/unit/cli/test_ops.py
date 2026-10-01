@@ -220,3 +220,33 @@ def test_migrate_propagates_last_lock_error_after_attempts_exhausted():
     assert raised.value is lock_errors[-1]
     assert upgrade_to_head.call_count == 10
     assert sleep.call_count == 9
+
+
+def test_migrate_does_not_retry_operational_error_wrapping_non_lock_error():
+    """Only a lock-acquisition failure is retryable. A SQLAlchemy
+    OperationalError whose underlying DBAPI error is NOT LockNotAvailable
+    (e.g. a genuine migration bug surfacing as an operational error) must
+    fail loudly on the first attempt (#2184)."""
+    from psycopg.errors import QueryCanceled
+
+    wrapped = OperationalError("ALTER TABLE events", {}, QueryCanceled("statement timeout"))
+    upgrade_to_head = Mock(side_effect=wrapped)
+
+    patches = _migrate_patches(upgrade_to_head)
+    with (
+        patches[0],
+        patches[1],
+        patches[2] as logger,
+        patches[3],
+        patches[4] as procrastinate,
+        patches[5],
+        patches[6] as sleep,
+        pytest.raises(OperationalError) as raised,
+    ):
+        _run_migrate()
+
+    assert raised.value is wrapped
+    upgrade_to_head.assert_called_once_with("postgresql://localhost/test")
+    sleep.assert_not_called()
+    logger.return_value.warning.assert_not_called()
+    procrastinate.assert_not_awaited()

@@ -61,14 +61,14 @@ _SCHEMA: dict[str, Any] = {
 
 def _rejects_value(value: Any, schema: dict[str, Any]) -> bool:
     """True iff the *general return* servicer-side gate rejects ``value``."""
-    return _validate_value(value, schema) is not None
+    return _validate_value(value, schema)[1] is not None
 
 
 def _rejects_result(value: Any, schema: dict[str, Any]) -> bool:
     """True iff the *complete_goal* servicer-side gate rejects ``value`` — it
     returns an ``output_schema_violation`` ToolResult on a mismatch, ``None`` on a
     match (same shape as the call_* output_schema path)."""
-    return _validate_output(value, schema) is not None
+    return _validate_output(value, schema)[1] is not None
 
 
 @pytest.mark.parametrize(
@@ -93,25 +93,25 @@ def test_b_return_and_complete_goal_gates_agree(value: Any) -> None:
 def test_b_both_gates_accept_conforming_value() -> None:
     """A schema-valid value is accepted by both servicer-side gates (no error →
     the response is written, the request closes)."""
-    assert _validate_value({"answer": "ok"}, _SCHEMA) is None
-    assert _validate_output({"answer": "ok"}, _SCHEMA) is None
+    assert _validate_value({"answer": "ok"}, _SCHEMA)[1] is None
+    assert _validate_output({"answer": "ok"}, _SCHEMA)[1] is None
 
 
 def test_b_both_gates_reject_nonconforming_value() -> None:
     """A schema-invalid value is rejected by both servicer-side gates (an error →
     NO response written, so the self-goal/obligation stays open and the model
     retries) — i.e. retiring ``complete_goal`` loses none of the validation."""
-    assert _validate_value({"answer": 1}, _SCHEMA) is not None
-    assert _validate_output({"answer": 1}, _SCHEMA) is not None
+    assert _validate_value({"answer": 1}, _SCHEMA)[1] is not None
+    assert _validate_output({"answer": 1}, _SCHEMA)[1] is not None
 
 
 def test_b_bare_scalar_schema_honored_by_both_gates() -> None:
     """``output_schema`` replaces ``value`` wholesale, so a bare-scalar contract is
     enforced identically by both gates (the self-goal close is not object-only)."""
-    assert _validate_value(3, {"type": "number"}) is None
-    assert _validate_output(3, {"type": "number"}) is None
-    assert _validate_value("x", {"type": "number"}) is not None
-    assert _validate_output("x", {"type": "number"}) is not None
+    assert _validate_value(3, {"type": "number"})[1] is None
+    assert _validate_output(3, {"type": "number"})[1] is None
+    assert _validate_value("x", {"type": "number"})[1] is not None
+    assert _validate_output("x", {"type": "number"})[1] is not None
 
 
 def test_b_complete_goal_no_schema_is_a_passthrough() -> None:
@@ -121,4 +121,4 @@ def test_b_complete_goal_no_schema_is_a_passthrough() -> None:
     ``_validate_value`` is only ever called by ``return`` *after* a non-None schema
     is fetched, so its no-schema behavior is encoded in that caller, asserted
     here for completeness of the parity argument."""
-    assert _validate_output({"anything": True}, None) is None
+    assert _validate_output({"anything": True}, None)[1] is None

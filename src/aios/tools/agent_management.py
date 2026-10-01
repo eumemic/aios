@@ -154,6 +154,15 @@ class _ListAgentsArgs(BaseModel):
     name: str | None = None
 
 
+class _ResolveRoleArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    role: str = Field(
+        min_length=1,
+        description="The role to resolve: an agent name, or a value of an agent's metadata.role.",
+    )
+
+
 # ─── handler plumbing ────────────────────────────────────────────────────────
 #
 # Handlers map service kwargs explicitly (F1) and otherwise let service errors
@@ -247,6 +256,18 @@ async def list_agents_handler(session_id: str, arguments: dict[str, Any]) -> dic
     return {"agents": [a.model_dump(mode="json", exclude=_AGENT_LIST_EXCLUDE) for a in agents]}
 
 
+async def resolve_role_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    pool = runtime.require_pool()
+    account_id = await sessions_service.load_session_account_id(pool, session_id)
+    args = tool_input(_ResolveRoleArgs, arguments)
+    agent = await agents_service.resolve_role(pool, args.role, account_id=account_id)
+    return {
+        "role": args.role,
+        "agent_id": agent.id,
+        "agent": agent.model_dump(mode="json", exclude=_AGENT_LIST_EXCLUDE),
+    }
+
+
 # ─── descriptions + registration ─────────────────────────────────────────────
 
 CREATE_AGENT_DESCRIPTION = (
@@ -282,6 +303,14 @@ LIST_AGENTS_DESCRIPTION = (
     "or surface bodies. Optional 'name' filter; page with 'limit' and 'after' (the last "
     "id seen); a full page means there may be more — call again. To read an agent's "
     "full config, fetch it with get_agent."
+)
+RESOLVE_ROLE_DESCRIPTION = (
+    "Resolve a role to the LIVE agent id that currently holds it in your account. "
+    "A role is held by the live agent whose name equals it or whose metadata.role "
+    "equals it. Address other agents by role: call this right before call_agent "
+    "instead of reusing an agent id from memory, a charter, or config — ids change "
+    "when an agent is re-created, the role does not. Fails loudly: an error names "
+    "the role when no live agent holds it, or lists the candidates when more than one does."
 )
 
 
@@ -319,6 +348,13 @@ def _register() -> None:
         description=LIST_AGENTS_DESCRIPTION,
         parameters_schema=_ListAgentsArgs.model_json_schema(),
         handler=list_agents_handler,
+        transport="agent_tool",
+    )
+    registry.register(
+        name="resolve_role",
+        description=RESOLVE_ROLE_DESCRIPTION,
+        parameters_schema=_ResolveRoleArgs.model_json_schema(),
+        handler=resolve_role_handler,
         transport="agent_tool",
     )
 
