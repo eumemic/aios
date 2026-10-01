@@ -1025,8 +1025,8 @@ class TestRefreshCredential:
 
         ``build_token_endpoint_post`` sets ``Accept: application/json`` and this
         path parses the reply with ``response.json()``. A form-encoded 200 fails
-        that parse with a ``JSONDecodeError`` — which is not an ``httpx.HTTPError``
-        and so escapes the handler below entirely. Pinned here, at the caller,
+        that parse (surfaced as ``OAuthRefreshError`` since #2232, but still a
+        failed refresh). Pinned here, at the caller,
         because the seam test cannot see a ``headers=`` kwarg added alongside the
         splat that would silently override it.
         """
@@ -1439,6 +1439,134 @@ class TestRefreshCredential:
                 target_url="https://mcp.example.com",
                 account_id=account_id,
             )
+
+    @pytest.mark.asyncio
+    async def test_form_encoded_200_raises_oauth_refresh_error(self, crypto_box: CryptoBox) -> None:
+        """#2232: a 200 whose body is not JSON (a non-conformant provider that
+        ignored ``Accept: application/json``) must surface as the declared
+        :class:`OAuthRefreshError`, not a raw ``JSONDecodeError``.
+
+        The lock query returns a fresh "winner" credential on its second call:
+        if the parse failure wrongly entered the race-loser recovery block it
+        would adopt that winner and return silently instead of raising.
+        """
+        account_id = "acc_test_stub"
+        subkey = crypto_box.derive_account_subkey(account_id)
+        blob = subkey.encrypt(json.dumps(_expiring_oauth_payload()))
+        fresh_blob = subkey.encrypt(
+            json.dumps(
+                _expiring_oauth_payload(
+                    access_token="winner",
+                    expires_at=(datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+                )
+            )
+        )
+        conn = _conn_with_transaction()
+        resp = httpx.Response(
+            200,
+            text="access_token=x&scope=y",
+            headers={"content-type": "application/x-www-form-urlencoded"},
+            request=httpx.Request("POST", "https://issuer.example/token"),
+        )
+        client = _async_client_returning(resp)
+        lock = AsyncMock(side_effect=[("vc_1", blob), ("vc_1", fresh_blob)])
+
+        with (
+            patch.object(queries, "lock_oauth_credential_for_refresh", lock),
+            patch.object(httpx, "AsyncClient", MagicMock(return_value=client)),
+            pytest.raises(OAuthRefreshError, match="not valid JSON") as exc_info,
+        ):
+            await refresh_credential(
+                crypto_box,
+                fake_pool_yielding_conn(conn),
+                vault_id="vlt_1",
+                target_url="https://mcp.example.com",
+                account_id=account_id,
+            )
+
+        assert isinstance(exc_info.value.__cause__, json.JSONDecodeError)
+        assert not isinstance(exc_info.value, OAuthReauthRequiredError)
+        # Fail-hard: the recovery block's re-read never ran.
+        assert lock.await_count == 1
+        assert not any(
+            "UPDATE vault_credentials" in str(c.args[0]) for c in conn.execute.await_args_list
+        )
+
+    @pytest.mark.asyncio
+    async def test_non_object_json_200_raises_oauth_refresh_error(
+        self, crypto_box: CryptoBox
+    ) -> None:
+        """A 200 whose JSON body is not an object is equally outside the token
+        response contract and must raise :class:`OAuthRefreshError`."""
+        account_id = "acc_test_stub"
+        blob = crypto_box.derive_account_subkey(account_id).encrypt(
+            json.dumps(_expiring_oauth_payload())
+        )
+        conn = _conn_with_transaction()
+        client = _async_client_returning(
+            httpx.Response(
+                200,
+                json=["access_token"],
+                request=httpx.Request("POST", "https://issuer.example/token"),
+            )
+        )
+
+        with (
+            patch.object(
+                queries,
+                "lock_oauth_credential_for_refresh",
+                AsyncMock(return_value=("vc_1", blob)),
+            ),
+            patch.object(httpx, "AsyncClient", MagicMock(return_value=client)),
+            pytest.raises(OAuthRefreshError, match="not a JSON object"),
+        ):
+            await refresh_credential(
+                crypto_box,
+                fake_pool_yielding_conn(conn),
+                vault_id="vlt_1",
+                target_url="https://mcp.example.com",
+                account_id=account_id,
+            )
+
+    @pytest.mark.asyncio
+    async def test_http_error_race_loser_adopts_fresh_winner(self, crypto_box: CryptoBox) -> None:
+        """Negative half of #2232: a genuine ``httpx.HTTPError`` still reaches
+        the race-loser recovery block, which re-reads and adopts a fresh winner
+        credential instead of raising."""
+        account_id = "acc_test_stub"
+        subkey = crypto_box.derive_account_subkey(account_id)
+        blob = subkey.encrypt(json.dumps(_expiring_oauth_payload()))
+        fresh_blob = subkey.encrypt(
+            json.dumps(
+                _expiring_oauth_payload(
+                    access_token="winner",
+                    expires_at=(datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+                )
+            )
+        )
+        conn = _conn_with_transaction()
+        client = _async_client_returning(
+            _http_response(status=400, body={"error": "invalid_grant"})
+        )
+        lock = AsyncMock(side_effect=[("vc_1", blob), ("vc_1", fresh_blob)])
+
+        with (
+            patch.object(queries, "lock_oauth_credential_for_refresh", lock),
+            patch.object(httpx, "AsyncClient", MagicMock(return_value=client)),
+        ):
+            await refresh_credential(
+                crypto_box,
+                fake_pool_yielding_conn(conn),
+                vault_id="vlt_1",
+                target_url="https://mcp.example.com",
+                account_id=account_id,
+            )
+
+        client.post.assert_awaited_once()
+        assert lock.await_count == 2
+        assert not any(
+            "UPDATE vault_credentials" in str(c.args[0]) for c in conn.execute.await_args_list
+        )
 
     @pytest.mark.asyncio
     async def test_no_credential_found_raises(self, crypto_box: CryptoBox) -> None:
