@@ -176,6 +176,12 @@ def run_residue_scan(
 #: not silently scan nothing and report clean).
 RESCAN_DSN_ENV = "AIOS_RETIREMENT_RESCAN_DSN"
 
+#: CLI exit code for "could not scan" (misconfigured DSN, unreachable DB, query
+#: error). Distinct from 0 (clean) and 1 (residue): an uncaught exception exits 1,
+#: which would masquerade as residue, and a caller tolerating nonzero would render
+#: a blind scan as clean (#2317). Nothing is written to stdout in this case.
+EXIT_BLIND = 2
+
 
 async def _run_residue_scan_async(
     conn: object,
@@ -217,6 +223,8 @@ def _main(argv: list[str]) -> int:
     * ON: connect to the prod RO DSN, run the registry scan, print
       ``{"enabled": true, "findings": [...]}``, and exit 1 if any residue is
       found (the alert) or 0 if the live surfaces are clean.
+    * BLIND (enabled but unscannable): print nothing to stdout and exit
+      :data:`EXIT_BLIND` — never a findings payload that could read as clean.
     """
 
     if not rescan_enabled():
@@ -231,21 +239,31 @@ def _main(argv: list[str]) -> int:
             "refusing to report 'clean' without scanning.",
             file=sys.stderr,
         )
-        return 2
+        return EXIT_BLIND
 
-    import anyio
-    import asyncpg
+    try:
+        import anyio
+        import asyncpg
 
-    from aios.db.pool import normalize_dsn
+        from aios.db.pool import normalize_dsn
 
-    async def _scan() -> list[ResidueFinding]:
-        conn = await asyncpg.connect(normalize_dsn(dsn))
-        try:
-            return await _run_residue_scan_async(conn)
-        finally:
-            await conn.close()
+        async def _scan() -> list[ResidueFinding]:
+            conn = await asyncpg.connect(normalize_dsn(dsn))
+            try:
+                return await _run_residue_scan_async(conn)
+            finally:
+                await conn.close()
 
-    findings = anyio.run(_scan)
+        findings = anyio.run(_scan)
+    except SystemExit:
+        raise
+    except BaseException as exc:  # incl. CancelledError/KeyboardInterrupt: still BLIND
+        print(
+            f"::error::BLIND: residue re-scan could not read prod; the scan did NOT run: "
+            f"{type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+        return EXIT_BLIND
     payload = {"enabled": True, "findings": [asdict(f) for f in findings]}
     json.dump(payload, sys.stdout, indent=2)
     sys.stdout.write("\n")
