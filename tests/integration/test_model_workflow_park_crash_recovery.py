@@ -565,3 +565,116 @@ async def test_crash_after_record_before_launch_launches_the_recorded_run(
     await run_session_step(session_id, cause="model_workflow_harvest")
     assistants = await _assistant_messages(pool, session_id)
     assert [a["content"] for a in assistants] == ["recovered answer"]
+
+
+# ── #2470: the account run cap at the park ────────────────────────────────────
+
+
+async def _span_events(pool: asyncpg.Pool[Any], session_id: str, event: str) -> list[Any]:
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT data FROM events WHERE session_id = $1 AND kind = 'span' "
+            "AND data->>'event' = $2 ORDER BY seq",
+            session_id,
+            event,
+        )
+    return [r["data"] for r in rows]
+
+
+async def test_account_run_cap_backs_off_instead_of_crashing_the_step(
+    mwf_runtime: asyncpg.Pool[Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """At the account's outstanding-run cap the park can't launch. That is capacity,
+    not a harness crash: the session records a ``run_capacity`` error and backs off,
+    and once capacity frees the next wake launches the recorded run."""
+    from aios.config import get_settings
+
+    pool = mwf_runtime
+    session_id = await _make_bound_session(pool)
+    full = get_settings().model_copy(update={"workflow_runs_per_account_max": 0})
+    monkeypatch.setattr("aios.workflows.service.get_settings", lambda: full)
+
+    await run_session_step(session_id)
+
+    assert await _span_events(pool, session_id, "harness_error") == []
+    [refused] = await _span_events(pool, session_id, "model_workflow_launch_refused")
+    assert refused["error"]["kind"] == "run_capacity"
+    assert refused["error"]["detail"] == {"outstanding": 0, "max": 0}
+    assert await _inner_run_ids(pool, session_id) == []
+    session = await sessions_service.get_session(pool, session_id, account_id=_ACCOUNT)
+    assert session.stop_reason == {"type": "rescheduling"}
+
+    monkeypatch.undo()
+    await run_session_step(session_id)
+    async with pool.acquire() as conn:
+        park = await db_queries.find_latest_model_workflow_park(
+            conn, session_id, account_id=_ACCOUNT
+        )
+    assert park is not None
+    assert await _inner_run_ids(pool, session_id) == [park["run_id"]]
+
+
+async def test_account_run_cap_exhausts_the_backoff_into_an_errored_turn(
+    mwf_runtime: asyncpg.Pool[Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cap that never frees exhausts the model-error ladder: the session latches
+    errored without a ``harness_error`` span and without re-raising out of the step."""
+    from aios.config import get_settings
+
+    pool = mwf_runtime
+    session_id = await _make_bound_session(pool)
+    full = get_settings().model_copy(update={"workflow_runs_per_account_max": 0})
+    monkeypatch.setattr("aios.workflows.service.get_settings", lambda: full)
+
+    for _ in range(5):
+        await run_session_step(session_id)
+
+    assert await _span_events(pool, session_id, "harness_error") == []
+    assert len(await _span_events(pool, session_id, "model_workflow_launch_refused")) == 5
+    assert await _inner_run_ids(pool, session_id) == []
+    session = await sessions_service.get_session(pool, session_id, account_id=_ACCOUNT)
+    assert session.stop_reason is not None
+    assert session.stop_reason["type"] == "error"
+    assert "outstanding-run cap" in session.stop_reason["message"]
+
+
+async def test_a_permanent_launch_refusal_ends_the_turn_naming_the_cause(
+    mwf_runtime: asyncpg.Pool[Any],
+) -> None:
+    """An archived bound workflow refuses every launch. Retrying can't help, so the
+    turn errors at once with the cause named, not via ``harness_error`` retries."""
+    pool = mwf_runtime
+    session_id = await _make_bound_session(pool)
+    ref = await _bound_ref(pool, session_id)
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE workflows SET archived_at = now() WHERE id = $1", ref.workflow_id
+        )
+
+    await run_session_step(session_id)
+
+    assert await _span_events(pool, session_id, "harness_error") == []
+    [refused] = await _span_events(pool, session_id, "model_workflow_launch_refused")
+    assert refused["error"]["kind"] == "conflict"
+    session = await sessions_service.get_session(pool, session_id, account_id=_ACCOUNT)
+    assert session.stop_reason is not None
+    assert session.stop_reason["type"] == "error"
+    assert "archived" in session.stop_reason["message"]
+
+
+async def test_the_launcher_cap_never_blocks_the_sessions_own_turn(
+    mwf_runtime: asyncpg.Pool[Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The per-launcher cap bounds the model's own fan-out. A model-dispatch run is the
+    session's turn, so a session at that cap can still run (and stop its runs)."""
+    from aios.config import get_settings
+
+    pool = mwf_runtime
+    session_id = await _make_bound_session(pool)
+    full = get_settings().model_copy(update={"workflow_runs_per_launcher_max": 0})
+    monkeypatch.setattr("aios.workflows.service.get_settings", lambda: full)
+
+    await run_session_step(session_id)
+
+    assert await _span_events(pool, session_id, "model_workflow_launch_refused") == []
+    assert len(await _inner_run_ids(pool, session_id)) == 1
