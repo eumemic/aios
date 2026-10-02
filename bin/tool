@@ -34,7 +34,21 @@ Grammar:
 Exit codes:
   0  success (invocation returned ``content``)
   1  tool returned an ``error`` envelope, or named tool isn't reachable
-  2  client-side error: broker unreachable, env vars unset, JSON unparseable
+  2  client-side error: broker unreachable / timed out, env vars unset,
+     JSON unparseable
+
+Transport failures (issue #2227): when the round-trip to the broker
+itself fails — timeout, connection refused, missing socket, a response
+body that isn't JSON — stdout carries a single-line JSON envelope
+instead of nothing (or a traceback), e.g.::
+
+  {"error": {"kind": "timeout", "timeout_s": 30.0, "path": "/builtins/http_request"}}
+
+``kind`` is one of ``timeout``, ``unreachable``, ``malformed_response``,
+``http_error`` (broker answered non-2xx; carries ``status``). Human
+diagnostics go to stderr. Callers that ``json.loads`` stdout can
+therefore always tell "the call never completed" apart from a genuinely
+empty result.
 
 ``tool`` performs a single discovery round-trip on each invocation to
 disambiguate built-in vs. MCP-server names (broker is on loopback/UDS,
@@ -50,6 +64,7 @@ import json
 import os
 import socket
 import sys
+from typing import NoReturn
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -135,6 +150,61 @@ def _resolve_broker_secret() -> str:
     return content
 
 
+def _transport_failure(
+    kind: str, path: str, message: str, *, exit_code: int = 2, **extra: object
+) -> NoReturn:
+    """Emit a parseable JSON error envelope on stdout and exit non-zero.
+
+    ``path`` is the application path (``/tools``, ``/builtins/<name>``…)
+    — never the secret-bearing ``/v1/{secret}/…`` request path. The
+    human-readable diagnostic goes to stderr.
+    """
+    error: dict[str, object] = {"kind": kind}
+    if kind == "timeout":
+        error["timeout_s"] = _REQUEST_TIMEOUT_S
+    error.update(extra)
+    error["path"] = path
+    sys.stderr.write(f"tool: {message}\n")
+    sys.stdout.write(json.dumps({"error": error}) + "\n")
+    sys.stdout.flush()
+    sys.exit(exit_code)
+
+
+def _is_timeout(exc: BaseException) -> bool:
+    # ``socket.timeout`` is an alias of ``TimeoutError`` on 3.10+, but
+    # keep both for older interpreters inside sandbox images.
+    return isinstance(exc, (TimeoutError, socket.timeout))
+
+
+def _parse_success(payload: bytes, path: str) -> dict:
+    if not payload:
+        return {}
+    try:
+        return json.loads(payload)
+    except ValueError as e:
+        _transport_failure(
+            "malformed_response", path, f"broker returned non-JSON response: {e}"
+        )
+
+
+def _broker_error_message(payload: bytes, status: int) -> str:
+    try:
+        err_body = json.loads(payload)
+        return str(err_body.get("error") or err_body.get("detail") or f"HTTP {status}")
+    except Exception:
+        return f"HTTP {status}"
+
+
+def _raise_for_transport(exc: BaseException, path: str) -> NoReturn:
+    if _is_timeout(exc):
+        _transport_failure(
+            "timeout",
+            path,
+            f"broker request timed out after {_REQUEST_TIMEOUT_S}s: {path}",
+        )
+    _transport_failure("unreachable", path, f"broker unreachable: {exc}")
+
+
 class _UnixHTTPConnection(http.client.HTTPConnection):
     """``HTTPConnection`` that speaks HTTP/1.1 over a Unix domain socket.
 
@@ -155,7 +225,9 @@ class _UnixHTTPConnection(http.client.HTTPConnection):
         self.sock = sock
 
 
-def _request_uds(socket_path: str, method: str, path: str, body: dict | None) -> dict:
+def _request_uds(
+    socket_path: str, method: str, path: str, body: dict | None, app_path: str
+) -> dict:
     """One HTTP round trip over a Unix-domain socket."""
     conn = _UnixHTTPConnection(socket_path, timeout=_REQUEST_TIMEOUT_S)
     data = json.dumps(body).encode() if body is not None else None
@@ -167,20 +239,14 @@ def _request_uds(socket_path: str, method: str, path: str, body: dict | None) ->
         conn.request(method, path, body=data, headers=headers)
         resp = conn.getresponse()
         payload = resp.read()
-        if 200 <= resp.status < 300:
-            return json.loads(payload) if payload else {}
-        try:
-            err_body = json.loads(payload)
-            msg = err_body.get("error") or err_body.get("detail") or f"HTTP {resp.status}"
-        except Exception:
-            msg = f"HTTP {resp.status}"
-        sys.stderr.write(f"tool: {msg}\n")
-        sys.exit(1)
-    except OSError as e:
-        sys.stderr.write(f"tool: broker unreachable: {e}\n")
-        sys.exit(2)
+    except (OSError, http.client.HTTPException) as e:
+        _raise_for_transport(e, app_path)
     finally:
         conn.close()
+    if 200 <= resp.status < 300:
+        return _parse_success(payload, app_path)
+    msg = _broker_error_message(payload, resp.status)
+    _transport_failure("http_error", app_path, msg, exit_code=1, status=resp.status)
 
 
 def _request(method: str, path: str, body: dict | None = None) -> dict:
@@ -198,7 +264,7 @@ def _request(method: str, path: str, body: dict | None = None) -> dict:
         # ``unix:///var/run/aios/tool-broker.sock`` → socket path is the
         # parsed path. Request line carries only the application path
         # (``/v1/.../tools``); the broker doesn't see the socket path.
-        return _request_uds(parsed.path, method, full_path, body)
+        return _request_uds(parsed.path, method, full_path, body, path)
 
     url = f"{base}{full_path}"
     data = json.dumps(body).encode() if body is not None else None
@@ -210,18 +276,25 @@ def _request(method: str, path: str, body: dict | None = None) -> dict:
     try:
         with urllib.request.urlopen(req, timeout=_REQUEST_TIMEOUT_S) as resp:
             payload = resp.read()
-            return json.loads(payload) if payload else {}
     except urllib.error.HTTPError as e:
         try:
-            err_body = json.loads(e.read())
-            msg = err_body.get("error") or err_body.get("detail") or f"HTTP {e.code}"
-        except Exception:
-            msg = f"HTTP {e.code}"
-        sys.stderr.write(f"tool: {msg}\n")
-        sys.exit(1)
+            err_payload = e.read()
+        except (OSError, http.client.HTTPException):
+            err_payload = b""
+        msg = _broker_error_message(err_payload, e.code)
+        _transport_failure("http_error", path, msg, exit_code=1, status=e.code)
     except urllib.error.URLError as e:
-        sys.stderr.write(f"tool: broker unreachable: {e.reason}\n")
-        sys.exit(2)
+        # Connect-phase failures arrive wrapped; a connect timeout is
+        # ``URLError(reason=TimeoutError)``.
+        reason = e.reason
+        if isinstance(reason, BaseException):
+            _raise_for_transport(reason, path)
+        _transport_failure("unreachable", path, f"broker unreachable: {reason}")
+    except (OSError, http.client.HTTPException) as e:
+        # Read-phase failures (incl. the #2227 ``TimeoutError: timed
+        # out``) are raised bare, not wrapped in URLError.
+        _raise_for_transport(e, path)
+    return _parse_success(payload, path)
 
 
 # ── command actions ───────────────────────────────────────────────────────────

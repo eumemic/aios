@@ -1,13 +1,13 @@
-"""Integration tests for the model-facing task verbs — ``stop_task`` + ``list_tasks`` (#1428).
+"""Integration tests for the model-facing task verbs — ``cancel_call`` + ``list_calls`` (#1428).
 
 DB-backed (testcontainer Postgres). The model plane keys on ``tool_call_id`` (the handle the
 caller already holds, stamped on the servicer edge by ``invoke_session._caller``); these tests
 exercise:
 
-* ``list_open_tasks`` (backs ``list_tasks``) — only OPEN edges keyed by ``tool_call_id``
+* ``list_open_tasks`` (backs ``list_calls``) — only OPEN edges keyed by ``tool_call_id``
   appear; an answered one drops off, and another session's edge is never visible. Both servicer
   kinds (a session servicer + a run servicer).
-* ``stop_task`` — seeds the cancel on the servicer (session arm → cancel-marker; run arm →
+* ``cancel_call`` — seeds the cancel on the servicer (session arm → cancel-marker; run arm →
   cancel signal, the launcher guard satisfied by construction since ``find_parked_servicer`` pins
   ``caller.id``), reports "already resolved" on a terminal edge, and errors on a foreign/absent
   ``tool_call_id``.
@@ -29,11 +29,13 @@ from aios.db.queries import workflows as wf_queries
 from aios.harness import runtime
 from aios.harness.inflight_tool_registry import InflightToolRegistry
 from aios.models.agents import ToolSpec
-from aios.models.sessions import Ok
+from aios.models.sessions import Err, Ok
+from aios.services import sessions as sessions_service
 from aios.services import tasks as tasks_service
 from aios.services import workflows as wf_service
 from aios.tools import tasks as task_tools
 from aios.tools import workflow_completion
+from aios.tools.invoke import invoke_builtin
 from aios.tools.registry import ToolResult
 from tests.integration.conftest import seed_agent_env_session
 
@@ -153,7 +155,7 @@ async def _seed_run(
     return run.id
 
 
-# ─── list_open_tasks (backs list_tasks) ────────────────────────────────
+# ─── list_open_tasks (backs list_calls) ────────────────────────────────
 
 
 async def test_list_open_tasks_only_open_and_own(
@@ -207,8 +209,8 @@ async def test_list_open_tasks_only_open_and_own(
     assert (by_tcid["tc_run"].kind, by_tcid["tc_run"].target) == ("run", run_id)
 
 
-async def test_list_tasks_handler_shape(env: tuple[asyncpg.Pool[Any], str]) -> None:
-    """The list_tasks tool returns the open roster as a JSON ``{tasks: [...]}`` envelope."""
+async def test_list_calls_handler_shape(env: tuple[asyncpg.Pool[Any], str]) -> None:
+    """The list_calls tool returns the open roster as a JSON ``{calls: [...]}`` envelope."""
     pool, _account_id = env
     caller = await _seed_session(pool, "lt-caller")
     servicer = await _seed_session(pool, "lt-srv")
@@ -220,23 +222,23 @@ async def test_list_tasks_handler_shape(env: tuple[asyncpg.Pool[Any], str]) -> N
         request_id="req_a",
     )
 
-    out = await task_tools.list_tasks_handler(caller, {})
-    assert list(out) == ["tasks"]
-    assert len(out["tasks"]) == 1
-    entry = out["tasks"][0]
+    out = await task_tools.list_calls_handler(caller, {})
+    assert list(out) == ["calls"]
+    assert len(out["calls"]) == 1
+    entry = out["calls"][0]
     assert entry["tool_call_id"] == "tc_a"
     assert entry["kind"] == "session"
     assert entry["target"] == servicer
     assert "opened_at" in entry
 
 
-# ─── stop_task ───────────────────────────────────────────────────────────────
+# ─── cancel_call ───────────────────────────────────────────────────────────────
 
 
-async def test_stop_task_session_arm_seeds_cancel_marker(
+async def test_cancel_call_session_arm_seeds_cancel_marker(
     env: tuple[asyncpg.Pool[Any], str],
 ) -> None:
-    """stop_task on a session servicer seeds the cancel-marker the target's step harvests."""
+    """cancel_call on a session servicer seeds the cancel-marker the target's step harvests."""
     pool, _account_id = env
     caller = await _seed_session(pool, "stop-caller")
     servicer = await _seed_session(pool, "stop-srv")
@@ -248,8 +250,8 @@ async def test_stop_task_session_arm_seeds_cancel_marker(
         request_id="req_stop",
     )
 
-    out = await task_tools.stop_task_handler(caller, {"tool_call_id": "tc_stop"})
-    assert out == {"ok": "stop requested"}
+    out = await task_tools.cancel_call_handler(caller, {"tool_call_id": "tc_stop"})
+    assert out == {"ok": "cancel requested"}
 
     async with pool.acquire() as conn:
         marker = await conn.fetchrow(
@@ -260,10 +262,10 @@ async def test_stop_task_session_arm_seeds_cancel_marker(
     assert marker is not None
 
 
-async def test_stop_task_run_arm_seeds_cancel_signal(
+async def test_cancel_call_run_arm_seeds_cancel_signal(
     env: tuple[asyncpg.Pool[Any], str],
 ) -> None:
-    """stop_task on a run servicer seeds the cancel signal — the launcher guard is satisfied by
+    """cancel_call on a run servicer seeds the cancel signal — the launcher guard is satisfied by
     construction (find_parked_servicer pins caller.id = the launching session)."""
     pool, _account_id = env
     caller = await _seed_session(pool, "stop-run-caller")
@@ -271,8 +273,8 @@ async def test_stop_task_run_arm_seeds_cancel_signal(
         pool, caller_session_id=caller, tool_call_id="tc_run_stop", request_id="req_run_stop"
     )
 
-    out = await task_tools.stop_task_handler(caller, {"tool_call_id": "tc_run_stop"})
-    assert out == {"ok": "stop requested"}
+    out = await task_tools.cancel_call_handler(caller, {"tool_call_id": "tc_run_stop"})
+    assert out == {"ok": "cancel requested"}
 
     async with pool.acquire() as conn:
         signal = await conn.fetchrow(
@@ -281,7 +283,7 @@ async def test_stop_task_run_arm_seeds_cancel_signal(
     assert signal is not None
 
 
-async def test_stop_task_foreign_tool_call_id_errors(
+async def test_cancel_call_foreign_tool_call_id_errors(
     env: tuple[asyncpg.Pool[Any], str],
 ) -> None:
     """An absent / foreign tool_call_id resolves to None (caller.id pinned) → a clean
@@ -300,10 +302,10 @@ async def test_stop_task_foreign_tool_call_id_errors(
     )
 
     # caller cannot reach other's task by its tool_call_id.
-    out = await task_tools.stop_task_handler(caller, {"tool_call_id": "tc_otherown"})
+    out = await task_tools.cancel_call_handler(caller, {"tool_call_id": "tc_otherown"})
     assert isinstance(out, ToolResult)
     assert out.is_error is True
-    assert isinstance(out.content, str) and "no open task" in out.content
+    assert isinstance(out.content, str) and "no open call" in out.content
 
     # No cancel-marker leaked onto the foreign servicer.
     async with pool.acquire() as conn:
@@ -313,7 +315,7 @@ async def test_stop_task_foreign_tool_call_id_errors(
     assert leaked is None
 
 
-async def test_stop_task_already_resolved(env: tuple[asyncpg.Pool[Any], str]) -> None:
+async def test_cancel_call_already_resolved(env: tuple[asyncpg.Pool[Any], str]) -> None:
     """A task that already answered reports 'already resolved' and seeds NO cancel."""
     pool, _account_id = env
     caller = await _seed_session(pool, "stop-done-caller")
@@ -329,7 +331,7 @@ async def test_stop_task_already_resolved(env: tuple[asyncpg.Pool[Any], str]) ->
         pool, servicer, request_id="req_done", outcome=Ok(result={"v": 9})
     )
 
-    out = await task_tools.stop_task_handler(caller, {"tool_call_id": "tc_done"})
+    out = await task_tools.cancel_call_handler(caller, {"tool_call_id": "tc_done"})
     assert out == {"ok": "already resolved"}
 
     async with pool.acquire() as conn:
@@ -339,3 +341,80 @@ async def test_stop_task_already_resolved(env: tuple[asyncpg.Pool[Any], str]) ->
             "req_done",
         )
     assert marker is None  # already terminal → nothing seeded
+
+
+# ─── goals are self-calls: list_calls (origin=self) + cancel_call reach them (#1516 B2) ──
+
+_GOAL_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {"shipped": {"type": "boolean"}},
+    "required": ["shipped"],
+}
+
+
+async def test_create_goal_is_listed_as_self_call_and_cancel_call_cancels_it(
+    env: tuple[asyncpg.Pool[Any], str],
+) -> None:
+    """A goal opened by ``create_goal`` on the model dispatch path (tool_call_id contextvar set)
+    is a self-call: ``list_calls`` shows it with ``origin=self`` under the launching
+    ``tool_call_id``, and ``cancel_call`` on that id seeds the cancel on the session ITSELF
+    (the self-servicer). The session's own cancel harvest then answers the goal ``cancelled``,
+    which closes the obligation, drops it from ``list_calls``, and makes a repeat
+    ``cancel_call`` report 'already resolved'."""
+    pool, account_id = env
+    session_id = await _seed_session(pool, "goal-self-call")
+
+    created = await invoke_builtin(
+        session_id,
+        "create_goal",
+        {"goal": "ship the feature", "output_schema": _GOAL_SCHEMA},
+        tool_call_id="tc_goal",
+    )
+    assert isinstance(created, dict)
+    goal_id = created["goal_id"]
+
+    listed = await invoke_builtin(session_id, "list_calls", {}, tool_call_id="tc_list")
+    assert isinstance(listed, dict)
+    goals = [c for c in listed["calls"] if c["tool_call_id"] == "tc_goal"]
+    assert len(goals) == 1
+    assert goals[0]["origin"] == "self"
+    assert goals[0]["kind"] == "session"
+    assert goals[0]["target"] == session_id
+
+    out = await invoke_builtin(
+        session_id, "cancel_call", {"tool_call_id": "tc_goal"}, tool_call_id="tc_cancel"
+    )
+    assert out == {"ok": "cancel requested"}
+    async with pool.acquire() as conn:
+        marker = await conn.fetchrow(
+            "SELECT 1 FROM session_cancel_markers WHERE session_id = $1 AND request_id = $2",
+            session_id,
+            goal_id,
+        )
+    assert marker is not None
+
+    # The self-servicer's own leaf harvest answers the goal `cancelled` and closes it.
+    harvest = await sessions_service.harvest_session_cancel_markers(
+        pool, session_id, account_id=account_id
+    )
+    assert harvest is not None
+    assert harvest.request_ids == (goal_id,)
+    # Dropping a goal is not a teardown: the (unowned) session stays alive.
+    assert harvest.teardown is False
+    async with pool.acquire() as conn:
+        assert goal_id not in await queries.get_open_request_ids(
+            conn, session_id, account_id=account_id
+        )
+        resp = await queries.derive_response(
+            conn, session_id, account_id=account_id, request_id=goal_id
+        )
+    assert isinstance(resp, Err)
+    assert resp.error == {"kind": "cancelled"}
+
+    after = await invoke_builtin(session_id, "list_calls", {}, tool_call_id="tc_list2")
+    assert isinstance(after, dict)
+    assert [c for c in after["calls"] if c["tool_call_id"] == "tc_goal"] == []
+    again = await invoke_builtin(
+        session_id, "cancel_call", {"tool_call_id": "tc_goal"}, tool_call_id="tc_cancel2"
+    )
+    assert again == {"ok": "already resolved"}

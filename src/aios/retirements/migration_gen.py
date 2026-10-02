@@ -67,6 +67,17 @@ HIGH_CARDINALITY_TABLES: frozenset[str] = frozenset({"wf_runs", "agent_versions"
 #: count sane on a big table.
 DEFAULT_BATCH_SIZE = 5000
 
+#: Surfaces whose tables carry an insert-only ``BEFORE UPDATE ... RAISE`` guard
+#: trigger (table → trigger name). A backfill ``UPDATE`` on such a table aborts
+#: the whole migration unless the guard is suspended around it, so the generator
+#: brackets the statement with ``DISABLE``/``ENABLE TRIGGER`` — the same
+#: migration-owned exemption 0154/0155 take for ``workflow_versions`` (0112).
+#: Both ALTERs run in the migration's transaction, so a failed rewrite rolls the
+#: DISABLE back too and the guard can never be left switched off.
+IMMUTABLE_TABLE_TRIGGERS: dict[str, str] = {
+    "workflow_versions": "workflow_versions_no_update",
+}
+
 #: The epoch column the backfill stamps (additive migration #1576).
 EPOCH_COLUMN = "tools_vocab_epoch"
 
@@ -278,6 +289,22 @@ def _backfill_statement(surface: Surface, retirement: Retirement, fn: str, revis
     null_guard = f"{surface.jsonb_col} IS NOT NULL AND " if surface.nullable else ""
     set_clause = f"{surface.jsonb_col} = {fn}({surface.jsonb_col}), {EPOCH_COLUMN} = {revision}"
 
+    statement = _backfill_update(surface, set_clause, null_guard, exists)
+    trigger = IMMUTABLE_TABLE_TRIGGERS.get(surface.table)
+    if trigger is None:
+        return statement
+    return f"""    # {surface.table} is insert-only at runtime (trigger {trigger}); suspend
+    # the guard for this migration-owned canonicalisation, as 0154/0155 do.
+    op.execute("ALTER TABLE {surface.table} DISABLE TRIGGER {trigger}")
+
+{statement}
+
+    op.execute("ALTER TABLE {surface.table} ENABLE TRIGGER {trigger}")"""
+
+
+def _backfill_update(surface: Surface, set_clause: str, null_guard: str, exists: str) -> str:
+    """The surface's rewrite statement(s), without any trigger bracketing."""
+
     if surface.table in HIGH_CARDINALITY_TABLES:
         # Batched: rewrite at most DEFAULT_BATCH_SIZE rows per statement, looping
         # until no residue remains. ctid-keyed so each batch is a bounded,
@@ -309,14 +336,29 @@ def _backfill_statement(surface: Surface, retirement: Retirement, fn: str, revis
     """)'''
 
 
-def build_backfill(retirement: Retirement, revision: str, down_revision: str) -> str:
-    """Source for the backfill migration: batched, EXISTS-pre-checked, epoch-stamping."""
+def _backfill_upgrade_body(retirement: Retirement, revision: str) -> str:
+    """The backfill's ``upgrade()`` statements: create transform, rewrite every surface, drop it."""
 
     fn = _function_name(retirement, revision)
     transform = _element_transform_sql(retirement)
     statements = "\n\n".join(
         _backfill_statement(s, retirement, fn, revision) for s in retirement.surfaces
     )
+    return f'''    # Order-preserving per-element transform, applied set-based per surface.
+    op.execute(r"""
+        CREATE FUNCTION {fn}(tools jsonb) RETURNS jsonb
+        LANGUAGE sql IMMUTABLE AS $fn${transform}
+        $fn$
+    """)
+
+{statements}
+
+    op.execute("DROP FUNCTION {fn}(jsonb)")'''
+
+
+def build_backfill(retirement: Retirement, revision: str, down_revision: str) -> str:
+    """Source for the backfill migration: batched, EXISTS-pre-checked, epoch-stamping."""
+
     header = _module_header(
         f"Backfill: rewrite persisted {retirement.domain!r} surfaces to canonical.",
         revision,
@@ -328,26 +370,17 @@ def build_backfill(retirement: Retirement, revision: str, down_revision: str) ->
         f"re-runnable. Stamps ``{EPOCH_COLUMN} = {revision}`` on each rewritten\n"
         "surface. ``downgrade`` is a no-op (forward-only).",
     )
-    return f'''{header}
+    return f"""{header}
 
 
 def upgrade() -> None:
-    # Order-preserving per-element transform, applied set-based per surface.
-    op.execute(r"""
-        CREATE FUNCTION {fn}(tools jsonb) RETURNS jsonb
-        LANGUAGE sql IMMUTABLE AS $fn${transform}
-        $fn$
-    """)
-
-{statements}
-
-    op.execute("DROP FUNCTION {fn}(jsonb)")
+{_backfill_upgrade_body(retirement, revision)}
 
 
 def downgrade() -> None:
     # Forward-only: canonicalised rows cannot be un-rewritten. Nothing to reverse.
     pass
-'''
+"""
 
 
 def _contract_residue_predicate(retirement: Retirement) -> str:
@@ -361,30 +394,11 @@ def _contract_residue_predicate(retirement: Retirement) -> str:
     return "\n        UNION ALL\n".join(parts)
 
 
-def build_contract(retirement: Retirement, revision: str, down_revision: str) -> str:
-    """Source for the contract migration: an in-transaction abort-guard."""
+def _guard_statement(retirement: Retirement, backfill_rev: str) -> str:
+    """The in-transaction residue abort-guard ``op.execute`` block."""
 
     residue = _contract_residue_predicate(retirement)
-    header = _module_header(
-        f"Contract: guard the {retirement.domain!r} retirement contract.",
-        revision,
-        down_revision,
-        "Carries the in-transaction **abort-guard**: a residue scan\n"
-        "over every surface that RAISES on any unmigrated row. Because the raise is\n"
-        "in-transaction the migration aborts and ``alembic_version`` never reaches\n"
-        "this contract rev, so the boot gate (#1575) holds the line. The guard is a\n"
-        "belt over the backfill's braces.",
-    )
-    return f'''{header}
-
-
-def upgrade() -> None:
-    # Belt: abort the whole migration in-transaction if ANY surface still holds a
-    # retired token. The backfill (rev N+1) should have left zero residue; a row
-    # written between backfill and contract, or missed by a surface bug, MUST
-    # abort here rather than silently contract. On abort, alembic_version never
-    # advances to this contract rev, so the descriptor-based boot gate (#1575) holds.
-    op.execute("""
+    return f'''    op.execute("""
         DO $guard$
         DECLARE
             residue bigint;
@@ -395,19 +409,94 @@ def upgrade() -> None:
             IF residue IS NOT NULL AND residue > 0 THEN
                 RAISE EXCEPTION
                     'retirement contract abort: % unmigrated row(s) remain for {retirement.domain}; '
-                    'run the backfill (rev {down_revision}) to convergence before contracting',
+                    'run the backfill (rev {backfill_rev}) to convergence before contracting',
                     residue;
             END IF;
         END
         $guard$;
-    """)
+    """)'''
+
+
+def build_contract(retirement: Retirement, revision: str, down_revision: str) -> str:
+    """Source for the contract migration: an in-transaction abort-guard."""
+
+    header = _module_header(
+        f"Contract: guard the {retirement.domain!r} retirement contract.",
+        revision,
+        down_revision,
+        "Carries the in-transaction **abort-guard**: a residue scan\n"
+        "over every surface that RAISES on any unmigrated row. Because the raise is\n"
+        "in-transaction the migration aborts and ``alembic_version`` never reaches\n"
+        "this contract rev, so the boot gate (#1575) holds the line. The guard is a\n"
+        "belt over the backfill's braces.",
+    )
+    return f"""{header}
+
+
+def upgrade() -> None:
+    # Belt: abort the whole migration in-transaction if ANY surface still holds a
+    # retired token. The backfill (rev N+1) should have left zero residue; a row
+    # written between backfill and contract, or missed by a surface bug, MUST
+    # abort here rather than silently contract. On abort, alembic_version never
+    # advances to this contract rev, so the descriptor-based boot gate (#1575) holds.
+{_guard_statement(retirement, down_revision)}
 
 
 
 def downgrade() -> None:
     # Forward-only lifecycle. Nothing to reverse.
     pass
-'''
+"""
+
+
+def build_retirement(retirement: Retirement, revision: str, down_revision: str) -> str:
+    """Source for the single-revision retirement: backfill, then the residue guard.
+
+    The default form (#1516 / aios#2488). The expand step is a no-op on data, so
+    it is not emitted; the backfill and the contract abort-guard run in ONE
+    revision, in that order, inside alembic's single migration transaction. Any
+    failure (a surface UPDATE raising, or the guard finding residue) rolls back
+    every rewrite, any ``DISABLE TRIGGER``, and leaves ``alembic_version`` at
+    ``down_revision`` — nothing partial is ever committed, so a re-run starts
+    from the same state. One revision also keeps a retirement PR to a single
+    branch-only migration, which is what ``scripts/check_migration_heads.py``
+    admits.
+    """
+
+    header = _module_header(
+        f"Retire: rewrite persisted {retirement.domain!r} surfaces and guard the contract.",
+        revision,
+        down_revision,
+        "One revision, two phases, one transaction:\n"
+        "\n"
+        "1. **Backfill** — EXISTS-pre-checked, set-based rewrite across every surface\n"
+        "   the descriptor declares. High-cardinality surfaces are rewritten in\n"
+        "   bounded ``ctid`` batches to cap lock-hold (the 0066 lesson); insert-only\n"
+        "   tables have their immutability trigger suspended around the rewrite.\n"
+        f"   Stamps ``{EPOCH_COLUMN} = {revision}`` on each rewritten surface.\n"
+        "2. **Contract abort-guard** — a residue scan over every surface that RAISES\n"
+        "   on any unmigrated row. The raise is in-transaction, so the whole\n"
+        "   migration (backfill included) rolls back and ``alembic_version`` never\n"
+        "   reaches this rev; the boot gate (#1575) holds the line.\n"
+        "\n"
+        "``downgrade`` is a no-op (forward-only).",
+    )
+    return f"""{header}
+
+
+def upgrade() -> None:
+{_backfill_upgrade_body(retirement, revision)}
+
+    # Belt: abort the whole migration in-transaction if ANY surface still holds a
+    # retired token after the backfill above. On abort, every rewrite rolls back
+    # and alembic_version never advances to this rev, so the boot gate (#1575) holds.
+{_guard_statement(retirement, revision)}
+
+
+def downgrade() -> None:
+    # Forward-only: canonicalised rows cannot be un-rewritten. Nothing to reverse.
+    pass
+"""
 
 
 # ── Public entry point ────────────────────────────────────────────────────────
@@ -447,6 +536,31 @@ def generate(
         source=build_contract(retirement, contract_rev, backfill_rev),
     )
     return GeneratedChain(expand=expand, backfill=backfill, contract=contract)
+
+
+def generate_single(
+    retirement: Retirement,
+    head: str,
+    *,
+    descriptor_name: str | None = None,
+) -> GeneratedMigration:
+    """Emit ONE retirement migration (backfill + contract guard) on top of ``head``.
+
+    This is the form ``bin/aios-retire`` writes by default. The expand step of
+    :func:`generate` has an empty ``upgrade()``, so it is skipped; backfill and
+    guard share one revision (and therefore one transaction). Set the
+    descriptor's ``introduced_rev`` and ``contract_rev`` to the returned
+    revision.
+    """
+
+    (rev,) = next_revisions(head, 1)
+    name = descriptor_name or retirement.domain
+    slug = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
+    return GeneratedMigration(
+        revision=rev,
+        filename=f"{rev}_retire_{slug}.py",
+        source=build_retirement(retirement, rev, head),
+    )
 
 
 def resolve_descriptor(name: str) -> tuple[Retirement, str]:

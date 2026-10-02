@@ -39,7 +39,7 @@ from tests.integration.conftest import seed_agent_env_session
 
 pytestmark = pytest.mark.integration
 
-_DEFAULT_MAX_CHARS = 200_000
+_DEFAULT_MAX_CHARS = 16_000
 
 
 @pytest.fixture
@@ -120,7 +120,7 @@ class TestToolResultSpill:
         spill_session: tuple[asyncpg.Pool[Any], str, str],
     ) -> None:
         pool, session_id, tool_call_id = spill_session
-        original = "X" * 300_000  # > the 200_000 default cap
+        original = "X" * 300_000  # > the 16_000 default cap
         assert len(original) > _DEFAULT_MAX_CHARS
 
         async with pool.acquire() as conn:

@@ -5,10 +5,15 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import sys
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+#: Exit code for "could not read the runs payload" -- distinct from 0 (healthy)
+#: and 1 (breach). A blind watchdog must never be indistinguishable from either (#2317).
+EXIT_BLIND = 2
 
 _NONTERMINAL = {"queued", "in_progress", "pending", "requested", "waiting"}
 
@@ -80,13 +85,40 @@ def evaluate_runs(
     )
 
 
+def _load_runs(path: Path) -> tuple[list[dict[str, Any]] | None, str]:
+    """Parse the runs payload; ``(None, reason)`` when it is not a readable runs list.
+
+    GitHub error bodies (401 ``Bad credentials``, rate limit) are VALID JSON
+    without ``workflow_runs``. An absent required field is a failed read, never
+    an empty result -- defaulting it would assert health that was never
+    established (#2317).
+    """
+    try:
+        payload = json.loads(path.read_text())
+    except (OSError, ValueError) as exc:
+        return None, f"runs payload unparseable: {exc}"
+    runs = payload.get("workflow_runs") if isinstance(payload, dict) else None
+    if not isinstance(runs, list):
+        message = payload.get("message") if isinstance(payload, dict) else None
+        return None, f"runs payload has no workflow_runs list: {message}"
+    return [run for run in runs if isinstance(run, dict)], ""
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("runs", type=Path)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
-    payload = json.loads(args.runs.read_text())
-    verdict = evaluate_runs(payload["workflow_runs"])
+    runs, reason = _load_runs(args.runs)
+    if runs is None:
+        # Cannot-determine is NOT "nothing pending" and NOT "breach": say so loudly.
+        print(
+            f"BLIND: CI queue watchdog could not read runs; check did NOT run: {reason}",
+            file=sys.stderr,
+        )
+        args.output.write_text(json.dumps({"status": "unreadable", "reason": reason}))
+        return EXIT_BLIND
+    verdict = evaluate_runs(runs)
     args.output.write_text(json.dumps(asdict(verdict) if verdict else None))
     if isinstance(verdict, InsufficientHistory):
         return 2
