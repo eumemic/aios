@@ -144,7 +144,8 @@ def unregister(
     Runs ``signal-cli -a <phone> unregister`` inside the connector, so the
     number can be registered elsewhere.  Detaching a connection alone does
     NOT release the number.  After this the connector can no longer send
-    or receive on it.
+    or receive on it.  Refused (409) while a live connection for the
+    number is still attached — detach or archive it first.
     """
 
     def _run() -> None:

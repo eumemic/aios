@@ -743,6 +743,40 @@ async def get_connection_for_account(
     return _row_to_connection(row)
 
 
+async def list_attached_connections_for_phone(
+    conn: asyncpg.Connection[Any],
+    connector: str,
+    phone_digits: str,
+    *,
+    account_id: str,
+) -> list[Connection]:
+    """Live (non-archived), still-bound connections in the caller's tenant
+    whose ``external_account_id`` equals ``phone_digits`` after stripping
+    every non-digit character (so ``+1 (657) 527-4288`` and
+    ``16575274288`` match the same row).
+
+    "Still bound" means an active ``bindings`` row exists — single_session
+    (bound to a session) or per_chat (routing into per-chat sessions).
+    Either way, the number is in active use.
+    """
+    rows = await conn.fetch(
+        f"""
+        SELECT {_CONNECTION_COLUMNS}
+          FROM {_CONNECTION_FROM}
+         WHERE c.connector = $1
+           AND c.account_id = $2
+           AND c.archived_at IS NULL
+           AND b.id IS NOT NULL
+           AND regexp_replace(c.external_account_id, '[^0-9]', '', 'g') = $3
+         ORDER BY c.id
+        """,
+        connector,
+        account_id,
+        phone_digits,
+    )
+    return [_row_to_connection(r) for r in rows]
+
+
 async def list_connections(
     conn: asyncpg.Connection[Any],
     *,

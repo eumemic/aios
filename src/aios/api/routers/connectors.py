@@ -53,6 +53,7 @@ from aios.db.listen import (
 )
 from aios.errors import (
     AiosError,
+    ConflictError,
     ConnectorCallFailedError,
     ForbiddenError,
     NotFoundError,
@@ -1332,7 +1333,34 @@ async def post_signal_unregister(
     to the device until this runs, so re-registering it elsewhere fails.
     Detach (or archive) the connection first: once unregistered, the
     connector can no longer send or receive on the number.
+
+    That precondition is ENFORCED, not just documented: unregistering is
+    irreversible (the number must be re-registered and re-verified), so if
+    any of the caller's non-archived signal connections for this number
+    (matched on digits only) still has an active binding, the request is
+    refused with 409 ``conflict`` and no management call is dispatched.
+    A malformed number with no digits is a 422.
     """
+    digits = "".join(ch for ch in body.external_account_id if ch.isdigit())
+    if not digits:
+        raise ValidationError(
+            "external_account_id must be a phone number",
+            detail={"external_account_id": body.external_account_id},
+        )
+    async with pool.acquire() as conn:
+        attached = await queries.list_attached_connections_for_phone(
+            conn, "signal", digits, account_id=account_id
+        )
+    if attached:
+        raise ConflictError(
+            f"signal number {body.external_account_id} is still attached; "
+            "detach (or archive) the connection before unregistering",
+            detail={
+                "external_account_id": body.external_account_id,
+                "reason": "connection_still_attached",
+                "connection_ids": [c.id for c in attached],
+            },
+        )
     await _signal_management_call(
         db_url,
         pool,

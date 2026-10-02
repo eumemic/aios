@@ -10053,7 +10053,7 @@
           "connectors"
         ],
         "summary": "Post Signal Unregister",
-        "description": "Release the number from this connector's signal-cli device.\n\nEquivalent to ``signal-cli -a <phone> unregister`` run by the\nconnector against its own config dir.  Detaching an aios connection\nonly changes the aios binding \u2014 Signal keeps the number registered\nto the device until this runs, so re-registering it elsewhere fails.\nDetach (or archive) the connection first: once unregistered, the\nconnector can no longer send or receive on the number.",
+        "description": "Release the number from this connector's signal-cli device.\n\nEquivalent to ``signal-cli -a <phone> unregister`` run by the\nconnector against its own config dir.  Detaching an aios connection\nonly changes the aios binding \u2014 Signal keeps the number registered\nto the device until this runs, so re-registering it elsewhere fails.\nDetach (or archive) the connection first: once unregistered, the\nconnector can no longer send or receive on the number.\n\nThat precondition is ENFORCED, not just documented: unregistering is\nirreversible (the number must be re-registered and re-verified), so if\nany of the caller's non-archived signal connections for this number\n(matched on digits only) still has an active binding, the request is\nrefused with 409 ``conflict`` and no management call is dispatched.\nA malformed number with no digits is a 422.",
         "operationId": "post_connector_signal_unregister",
         "parameters": [
           {

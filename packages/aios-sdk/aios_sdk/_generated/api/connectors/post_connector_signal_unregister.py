@@ -78,6 +78,13 @@ def sync_detailed(
     Detach (or archive) the connection first: once unregistered, the
     connector can no longer send or receive on the number.
 
+    That precondition is ENFORCED, not just documented: unregistering is
+    irreversible (the number must be re-registered and re-verified), so if
+    any of the caller's non-archived signal connections for this number
+    (matched on digits only) still has an active binding, the request is
+    refused with 409 ``conflict`` and no management call is dispatched.
+    A malformed number with no digits is a 422.
+
     Args:
         authorization (None | str | Unset):
         body (SignalUnregisterRequest):
@@ -119,6 +126,13 @@ def sync(
     Detach (or archive) the connection first: once unregistered, the
     connector can no longer send or receive on the number.
 
+    That precondition is ENFORCED, not just documented: unregistering is
+    irreversible (the number must be re-registered and re-verified), so if
+    any of the caller's non-archived signal connections for this number
+    (matched on digits only) still has an active binding, the request is
+    refused with 409 ``conflict`` and no management call is dispatched.
+    A malformed number with no digits is a 422.
+
     Args:
         authorization (None | str | Unset):
         body (SignalUnregisterRequest):
@@ -154,6 +168,13 @@ async def asyncio_detailed(
     to the device until this runs, so re-registering it elsewhere fails.
     Detach (or archive) the connection first: once unregistered, the
     connector can no longer send or receive on the number.
+
+    That precondition is ENFORCED, not just documented: unregistering is
+    irreversible (the number must be re-registered and re-verified), so if
+    any of the caller's non-archived signal connections for this number
+    (matched on digits only) still has an active binding, the request is
+    refused with 409 ``conflict`` and no management call is dispatched.
+    A malformed number with no digits is a 422.
 
     Args:
         authorization (None | str | Unset):
@@ -193,6 +214,13 @@ async def asyncio(
     to the device until this runs, so re-registering it elsewhere fails.
     Detach (or archive) the connection first: once unregistered, the
     connector can no longer send or receive on the number.
+
+    That precondition is ENFORCED, not just documented: unregistering is
+    irreversible (the number must be re-registered and re-verified), so if
+    any of the caller's non-archived signal connections for this number
+    (matched on digits only) still has an active binding, the request is
+    refused with 409 ``conflict`` and no management call is dispatched.
+    A malformed number with no digits is a 422.
 
     Args:
         authorization (None | str | Unset):
