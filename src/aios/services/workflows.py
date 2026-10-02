@@ -98,6 +98,7 @@ async def launch_awaited_run(
     budget_usd: float | None = None,
     workspace: str = "fresh",
     version: int | None = None,
+    run_id: str | None = None,
 ) -> tuple[WfRun, str]:
     """Launch a run as an **awaited** servicer — the one place the run-as-Ask contract lives.
 
@@ -110,7 +111,8 @@ async def launch_awaited_run(
     (no ``request_id``/``caller``) and calls :func:`create_run` directly.
 
     Pass EITHER ``workflow_id`` (registered) OR ``inline`` (the T5 inline-script arm,
-    #1466) — :func:`create_run` enforces exactly-one.
+    #1466) — :func:`create_run` enforces exactly-one. A pre-assigned ``run_id`` makes
+    the launch idempotent: a repeat call re-attaches the existing run.
     """
     request_id = make_id(REQUEST)
     run = await create_run(
@@ -129,6 +131,7 @@ async def launch_awaited_run(
         budget_usd=budget_usd,
         workspace=workspace,
         version=version,
+        run_id=run_id,
     )
     return run, request_id
 
