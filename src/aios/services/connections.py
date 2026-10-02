@@ -322,6 +322,12 @@ async def _lock_number_and_refuse_if_releasing(
     committed first and this raises :class:`ConflictError` here.  Refusing
     (rather than waiting for the release to resolve) keeps attach from
     blocking on a connector that may never answer.
+
+    The refusal lasts until the call row is TERMINAL, not until its
+    ``expires_at`` (#2322 F3): a connector that already received the call
+    can still execute it after expiry.  See
+    :func:`queries.has_pending_management_call_for_number` and the escape
+    hatch :func:`cancel_number_unregister`.
     """
     await queries.acquire_connection_number_lock(
         conn,
@@ -347,6 +353,41 @@ async def _lock_number_and_refuse_if_releasing(
                 "external_account_id": external_account_id,
                 "reason": "number_unregister_pending",
             },
+        )
+
+
+async def cancel_number_unregister(
+    pool: asyncpg.Pool[Any],
+    *,
+    account_id: str,
+    connector: str,
+    external_account_id: str,
+) -> list[str]:
+    """Operator escape hatch: terminalise every still-pending ``unregister``
+    call for this number so binding paths stop refusing it (#2322 F3).
+
+    The guard clears only on a terminal status.  The normal terminaliser is
+    the connector (it resolves the call; a non-terminal ``unregister`` is
+    redelivered on every reconnect, so a crash before execution is retried).
+    This is the override for when that cannot happen: the connector is gone
+    for good, or it executed the call but its result POST was lost.  Taken
+    under the number lock so it is ordered against the binding paths.
+
+    Returns the cancelled call ids (empty if nothing was pending).
+    """
+    async with pool.acquire() as conn, conn.transaction():
+        await queries.acquire_connection_number_lock(
+            conn,
+            account_id=account_id,
+            connector=connector,
+            external_account_id=external_account_id,
+        )
+        return await queries.cancel_pending_management_calls_for_number(
+            conn,
+            account_id=account_id,
+            connector=connector,
+            method=_NUMBER_RELEASE_METHOD,
+            phone_digits=queries.phone_digits(external_account_id),
         )
 
 
@@ -653,7 +694,8 @@ async def bind_chat_to_session(
         # chat_session pointing at an archived connection. Symmetric
         # to the archive_connection / attach_connection fix (#661).
         locked = await conn.fetchrow(
-            "SELECT archived_at FROM connections WHERE id = $1 AND account_id = $2 FOR UPDATE",
+            "SELECT archived_at, connector, external_account_id FROM connections "
+            "WHERE id = $1 AND account_id = $2 FOR UPDATE",
             connection_id,
             account_id,
         )
@@ -667,6 +709,16 @@ async def bind_chat_to_session(
                 f"connection {connection_id} is archived; cannot bind a chat to it",
                 detail={"id": connection_id},
             )
+        # A bound chat routes inbound on the number with no binding at all
+        # (resolver tier 1), so it is "in use" for the unregister guard and
+        # must be serialized against it like attach is (#2322 N1).
+        await _lock_number_and_refuse_if_releasing(
+            conn,
+            account_id=account_id,
+            connector=locked["connector"],
+            external_account_id=locked["external_account_id"],
+            connection_id=connection_id,
+        )
         # Validate both FKs at the service boundary — without this,
         # asyncpg surfaces FK violations as 500s instead of clean 4xxs.
         await queries.get_connection(conn, connection_id, account_id=account_id)

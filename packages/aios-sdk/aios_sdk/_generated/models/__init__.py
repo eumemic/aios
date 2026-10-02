@@ -261,6 +261,7 @@ from .signal_profile_request import SignalProfileRequest
 from .signal_register_request import SignalRegisterRequest
 from .signal_register_response import SignalRegisterResponse
 from .signal_register_response_status import SignalRegisterResponseStatus
+from .signal_unregister_cancel_response import SignalUnregisterCancelResponse
 from .signal_unregister_request import SignalUnregisterRequest
 from .signal_verify_request import SignalVerifyRequest
 from .signal_verify_response import SignalVerifyResponse
@@ -626,6 +627,7 @@ __all__ = (
     "SignalRegisterRequest",
     "SignalRegisterResponse",
     "SignalRegisterResponseStatus",
+    "SignalUnregisterCancelResponse",
     "SignalUnregisterRequest",
     "SignalVerifyRequest",
     "SignalVerifyResponse",

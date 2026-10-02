@@ -67,7 +67,7 @@ def sync_detailed(
     body: SignalUnregisterRequest,
     authorization: None | str | Unset = UNSET,
 ) -> Response[Any | HTTPValidationError]:
-    """Post Signal Unregister
+    r"""Post Signal Unregister
 
      Release the number from this connector's signal-cli device.
 
@@ -81,9 +81,13 @@ def sync_detailed(
     That precondition is ENFORCED, not just documented: unregistering is
     irreversible (the number must be re-registered and re-verified), so if
     any of the caller's non-archived signal connections for this number
-    (matched on digits only) still has an active binding, the request is
+    (matched on ASCII digits 0-9 only) is still in use, the request is
     refused with 409 ``conflict`` and no management call is dispatched.
-    A malformed number with no digits is a 422.
+    \"In use\" means the connection has an active binding (single_session or
+    per_chat) OR any bound chat (``chat_sessions`` row: an operator
+    ``bind-chat``, or a per_chat chat left behind by ``unconfigure``), since
+    a bound chat routes inbound with no binding at all.  Unbind those chats
+    too.  A malformed number with no digits is a 422.
 
     The check holds under concurrency (#2322 F2): the read below is only a
     fast path.  The authoritative check runs again inside ``submit_call``,
@@ -92,6 +96,13 @@ def sync_detailed(
     (attach, configure per_chat, reparent) also takes.  A binding racing
     this request either commits first (this request then gets 409) or is
     itself refused with 409 while the unregister call is pending.
+
+    \"Pending\" ends only when the call row is TERMINAL (the connector
+    resolved it, or an operator cancelled it via
+    ``/signal/unregister/cancel``), never at wall-clock expiry (#2322 F3).
+    A 504 timeout here does NOT mean the unregister will not run: the
+    connector may still execute it, so binds on the number stay refused
+    (409 ``number_unregister_pending``) until it resolves.
 
     Args:
         authorization (None | str | Unset):
@@ -123,7 +134,7 @@ def sync(
     body: SignalUnregisterRequest,
     authorization: None | str | Unset = UNSET,
 ) -> Any | HTTPValidationError | None:
-    """Post Signal Unregister
+    r"""Post Signal Unregister
 
      Release the number from this connector's signal-cli device.
 
@@ -137,9 +148,13 @@ def sync(
     That precondition is ENFORCED, not just documented: unregistering is
     irreversible (the number must be re-registered and re-verified), so if
     any of the caller's non-archived signal connections for this number
-    (matched on digits only) still has an active binding, the request is
+    (matched on ASCII digits 0-9 only) is still in use, the request is
     refused with 409 ``conflict`` and no management call is dispatched.
-    A malformed number with no digits is a 422.
+    \"In use\" means the connection has an active binding (single_session or
+    per_chat) OR any bound chat (``chat_sessions`` row: an operator
+    ``bind-chat``, or a per_chat chat left behind by ``unconfigure``), since
+    a bound chat routes inbound with no binding at all.  Unbind those chats
+    too.  A malformed number with no digits is a 422.
 
     The check holds under concurrency (#2322 F2): the read below is only a
     fast path.  The authoritative check runs again inside ``submit_call``,
@@ -148,6 +163,13 @@ def sync(
     (attach, configure per_chat, reparent) also takes.  A binding racing
     this request either commits first (this request then gets 409) or is
     itself refused with 409 while the unregister call is pending.
+
+    \"Pending\" ends only when the call row is TERMINAL (the connector
+    resolved it, or an operator cancelled it via
+    ``/signal/unregister/cancel``), never at wall-clock expiry (#2322 F3).
+    A 504 timeout here does NOT mean the unregister will not run: the
+    connector may still execute it, so binds on the number stay refused
+    (409 ``number_unregister_pending``) until it resolves.
 
     Args:
         authorization (None | str | Unset):
@@ -174,7 +196,7 @@ async def asyncio_detailed(
     body: SignalUnregisterRequest,
     authorization: None | str | Unset = UNSET,
 ) -> Response[Any | HTTPValidationError]:
-    """Post Signal Unregister
+    r"""Post Signal Unregister
 
      Release the number from this connector's signal-cli device.
 
@@ -188,9 +210,13 @@ async def asyncio_detailed(
     That precondition is ENFORCED, not just documented: unregistering is
     irreversible (the number must be re-registered and re-verified), so if
     any of the caller's non-archived signal connections for this number
-    (matched on digits only) still has an active binding, the request is
+    (matched on ASCII digits 0-9 only) is still in use, the request is
     refused with 409 ``conflict`` and no management call is dispatched.
-    A malformed number with no digits is a 422.
+    \"In use\" means the connection has an active binding (single_session or
+    per_chat) OR any bound chat (``chat_sessions`` row: an operator
+    ``bind-chat``, or a per_chat chat left behind by ``unconfigure``), since
+    a bound chat routes inbound with no binding at all.  Unbind those chats
+    too.  A malformed number with no digits is a 422.
 
     The check holds under concurrency (#2322 F2): the read below is only a
     fast path.  The authoritative check runs again inside ``submit_call``,
@@ -199,6 +225,13 @@ async def asyncio_detailed(
     (attach, configure per_chat, reparent) also takes.  A binding racing
     this request either commits first (this request then gets 409) or is
     itself refused with 409 while the unregister call is pending.
+
+    \"Pending\" ends only when the call row is TERMINAL (the connector
+    resolved it, or an operator cancelled it via
+    ``/signal/unregister/cancel``), never at wall-clock expiry (#2322 F3).
+    A 504 timeout here does NOT mean the unregister will not run: the
+    connector may still execute it, so binds on the number stay refused
+    (409 ``number_unregister_pending``) until it resolves.
 
     Args:
         authorization (None | str | Unset):
@@ -228,7 +261,7 @@ async def asyncio(
     body: SignalUnregisterRequest,
     authorization: None | str | Unset = UNSET,
 ) -> Any | HTTPValidationError | None:
-    """Post Signal Unregister
+    r"""Post Signal Unregister
 
      Release the number from this connector's signal-cli device.
 
@@ -242,9 +275,13 @@ async def asyncio(
     That precondition is ENFORCED, not just documented: unregistering is
     irreversible (the number must be re-registered and re-verified), so if
     any of the caller's non-archived signal connections for this number
-    (matched on digits only) still has an active binding, the request is
+    (matched on ASCII digits 0-9 only) is still in use, the request is
     refused with 409 ``conflict`` and no management call is dispatched.
-    A malformed number with no digits is a 422.
+    \"In use\" means the connection has an active binding (single_session or
+    per_chat) OR any bound chat (``chat_sessions`` row: an operator
+    ``bind-chat``, or a per_chat chat left behind by ``unconfigure``), since
+    a bound chat routes inbound with no binding at all.  Unbind those chats
+    too.  A malformed number with no digits is a 422.
 
     The check holds under concurrency (#2322 F2): the read below is only a
     fast path.  The authoritative check runs again inside ``submit_call``,
@@ -253,6 +290,13 @@ async def asyncio(
     (attach, configure per_chat, reparent) also takes.  A binding racing
     this request either commits first (this request then gets 409) or is
     itself refused with 409 while the unregister call is pending.
+
+    \"Pending\" ends only when the call row is TERMINAL (the connector
+    resolved it, or an operator cancelled it via
+    ``/signal/unregister/cancel``), never at wall-clock expiry (#2322 F3).
+    A 504 timeout here does NOT mean the unregister will not run: the
+    connector may still execute it, so binds on the number stay refused
+    (409 ``number_unregister_pending``) until it resolves.
 
     Args:
         authorization (None | str | Unset):

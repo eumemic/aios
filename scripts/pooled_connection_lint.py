@@ -54,6 +54,7 @@ _DB_HELPER_SYMBOLS = frozenset(
         "queries.acquire_account_triggers_lock",
         "queries.acquire_connection_number_lock",
         "queries.acquire_session_resources_lock",
+        "queries.cancel_pending_management_calls_for_number",
         "queries.acquire_workspace_advisory_xact_lock",
         "queries.acquire_workspace_hierarchy_advisory_xact_locks",
         "queries.add_trigger",

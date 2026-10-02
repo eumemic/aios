@@ -116,3 +116,33 @@ async def test_rejects_digitless_number_without_dispatch() -> None:
             "acc_1",
         )
     assert submit.await_count == 0
+
+
+def test_phone_digits_keeps_ascii_digits_only() -> None:
+    """#2322 N2: the Python normal form must agree with the SQL side's
+    ``regexp_replace(..., '[^0-9]', '', 'g')``.  ``str.isdigit`` would keep
+    fullwidth / Arabic-Indic / superscript digits that the SQL strips."""
+    from aios.db.queries import phone_digits
+
+    assert phone_digits("+1 (657) 527-4288") == "16575274288"
+    assert phone_digits("+1657527428\uff18") == "1657527428"  # fullwidth 8 dropped
+    assert phone_digits("\u0663\u0663\u0663") == ""
+    assert phone_digits("+1\u00b2") == "1"
+
+
+@pytest.mark.asyncio
+async def test_unicode_only_digits_are_rejected_as_422_without_dispatch() -> None:
+    pool = _pool()
+    submit = AsyncMock()
+    with (
+        _NO_ATTACHED,
+        patch("aios.api.routers.connectors.management_calls.submit_call", submit),
+        pytest.raises(ValidationError),
+    ):
+        await post_signal_unregister(
+            SignalUnregisterRequest(external_account_id="+\u0663\u0663\u0663"),
+            "postgresql://x",
+            pool,
+            "acc_1",
+        )
+    assert submit.await_count == 0

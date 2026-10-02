@@ -1,4 +1,4 @@
-"""``aios signal {register, verify, profile, unregister}`` — signal-cli management ops."""
+"""``aios signal {register, verify, profile, unregister, unregister-cancel}`` — signal-cli ops."""
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from aios_sdk._generated.api.connectors import (
     post_connector_signal_profile,
     post_connector_signal_register,
     post_connector_signal_unregister,
+    post_connector_signal_unregister_cancel,
     post_connector_signal_verify,
 )
 from aios_sdk._generated.models.signal_profile_request import SignalProfileRequest
@@ -153,5 +154,31 @@ def unregister(
             body = SignalUnregisterRequest(external_account_id=phone)
             unwrap(post_connector_signal_unregister.sync_detailed(client=client, body=body))
         print_note(f"unregistered {phone}; the number can now be registered elsewhere")
+
+    run_or_die(_run)
+
+
+@app.command("unregister-cancel")
+@covers("post_connector_signal_unregister_cancel")
+def unregister_cancel(
+    ctx: typer.Context,
+    phone: Annotated[str, typer.Argument(help="E.164 phone, e.g. +15551234567.")],
+) -> None:
+    """Cancel a pending unregister so the number can be bound again.
+
+    While an unregister for a number is pending, attach / configure /
+    bind-chat on it are refused (409 number_unregister_pending), even
+    after the unregister request itself timed out.  Use this only when
+    the connector will not run the call (gone for good, or its result was
+    lost).  It does not recall a call the connector has already received.
+    """
+
+    def _run() -> None:
+        with get_state(ctx).sdk_client() as client:
+            body = SignalUnregisterRequest(external_account_id=phone)
+            result = unwrap(
+                post_connector_signal_unregister_cancel.sync_detailed(client=client, body=body)
+            )
+        render_single(result.to_dict())
 
     run_or_die(_run)

@@ -571,6 +571,7 @@ from .inbound_grants import (  # noqa: E402
     upsert_pending_inbound_grant,
 )
 from .management_calls import (  # noqa: E402
+    cancel_pending_management_calls_for_number,
     get_management_call,
     has_pending_management_call_for_number,
     insert_management_call,
@@ -878,6 +879,7 @@ __all__ = [
     "batch_list_session_triggers",
     "blended_r_eff",
     "bootstrap_root_account",
+    "cancel_pending_management_calls_for_number",
     "children_of",
     "claim_trigger_run",
     "clear_session_egress",

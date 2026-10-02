@@ -748,8 +748,13 @@ def phone_digits(external_account_id: str) -> str:
 
     ``+1 (657) 527-4288`` and ``16575274288`` normalise to the same string;
     this is the identity the number lock and the unregister guard key on.
+
+    ASCII ``0-9`` only, matching the SQL side's ``[^0-9]`` normalisation
+    exactly: ``str.isdigit`` would also keep non-ASCII digits (fullwidth,
+    Arabic-Indic, superscript) that the SQL strips, so the two sides could
+    disagree.
     """
-    return "".join(ch for ch in external_account_id if ch.isdigit())
+    return "".join(ch for ch in external_account_id if ch in "0123456789")
 
 
 async def acquire_connection_number_lock(
@@ -784,14 +789,19 @@ async def list_attached_connections_for_phone(
     *,
     account_id: str,
 ) -> list[Connection]:
-    """Live (non-archived), still-bound connections in the caller's tenant
+    """Live (non-archived), still-in-use connections in the caller's tenant
     whose ``external_account_id`` equals ``phone_digits`` after stripping
     every non-digit character (so ``+1 (657) 527-4288`` and
     ``16575274288`` match the same row).
 
-    "Still bound" means an active ``bindings`` row exists — single_session
-    (bound to a session) or per_chat (routing into per-chat sessions).
-    Either way, the number is in active use.
+    "In use" means inbound on the number still routes somewhere:
+
+    * an active ``bindings`` row — single_session (bound to a session) or
+      per_chat (routing into per-chat sessions); or
+    * any ``chat_sessions`` row — an operator-bound chat (``bind-chat``) or
+      a per_chat-spawned chat that survived ``unconfigure``.  The resolver's
+      tier 1 routes those chats with NO binding at all (#2322 N1), so
+      detaching alone does not take the number out of use.
     """
     rows = await conn.fetch(
         f"""
@@ -800,7 +810,12 @@ async def list_attached_connections_for_phone(
          WHERE c.connector = $1
            AND c.account_id = $2
            AND c.archived_at IS NULL
-           AND b.id IS NOT NULL
+           AND (
+                b.id IS NOT NULL
+             OR EXISTS (SELECT 1 FROM chat_sessions cs
+                         WHERE cs.connection_id = c.id
+                           AND cs.account_id = c.account_id)
+           )
            AND regexp_replace(c.external_account_id, '[^0-9]', '', 'g') = $3
          ORDER BY c.id
         """,

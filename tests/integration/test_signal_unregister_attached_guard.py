@@ -120,3 +120,33 @@ async def test_other_tenants_attachment_does_not_block(
     pool, _, _ = attached_signal
     submit = await _unregister(pool, PHONE, "acc_other")
     assert submit.await_count == 1
+
+
+async def test_refused_while_a_bound_chat_still_routes_after_detach(
+    attached_signal: tuple[asyncpg.Pool[Any], str, str],
+) -> None:
+    """#2322 N1: an operator-bound chat (``chat_sessions`` row) routes
+    inbound on the number with NO binding (resolver tier 1), so it counts as
+    in use.  Detach alone does not clear it; unbinding the chat does."""
+    pool, connection_id, session_id = attached_signal
+    await connections_service.bind_chat_to_session(
+        pool, connection_id, account_id="acc_owner", chat_id="+15550001111", session_id=session_id
+    )
+    await connections_service.detach_connection(pool, connection_id, account_id="acc_owner")
+    submit = AsyncMock(return_value=({}, False))
+    with (
+        patch("aios.api.routers.connectors.management_calls.submit_call", submit),
+        pytest.raises(ConflictError) as exc_info,
+    ):
+        await post_signal_unregister(
+            SignalUnregisterRequest(external_account_id=PHONE), "postgresql://x", pool, "acc_owner"
+        )
+    assert exc_info.value.detail["reason"] == "connection_still_attached"
+    assert exc_info.value.detail["connection_ids"] == [connection_id]
+    assert submit.await_count == 0
+
+    assert await connections_service.unbind_chat(
+        pool, connection_id, "+15550001111", account_id="acc_owner"
+    )
+    submit = await _unregister(pool, PHONE, "acc_owner")
+    assert submit.await_count == 1

@@ -18,12 +18,17 @@ import asyncio
 import contextlib
 import os
 from collections.abc import AsyncIterator, Awaitable, Callable
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import asyncpg
 import pytest
 
-from aios.api.routers.connectors import SignalUnregisterRequest, post_signal_unregister
+from aios.api.routers.connectors import (
+    SignalUnregisterRequest,
+    post_signal_unregister,
+    post_signal_unregister_cancel,
+)
 from aios.crypto.vault import CryptoBox
 from aios.db import queries
 from aios.db.pool import create_pool
@@ -337,4 +342,160 @@ async def test_reparent_bound_connection_in_while_unregister_in_flight_is_refuse
                 conn, "signal", DIGITS, account_id=ACCOUNT
             )
             == []
+        )
+
+
+async def test_attach_after_received_unregister_expires_is_still_refused(
+    detached_signal: tuple[asyncpg.Pool[Any], str, str, str],
+    migrated_db_url: str,
+) -> None:
+    """F3: the connector has RECEIVED the unregister but not yet executed it
+    (its management loop is serial; the call can sit behind a slow verify).
+    The pending row's ``expires_at`` then passes.  The connector can still
+    execute the call, so attach must STILL be refused: the guard clears only
+    on a terminal status, never on wall-clock expiry."""
+    pool, connection_id, session_id, _ = detached_signal
+    async with _FakeConnector(pool, resolve=False) as connector:
+        unregister = asyncio.create_task(_unregister(pool, migrated_db_url))
+        await asyncio.wait_for(connector.seen.wait(), timeout=5)
+        unregister.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await unregister
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE pending_management_calls SET expires_at = now() - interval '1 second' "
+                "WHERE method = 'unregister'"
+            )
+        attach_after_expiry = await _outcome(
+            connections_service.attach_connection(
+                pool, connection_id, account_id=ACCOUNT, session_id=session_id
+            )
+        )
+
+    assert isinstance(attach_after_expiry, ConflictError), (
+        f"attach_after_expiry={attach_after_expiry!r}: a received unregister "
+        "stopped guarding the number at wall-clock expiry"
+    )
+    assert attach_after_expiry.detail["reason"] == "number_unregister_pending"
+    async with pool.acquire() as conn:
+        assert await queries.get_active_binding(conn, connection_id, account_id=ACCOUNT) is None
+
+
+async def _dispatch_and_hold_unregister(
+    pool: asyncpg.Pool[Any], db_url: str, connector: _FakeConnector
+) -> None:
+    """Dispatch an unregister the connector receives but never resolves,
+    then age its row past ``expires_at`` (the operator's 504 has fired)."""
+    unregister = asyncio.create_task(_unregister(pool, db_url))
+    await asyncio.wait_for(connector.seen.wait(), timeout=5)
+    unregister.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await unregister
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE pending_management_calls SET expires_at = now() - interval '1 second' "
+            "WHERE method = 'unregister'"
+        )
+
+
+async def test_bind_chat_while_unregister_pending_is_refused(
+    detached_signal: tuple[asyncpg.Pool[Any], str, str, str],
+    migrated_db_url: str,
+) -> None:
+    """#2322 N1: a bound chat routes inbound with no binding, so
+    ``bind_chat_to_session`` is a make-it-routable path too and is refused
+    under the same number lock while an unregister is non-terminal."""
+    pool, connection_id, session_id, _ = detached_signal
+    async with _FakeConnector(pool, resolve=False) as connector:
+        await _dispatch_and_hold_unregister(pool, migrated_db_url, connector)
+        bind_error = await _outcome(
+            connections_service.bind_chat_to_session(
+                pool,
+                connection_id,
+                account_id=ACCOUNT,
+                chat_id="+15550001111",
+                session_id=session_id,
+            )
+        )
+    assert isinstance(bind_error, ConflictError)
+    assert bind_error.detail["reason"] == "number_unregister_pending"
+    async with pool.acquire() as conn:
+        assert (
+            await queries.list_chat_sessions_for_connection(conn, connection_id, account_id=ACCOUNT)
+            == []
+        )
+
+
+async def test_expired_unregister_is_redelivered_to_a_restarted_connector(
+    detached_signal: tuple[asyncpg.Pool[Any], str, str, str],
+    migrated_db_url: str,
+) -> None:
+    """Connector crash / no-claim: the SSE backfill a (re)connecting
+    connector reads still carries a non-terminal unregister past its
+    ``expires_at``, so the connector drives it to a terminal status and the
+    number does not stay un-bindable forever.  Other methods keep the old
+    expiry filter."""
+    pool, _, _, _ = detached_signal
+    async with _FakeConnector(pool, resolve=False) as connector:
+        await _dispatch_and_hold_unregister(pool, migrated_db_url, connector)
+    async with pool.acquire() as conn:
+        await queries.insert_management_call(
+            conn,
+            account_id=ACCOUNT,
+            call_id="mgmt_expired_verify",
+            connector="signal",
+            method="verify",
+            params={"external_account_id": PHONE, "code": "123456"},
+            expires_at=datetime.now(UTC) - timedelta(seconds=1),
+        )
+        backfill = await queries.list_pending_management_calls_for_connector(
+            conn, "signal", account_id=ACCOUNT
+        )
+    assert [c["call_id"] for c in backfill] == connector.dispatched
+    assert [c["method"] for c in backfill] == ["unregister"]
+
+
+async def test_operator_cancel_terminalises_and_unblocks_attach(
+    detached_signal: tuple[asyncpg.Pool[Any], str, str, str],
+    migrated_db_url: str,
+) -> None:
+    """Escape hatch: ``POST /signal/unregister/cancel`` marks the pending
+    unregister ``failed`` (cancelled_by_operator); attach then succeeds, the
+    call is no longer redelivered, and a late connector result is ignored."""
+    pool, connection_id, session_id, _ = detached_signal
+    async with _FakeConnector(pool, resolve=False) as connector:
+        await _dispatch_and_hold_unregister(pool, migrated_db_url, connector)
+    (call_id,) = connector.dispatched
+
+    # A variant spelling of the number cancels the same call.
+    response = await post_signal_unregister_cancel(
+        SignalUnregisterRequest(external_account_id="1 (657) 527-4288"), pool, ACCOUNT
+    )
+    assert response.cancelled_call_ids == [call_id]
+    again = await post_signal_unregister_cancel(
+        SignalUnregisterRequest(external_account_id=PHONE), pool, ACCOUNT
+    )
+    assert again.cancelled_call_ids == []
+
+    assert (
+        await _outcome(
+            connections_service.attach_connection(
+                pool, connection_id, account_id=ACCOUNT, session_id=session_id
+            )
+        )
+        is None
+    )
+    async with pool.acquire() as conn:
+        row = await queries.get_management_call(conn, call_id, account_id=ACCOUNT)
+        assert row is not None
+        assert row["status"] == "failed"
+        assert row["result"]["code"] == "cancelled_by_operator"
+        assert (
+            await queries.list_pending_management_calls_for_connector(
+                conn, "signal", account_id=ACCOUNT
+            )
+            == []
+        )
+        assert not await queries.mark_management_call_resolved(
+            conn, account_id=ACCOUNT, call_id=call_id, result={}, is_error=False
         )
