@@ -233,6 +233,7 @@ _DB_HELPER_SYMBOLS = frozenset(
         "queries.list_agent_versions",
         "queries.list_agents",
         "queries.list_agents_for_role",
+        "queries.list_attached_connections_for_phone",
         "queries.list_attachment_paths_for_sessions",
         "queries.list_chat_sessions_for_connection",
         "queries.list_child_accounts",
