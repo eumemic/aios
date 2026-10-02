@@ -367,7 +367,6 @@ async def _refresh_credential_serialized(
         ) as client:
             response = await client.post(token_endpoint, **post_kwargs)
             response.raise_for_status()
-            token_data = response.json()
     except httpx.HTTPError as exc:
         # A rotating provider can reject the cross-process race loser because
         # the winner consumed ``refresh_token`` while this POST was in flight.
@@ -404,6 +403,27 @@ async def _refresh_credential_serialized(
             f"OAuth token endpoint request failed: {exc}",
             detail={"credential_id": credential_id, "token_endpoint": token_endpoint},
         ) from exc
+
+    # Parsed outside the ``httpx.HTTPError`` handler on purpose: an unparseable
+    # 200 (e.g. a provider that ignored ``Accept: application/json`` and replied
+    # form-encoded) is a protocol violation, not the rotating-provider race, so
+    # it must fail hard as OAuthRefreshError without entering recovery (#2232).
+    try:
+        token_data = response.json()
+    except ValueError as exc:
+        raise OAuthRefreshError(
+            "OAuth token endpoint response is not valid JSON",
+            detail={
+                "credential_id": credential_id,
+                "token_endpoint": token_endpoint,
+                "content_type": response.headers.get("content-type"),
+            },
+        ) from exc
+    if not isinstance(token_data, dict):
+        raise OAuthRefreshError(
+            "OAuth token endpoint response is not a JSON object",
+            detail={"credential_id": credential_id, "token_endpoint": token_endpoint},
+        )
 
     new_access_token = token_data.get("access_token")
     if not new_access_token:

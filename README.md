@@ -403,7 +403,7 @@ Any caller — a model inside a session, an external HTTP/operator client, or a 
 - **Background-priority demotion** — a session is demoted to background priority (`-10`) when its latest open request edge is background-rooted, so a workflow's fan-out can't starve a human's interactive message.
 - **`trace`** — a zero-instrumentation read-projection: one `REPEATABLE READ` snapshot, flat DFS pre-order, each node normalized to `ok/errored/cancelled/suspended/running`, journals interleaved, typed truncation at `AIOS_TRACE_MAX_NODES` (2000).
 
-> **Self-goals (roadmap):** a self-goal is a reflexive deliver-kernel request where caller == servicer == self. The enabling keystone (the consecutive-inaction nudge) and the `[self]` origin label are built; the thin `set_goal` tool that writes the reflexive edge is **not yet shipped**.
+> **Self-goals:** a goal is a reflexive call edge where caller == servicer == self. `create_goal` (required `output_schema`) is the one goal-named verb; a goal appears in `list_obligations` (origin `self`) and `list_calls`, is answered with `return` / `error`, and is dropped with `cancel_call` on its `tool_call_id`.
 
 ### Invocation tools & endpoints
 
@@ -412,7 +412,9 @@ Any caller — a model inside a session, an external HTTP/operator client, or a 
 | `call_session` | Call an existing same-account session; park for `{ok\|error}`. (renamed from `invoke`) |
 | `call_agent` | Spawn a fresh session from one of your agents and call it. (renamed from `invoke_agent`) |
 | `call_workflow` | Launch a run as an awaited single-shot servicer. (renamed from `invoke_workflow`/`create_run`+`await_run`) |
-| `stop_task` | Durably cancel one of your awaited `call_*` tasks (and its subtree) by `tool_call_id`. |
+| `list_calls` | List your OUTGOING call edges (the cancel roster); reflexive goals carry an `origin=self` hint. (renamed from `list_tasks`) |
+| `cancel_call` | Durably cancel one of your outgoing `call_*` edges (and its subtree) by `tool_call_id`. (renamed from `stop_task`) |
+| `list_obligations` | List your INCOMING obligations (all caller kinds incl. self), each with its `output_schema`. |
 | `wake_session` | Wake another same-account session (depth cap 10, per-pair rate cap 10/hr). |
 | `wake_self` | Append a user-role message to your own session (model tool AND sandbox `tool wake_self`). |
 | `return` / `error` | Answer an open awaited obligation exactly-once. |
@@ -619,7 +621,7 @@ Every tool is registered once against a module-level `ToolRegistry`; the same pu
 | `search_events` | Read-only SELECT against your own session's `events_search` view. |
 | `http_request` | Authenticated call to a declared `http_server`; secret never in sandbox; route/method/query allowlisted. |
 | `call_session` / `call_agent` / `call_workflow` | The invocation kernel (park for `{ok\|error}`). |
-| `stop_task` / `list_tasks` / `wake_self` / `wake_session` / `switch_channel` / `list_related_sessions` | Self-state & coordination. |
+| `cancel_call` / `list_calls` / `list_obligations` / `wake_self` / `wake_session` / `switch_channel` / `list_related_sessions` | Self-state & coordination. |
 | `schedule_wake` / `trigger_create` / `trigger_list` / `trigger_update` / `trigger_remove` | Self-scheduling. |
 | `create_workflow` / `update_workflow` / `archive_workflow` / `cancel_run` / `resume_gate` / `get_run` / `list_runs` / … | Strange-loop workflow authoring (surface must be ⊆ the agent's own). |
 | `skill_upsert` / `skill_archive` | Author/version-bump the agent's own skills (account/session ids loaded server-side, `extra=forbid`). |

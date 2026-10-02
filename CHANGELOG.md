@@ -12,6 +12,21 @@
   and exit non-zero (2 for transport failures, 1 for broker HTTP errors). The
   human-readable message goes to stderr. Successful calls are unchanged, and the
   30 s timeout is unchanged too.
+- **Oversized request inputs are refused at the caller, never truncated
+  (#2122).** `agent()` in a workflow now has a documented input limit:
+  1,000,000 characters (Unicode code points, the same `MAX_USER_MESSAGE_CHARS`
+  the message endpoint enforces), measured on the serialized input. A string
+  counts as-is. Any other value is measured after `json.dumps`, so JSON syntax
+  and escaping count too. An input over the limit is refused before the child
+  session exists. The `await` raises a catchable `AgentError` with
+  `kind="input_too_large"`, and its message gives the actual size and the
+  limit. The other request writers check the same bound and return 413
+  `payload_too_large` when it is exceeded: the `invoke` API (checked before the
+  servicer session is created) and a request to an existing session. The ~8k
+  boundary in the issue was never a delivery cap. It is the obligations
+  reminder's 8,192-character render budget. Since #2258, a reminder over that
+  budget is marked `[TASK ABRIDGED IN THIS REMINDER …]` and points back to the
+  full original request instead of telling the agent to refuse.
 
 - **Agents can address a role instead of a cached agent id (#1940).** New
   `resolve_role(role)` model tool (grantable as `{"type": "resolve_role"}`)

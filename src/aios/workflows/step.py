@@ -56,6 +56,8 @@ from aios.services.sessions import (
     AskNewSession,
     create_child_session,
     fail_open_child_requests_conn,
+    request_content,
+    request_input_too_large,
     seed_outbound_cancel_conn,
     write_gate_opened,
 )
@@ -1215,6 +1217,12 @@ async def _open_agent_capability(
     model = spec.get("model")
     if model is not None and not isinstance(model, str):
         return await _reject("bad_agent_call", f"agent() model must be a string, got {model!r}")
+    # #2122: an oversized input is refused LOUDLY at the caller's await (a catchable
+    # ``input_too_large`` AgentError naming the size and the limit) before any child
+    # exists — never delivered truncated for the child to (maybe) notice.
+    too_large = request_input_too_large(request_content(spec.get("input")))
+    if too_large is not None:
+        return await _reject("input_too_large", f"agent() {too_large}")
 
     child_id = child_session_id(run.id, cap.call_key)
     pinned: int | None

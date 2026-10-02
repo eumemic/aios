@@ -48,6 +48,12 @@ from aios.retirements.registry import REGISTRY
 #: of exactly one file (e.g. ``0116`` → ``0116_normalize_legacy_tool_names.py``).
 _MIGRATIONS_DIR = Path(__file__).resolve().parents[3] / "migrations" / "versions"
 
+#: CLI exit code for "could not compute the verdict" (e.g. a shallow clone whose
+#: truncated git history cannot date a migration — refused in ``_git_landed_date``). Distinct from 0 (compliant) and 1 (breach):
+#: an uncaught exception exits 1, which would masquerade as a breach, and a caller
+#: that tolerates nonzero would otherwise render a blind run as green (#2317).
+EXIT_BLIND = 2
+
 
 @dataclass(frozen=True)
 class SlaBreach:
@@ -174,8 +180,28 @@ def _git_landed_date(path: Path) -> datetime:
 
     ``git log --reverse`` lists history oldest-first; the first line is the
     commit that introduced the file. Returns a timezone-aware UTC datetime.
+
+    Refuses (raises :class:`RuntimeError`) when the repository's history is
+    truncated (a shallow clone). In a shallow clone ``git log`` does not fail:
+    it reports the shallow-graft boundary commit as the file's "first" commit, so
+    every migration would be dated "today" and every open descriptor would look
+    0 days old — a compliant verdict computed from history we never had (#2317).
+    Anything other than a definite ``false`` from
+    ``git rev-parse --is-shallow-repository`` is treated as truncated.
     """
 
+    shallow = subprocess.run(
+        ["git", "rev-parse", "--is-shallow-repository"],
+        cwd=path.parent,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    if shallow != "false":
+        raise RuntimeError(
+            f"git history is truncated (is-shallow-repository={shallow!r}); cannot date "
+            f"{path.name} — fetch full history (fetch-depth: 0) to age descriptors"
+        )
     out = subprocess.run(
         ["git", "log", "--reverse", "--format=%cI", "--", str(path)],
         cwd=path.parent,
@@ -215,10 +241,21 @@ def _main(argv: list[str]) -> int:
     dates from git, computes breaches against the live registry, prints
     ``{"breaches": [...]}``, and returns ``1`` if any descriptor has aged past
     its SLA (so the workflow step fails master) or ``0`` if all are compliant.
+    Returns :data:`EXIT_BLIND` (printing nothing to stdout) if the verdict could
+    not be computed at all.
     """
 
-    rev_dates = resolve_rev_dates()
-    breaches = sla_breaches(REGISTRY, rev_dates=rev_dates)
+    try:
+        rev_dates = resolve_rev_dates()
+        breaches = sla_breaches(REGISTRY, rev_dates=rev_dates)
+    except Exception as exc:
+        # No JSON on stdout: nothing a caller could mistake for "no breaches".
+        print(
+            f"::error::BLIND: aging-SLA check could not compute a verdict; the check did "
+            f"NOT run: {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+        return EXIT_BLIND
     payload = {"breaches": [asdict(b) for b in breaches]}
     json.dump(payload, sys.stdout, indent=2)
     sys.stdout.write("\n")
