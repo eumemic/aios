@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **Tool results carry a received time (#2282).** `build_messages` now renders
+  every tool result with the same `[received=…]` envelope a user message gets,
+  from the result event's own `created_at` (answer time, in the account's
+  timezone). Before, a result sat right after its tool call with no time signal,
+  so a call that stayed open for hours (an `ask_user` card, an approval) read as
+  answered at ask time. String content gets a leading line. List content gets
+  it on the first text part, or as a new leading text part. Blind-spot result
+  injections get a `[received=…]` line under their `[Tool result: …]` header.
+  Append-time token pricing now counts the envelope.
 - **`tool` CLI always writes parseable JSON to stdout on transport failure
   (#2227).** A broker request that timed out used to print a Python traceback
   and nothing on stdout, so callers doing `json.loads` saw `Expecting value`,

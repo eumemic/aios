@@ -610,7 +610,8 @@ class TestBuildMessages:
         tool_msg = msgs[2]
         assert tool_msg["role"] == "tool"
         # Sibling text part preserved, list structure intact.
-        assert tool_msg["content"][0] == {"type": "text", "text": "Image: huge.png"}
+        assert tool_msg["content"][0]["type"] == "text"
+        assert tool_msg["content"][0]["text"].endswith(")]\nImage: huge.png")
         url = tool_msg["content"][1]["image_url"]["url"]
         head, _, b64 = url.partition(",")
         mime = head.removeprefix("data:").split(";", 1)[0]
@@ -692,7 +693,8 @@ class TestBuildMessages:
         ]
         msgs = build_messages(events, system_prompt=None).messages
         content = msgs[2]["content"]
-        assert content[0] == {"type": "text", "text": "Image: broken.png"}
+        assert content[0]["type"] == "text"
+        assert content[0]["text"].endswith(")]\nImage: broken.png")
         assert content[1]["type"] == "text"
         assert "image omitted" in content[1]["text"]
 
@@ -1698,7 +1700,7 @@ class TestFieldStripping:
         tool_msg = next(m for m in msgs if m.get("role") == "tool")
         assert "provider_metadata" not in tool_msg
         assert tool_msg["tool_call_id"] == "a"
-        assert tool_msg["content"] == "done"
+        assert tool_msg["content"] == f"[received={RECEIVED}]\ndone"
 
     def test_multiple_provider_fields_all_stripped(self) -> None:
         """All provider-specific fields are excluded, only spec fields remain."""
@@ -2952,7 +2954,8 @@ class TestEventDataImmutability:
         # test isn't passing because correction was skipped).
         tool_msg = next(m for m in ctx.messages if m.get("role") == "tool")
         assert isinstance(tool_msg["content"], list)
-        out_url = tool_msg["content"][0]["image_url"]["url"]
+        # [0] is the ``[received=…]`` text part (#2282); the image follows.
+        out_url = tool_msg["content"][1]["image_url"]["url"]
         assert out_url.startswith("data:image/jpeg;base64,"), (
             f"renderer should have corrected png → jpeg in the output, got {out_url[:50]}"
         )
@@ -3024,7 +3027,8 @@ class TestVisionCapabilityReplayPass:
         )
         assert any("does not support image input" in p.get("text", "") for p in tool_msg["content"])
         # Sibling text part + list structure preserved.
-        assert tool_msg["content"][0] == {"type": "text", "text": "Image: shot.png"}
+        assert tool_msg["content"][0]["type"] == "text"
+        assert tool_msg["content"][0]["text"].endswith(")]\nImage: shot.png")
         # Immutability: the source event log is pristine (the pass replaces
         # part dicts in the message list, never in the aliasing Event.data).
         assert [e.data for e in events] == snapshot, (
@@ -3176,7 +3180,7 @@ class TestVisionCapabilityReplayPass:
         tool_msg = next(m for m in msgs if m.get("role") == "tool")
         content = tool_msg["content"]
         assert [p.get("type") for p in content] == ["text", "text", "text", "text", "text"]
-        assert content[0]["text"] == "first"
+        assert content[0]["text"].endswith(")]\nfirst")
         assert content[2]["text"] == "middle"
         assert content[4]["text"] == "last"
         # Both image parts became markers.
@@ -3620,3 +3624,94 @@ class TestLazyLitellmBoundary:
             text=True,
         )
         assert result.returncode == 0, result.stderr
+
+
+# ─── tool-result received-time envelope (#2282) ──────────────────────────────
+
+
+class TestToolResultReceivedEnvelope:
+    """A tool result carries the same ``[received=…]`` envelope as a user
+    message, sourced from the RESULT event's ``created_at`` (answer time), so a
+    call that held open for hours (ask_user cards, approvals) is not read as
+    contemporaneous with the ask (#2282)."""
+
+    _ASKED = datetime(2026, 7, 1, 16, 0, tzinfo=UTC)
+    _ANSWERED = datetime(2026, 7, 1, 18, 30, tzinfo=UTC)
+    _ANSWERED_LA = "2026-07-01T11:30:00-07:00 (America/Los_Angeles)"
+
+    def _events(self, *, content: Any = "approved") -> list[Event]:
+        events = [
+            _evt(1, "user", content="ask them", created_at=self._ASKED),
+            _evt(2, "assistant", tool_calls=[_tc("q", name="ask_user")], created_at=self._ASKED),
+            _evt(3, "tool", tool_call_id="q", created_at=self._ANSWERED),
+        ]
+        events[2].data["content"] = content
+        events[1].data["reacting_to"] = 1
+        return events
+
+    def test_paired_result_carries_answer_time(self) -> None:
+        msgs = build_messages(
+            self._events(), system_prompt=None, tz_name="America/Los_Angeles"
+        ).messages
+        tool = next(m for m in msgs if m["role"] == "tool")
+        assert tool["content"] == f"[received={self._ANSWERED_LA}]\napproved"
+
+    def test_list_content_gets_leading_text_part(self) -> None:
+        parts = [{"type": "text", "text": "screenshot"}]
+        msgs = build_messages(
+            self._events(content=parts), system_prompt=None, tz_name="America/Los_Angeles"
+        ).messages
+        tool = next(m for m in msgs if m["role"] == "tool")
+        assert tool["content"] == [
+            {"type": "text", "text": f"[received={self._ANSWERED_LA}]\nscreenshot"},
+        ]
+
+    def test_list_content_without_leading_text_gets_new_text_part(self) -> None:
+        image = {"type": "image_url", "image_url": {"url": "https://example.test/x.png"}}
+        msgs = build_messages(self._events(content=[image]), system_prompt=None).messages
+        tool = next(m for m in msgs if m["role"] == "tool")
+        assert tool["content"] == [
+            {"type": "text", "text": "[received=2026-07-01T18:30:00+00:00 (UTC)]"},
+            image,
+        ]
+
+    def test_standalone_orphan_result_also_stamped(self) -> None:
+        # An orphan tool row is pruned downstream, but the branch must still
+        # render through the envelope path, not alias e.data.
+        events = self._events()
+        events[2].data["content"] = [{"type": "text", "text": "x"}]
+        build_messages(events[2:], system_prompt=None)
+        assert events[2].data["content"] == [{"type": "text", "text": "x"}]
+
+    def test_empty_content_renders_envelope_only(self) -> None:
+        msgs = build_messages(self._events(content=""), system_prompt=None).messages
+        tool = next(m for m in msgs if m["role"] == "tool")
+        assert tool["content"] == "[received=2026-07-01T18:30:00+00:00 (UTC)]"
+
+    def test_blind_spot_injection_carries_answer_time(self) -> None:
+        events = [
+            *self._events(),
+            _evt(4, "assistant", content="waiting", created_at=self._ASKED),
+        ]
+        events[3].data["reacting_to"] = 1  # blind to the result at seq 3
+        events[2].data["name"] = "ask_user"
+        msgs = build_messages(events, system_prompt=None, tz_name="America/Los_Angeles").messages
+        injected = msgs[-1]
+        assert injected["role"] == "user"
+        assert injected["content"] == (
+            f"[Tool result: ask_user (call q) completed]\n[received={self._ANSWERED_LA}]\napproved"
+        )
+
+    def test_event_data_not_mutated(self) -> None:
+        events = self._events()
+        build_messages(events, system_prompt=None)
+        assert events[2].data["content"] == "approved"
+
+    def test_envelope_is_stable_across_builds(self) -> None:
+        events = self._events()
+        short = build_messages(events, system_prompt=None).messages
+        events.append(_evt(4, "assistant", content="done", created_at=self._ANSWERED))
+        events[3].data["reacting_to"] = 3
+        events.append(_evt(5, "user", content="thanks", created_at=self._ANSWERED))
+        long = build_messages(events, system_prompt=None).messages
+        assert_message_prefix(short, long)

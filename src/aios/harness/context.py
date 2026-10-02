@@ -396,6 +396,45 @@ def _format_received(created_at: datetime, tz_name: str) -> str:
     return f"{stamp} ({tz_name})"
 
 
+def render_tool_result(
+    data: dict[str, Any], created_at: datetime, *, tz_name: str = "UTC"
+) -> dict[str, Any]:
+    """Render a tool-result event with its ``[received=…]`` envelope (#2282).
+
+    The envelope is the RESULT event's own ``created_at`` — the moment the
+    result was appended (for an ask_user card or an approval: answer time, not
+    ask time). Without it a call that held open for hours sits directly after
+    its tool_call in the prompt with no time signal, and the model reads the
+    answer as contemporaneous with the ask.
+
+    Returns a shallow copy (``data`` and its parts are never mutated). String
+    content gets the envelope as a leading line, exactly like a user message.
+    List content (multimodal results) gets it as a leading line of the first
+    ``text`` part when the list opens with one — so every other part keeps its
+    index — and as a new leading ``text`` part otherwise; image parts survive
+    either way. A deterministic function of the immutable event, so it renders
+    byte-identically in every build (prompt-prefix stable).
+    """
+    header = f"[received={_format_received(created_at, tz_name)}]"
+    msg = dict(data)
+    content = msg.get("content")
+    if isinstance(content, list):
+        first = content[0] if content else None
+        if (
+            isinstance(first, dict)
+            and first.get("type") == "text"
+            and isinstance(first.get("text"), str)
+        ):
+            text = first["text"]
+            lead = {**first, "text": f"{header}\n{text}" if text else header}
+            msg["content"] = [lead, *content[1:]]
+        else:
+            msg["content"] = [{"type": "text", "text": header}, *content]
+    else:
+        _prepend_header(msg, header)
+    return msg
+
+
 def _prepend_header(msg: dict[str, Any], header: str) -> None:
     """Prepend a bracketed header line above the message's existing content."""
     existing = msg.get("content") or ""
@@ -1456,9 +1495,13 @@ def _omission_marker(omission: WindowOmission, boundary: datetime, tz_name: str)
     }
 
 
-def _render_blind_result(tcid: str, data: dict[str, Any]) -> dict[str, Any]:
+def _render_blind_result(tcid: str, data: dict[str, Any], received: str) -> dict[str, Any]:
     """Render a tool result that landed in an assistant's blind spot as the
     synthetic user message injected after the last assistant blind to it.
+
+    ``received`` (the result event's :func:`_format_received` stamp) renders
+    as a ``[received=…]`` line under the completion header, the same envelope
+    a paired result carries (#2282).
 
     Multimodal results (``list[dict]`` content, e.g. an image-aware ``read``)
     are spliced part-wise rather than f-stringed — the Python repr of the list
@@ -1466,7 +1509,7 @@ def _render_blind_result(tcid: str, data: dict[str, Any]) -> dict[str, Any]:
     non-text parts (``image_url`` …) follow as siblings.
     """
     name = data.get("name", "tool")
-    header = f"[Tool result: {name} (call {tcid}) completed]"
+    header = f"[Tool result: {name} (call {tcid}) completed]\n[received={received}]"
     content = data.get("content", "")
     if not isinstance(content, list):
         return {"role": "user", "content": f"{header}\n{content}"}
@@ -1534,12 +1577,14 @@ def build_messages(
     # Index: tool_call_id → (data, seq).
     real_results: dict[str, dict[str, Any]] = {}
     real_result_seqs: dict[str, int] = {}
+    real_result_times: dict[str, datetime] = {}
     for e in events:
         if e.kind == "message" and e.data.get("role") == "tool":
             tcid = e.data.get("tool_call_id")
             if tcid:
                 real_results[tcid] = e.data
                 real_result_seqs[tcid] = e.seq
+                real_result_times[tcid] = e.created_at
 
     # Visibility horizon per assistant: the reacting_to of the NEXT
     # assistant. If there's no next assistant, horizon is infinite.
@@ -1706,7 +1751,11 @@ def build_messages(
                         continue
                     rseq = real_result_seqs.get(tcid)
                     if rseq is not None and rseq <= horizon:
-                        messages.append(real_results[tcid])
+                        messages.append(
+                            render_tool_result(
+                                real_results[tcid], real_result_times[tcid], tz_name=tz_name
+                            )
+                        )
                         max_stimulus_seq = max(max_stimulus_seq, rseq)
                     else:
                         placeholder = (
@@ -1722,7 +1771,14 @@ def build_messages(
                             # paired slot, and injected as a user message after
                             # the last assistant that was blind to it.
                             after_assistant.setdefault(_result_anchor(e.seq, rseq), []).append(
-                                (rseq, _render_blind_result(tcid, real_results[tcid]))
+                                (
+                                    rseq,
+                                    _render_blind_result(
+                                        tcid,
+                                        real_results[tcid],
+                                        _format_received(real_result_times[tcid], tz_name),
+                                    ),
+                                )
                             )
                             max_stimulus_seq = max(max_stimulus_seq, rseq)
                     emitted_tcids.add(tcid)
@@ -1746,7 +1802,7 @@ def build_messages(
                 # here, which would entangle the two and regress the watermark.
                 tcid = e.data.get("tool_call_id")
                 if tcid and tcid not in emitted_tcids:
-                    messages.append(e.data)
+                    messages.append(render_tool_result(e.data, e.created_at, tz_name=tz_name))
                     emitted_tcids.add(tcid)
                     max_stimulus_seq = max(max_stimulus_seq, e.seq)
 

@@ -335,7 +335,8 @@ class TestEventTokenDelta:
     used to live inside the transaction — equality of the two forms, not an
     absolute magnitude (tokenizer counts are tokenizer-version dependent).
     The user branch reproduces ``render_user_event(...) + separator`` exactly;
-    every other branch is ``approx_tokens([data])``.
+    the tool branch ``render_tool_result(...)``; every other branch is
+    ``approx_tokens([data])``.
     """
 
     @staticmethod
@@ -380,8 +381,13 @@ class TestEventTokenDelta:
         assert self._delta("message", data) == approx_tokens([data])
 
     def test_delta_tool(self) -> None:
+        # Priced as rendered: with the ``[received=…]`` envelope (#2282).
+        from aios.harness.context import render_tool_result
+
         data = {"role": "tool", "tool_call_id": "tc_1", "name": "bash", "content": "ok"}
-        assert self._delta("message", data) == approx_tokens([data])
+        rendered = render_tool_result(data, _CREATED_AT)
+        assert self._delta("message", data) == approx_tokens([rendered])
+        assert approx_tokens([rendered]) > approx_tokens([data])
 
     def test_delta_oversized(self) -> None:
         data = {"role": "assistant", "content": "x" * 100_000}
