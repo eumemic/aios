@@ -264,8 +264,9 @@ async def list_caller_tasks(
 
     The ``tool_call_id`` filter is the SAME discriminant :func:`find_parked_servicer` keys on,
     so the point and set locators agree by construction. It also subsumes an ``awaited`` filter:
-    only the awaited ``call_*`` parks stamp a ``tool_call_id`` (the detached
-    ``create_run``/``Tell`` launches write none), so an unawaited edge can never appear here.
+    only the awaited ``call_*`` parks and ``create_goal``'s reflexive self-edge (#1516) stamp a
+    ``tool_call_id`` (the detached ``create_run``/``Tell`` launches write none), so an unawaited
+    edge can never appear here.
     Edge-only by construction — never the broader ``children_of`` FK union, which would surface
     detached launches that carry no park to list or stop.
 

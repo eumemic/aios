@@ -207,7 +207,7 @@ async def cancel_task(
     ``request_id`` is ``None`` for a **run** servicer (it cancels off its terminal row, not a
     request edge — same dispatch asymmetry as :func:`await_task`); a **session** servicer
     still requires it (the cancel-marker keys on the request edge). ``canceller_session_id``
-    scopes a **model**-initiated cancel (the ``stop_task`` tool): the run arm threads it into
+    scopes a **model**-initiated cancel (the ``cancel_call`` tool): the run arm threads it into
     ``cancel_run``'s launcher guard so a session may cancel only runs it launched. The operator
     HTTP path leaves it ``None`` — account-scoped, unguarded — turning the run-cancel launcher
     guard from prose-held into construction-held for the model plane.
@@ -245,7 +245,7 @@ async def list_open_tasks(
     session_id: str,
     account_id: str,
 ) -> list[OpenTask]:
-    """A session's still-open outbound ``call_*`` tasks — backs the ``list_tasks`` tool (#1428).
+    """A session's still-open outbound ``call_*`` tasks — backs the ``list_calls`` tool (#1428).
 
     Reads the caller's whole edge roster (:func:`aios.db.queries.trace.list_caller_tasks`)
     under one ``REPEATABLE READ`` readonly snapshot, then resolves each edge's liveness with the
@@ -253,7 +253,7 @@ async def list_open_tasks(
     ``derive_run_response`` for a run — and keeps only the **open** ones (``resp is None``, i.e.
     still pending). One snapshot so the roster and the per-edge liveness can't tear (the
     ``services.trace.get_trace`` pattern). Returns the open tasks keyed by ``tool_call_id``
-    (the handle ``stop_task`` takes), oldest-first. A point-in-time snapshot, independent of the
+    (the handle ``cancel_call`` takes), oldest-first. A point-in-time snapshot, independent of the
     in-context ``_PENDING`` placeholders ``build_messages`` synthesizes — both converge next step.
     """
     async with (
