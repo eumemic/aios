@@ -35,6 +35,41 @@ async def insert_management_call(
     )
 
 
+async def has_pending_management_call_for_number(
+    conn: asyncpg.Connection[Any],
+    *,
+    account_id: str,
+    connector: str,
+    method: str,
+    phone_digits: str,
+) -> bool:
+    """Whether a still-pending, unexpired ``method`` call targets this number.
+
+    Matches ``params->>'external_account_id'`` digits-only, the same
+    normal form :func:`acquire_connection_number_lock` keys on.
+    """
+    return bool(
+        await conn.fetchval(
+            """
+            SELECT EXISTS (
+                SELECT 1
+                  FROM pending_management_calls
+                 WHERE connector = $1
+                   AND account_id = $2
+                   AND method = $3
+                   AND status = 'pending'
+                   AND expires_at > now()
+                   AND regexp_replace(params->>'external_account_id', '[^0-9]', '', 'g') = $4
+            )
+            """,
+            connector,
+            account_id,
+            method,
+            phone_digits,
+        )
+    )
+
+
 async def list_pending_management_calls_for_connector(
     conn: asyncpg.Connection[Any],
     connector: str,

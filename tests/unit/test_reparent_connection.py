@@ -262,6 +262,8 @@ class TestReparentConnection:
                 "account_id": "acc_src",
                 "secrets_ciphertext": None,
                 "secrets_nonce": None,
+                "connector": "telegram",
+                "external_account_id": "bot_x",
             }
         )
 
@@ -270,6 +272,10 @@ class TestReparentConnection:
             patch(
                 "aios.services.connections.queries.get_account",
                 AsyncMock(side_effect=[_root_account("acc_root"), _child_account("acc_dest")]),
+            ),
+            patch(
+                "aios.services.connections.queries.get_active_binding",
+                AsyncMock(return_value=None),
             ),
             patch(
                 "aios.services.connections.queries.reparent_connection",
@@ -380,6 +386,8 @@ class TestReparentConnection:
                 "account_id": source_account_id,
                 "secrets_ciphertext": source_blob.ciphertext,
                 "secrets_nonce": source_blob.nonce,
+                "connector": "telegram",
+                "external_account_id": "bot_x",
             }
         )
 
@@ -393,6 +401,10 @@ class TestReparentConnection:
                         _child_account(destination_account_id),
                     ]
                 ),
+            ),
+            patch(
+                "aios.services.connections.queries.get_active_binding",
+                AsyncMock(return_value=None),
             ),
             patch(
                 "aios.services.connections.queries.reparent_connection",

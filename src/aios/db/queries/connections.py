@@ -743,6 +743,40 @@ async def get_connection_for_account(
     return _row_to_connection(row)
 
 
+def phone_digits(external_account_id: str) -> str:
+    """Digits-only normal form of a phone-shaped ``external_account_id``.
+
+    ``+1 (657) 527-4288`` and ``16575274288`` normalise to the same string;
+    this is the identity the number lock and the unregister guard key on.
+    """
+    return "".join(ch for ch in external_account_id if ch.isdigit())
+
+
+async def acquire_connection_number_lock(
+    conn: asyncpg.Connection[Any],
+    *,
+    account_id: str,
+    connector: str,
+    external_account_id: str,
+) -> None:
+    """Transaction-scoped advisory lock on ``(account, connector, number)``.
+
+    MUST run inside the caller's transaction.  It serializes every path
+    that creates an active binding for a connection of this number
+    (``attach_connection``, ``configure_per_chat``, ``reparent_connection``
+    into this account) against the irreversible number release
+    (``POST /connectors/signal/unregister``), which takes the same lock
+    around its "nothing is bound" check AND the INSERT of the management
+    call row.  The number is keyed digits-only so formatting variants of
+    one number (separate ``connections`` rows) share a single lock — a
+    row lock could not cover a variant row created after the check.
+    """
+    await conn.execute(
+        "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+        f"aios_connection_number:{account_id}:{connector}:{phone_digits(external_account_id)}",
+    )
+
+
 async def list_attached_connections_for_phone(
     conn: asyncpg.Connection[Any],
     connector: str,

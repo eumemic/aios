@@ -297,6 +297,59 @@ async def iter_all_connections(
         cursor = page[-1].id
 
 
+# Management-call method whose dispatch irreversibly releases the number a
+# connection is keyed on.  While one is pending for a number, no binding may
+# be created on any connection for that number (#2322).
+_NUMBER_RELEASE_METHOD = "unregister"
+
+
+async def _lock_number_and_refuse_if_releasing(
+    conn: asyncpg.Connection[Any],
+    *,
+    account_id: str,
+    connector: str,
+    external_account_id: str,
+    connection_id: str,
+) -> None:
+    """Take the per-number advisory lock and refuse a new binding while an
+    irreversible number release (signal ``unregister``) is in flight.
+
+    MUST run inside the caller's binding transaction, before
+    ``insert_binding``.  ``submit_call(refuse_if_number_bound=...)`` takes
+    the SAME lock around its "nothing bound" check and the INSERT of the
+    call row, so the two are strictly ordered: either the binding commits
+    first and the release is refused (409), or the release's call row is
+    committed first and this raises :class:`ConflictError` here.  Refusing
+    (rather than waiting for the release to resolve) keeps attach from
+    blocking on a connector that may never answer.
+    """
+    await queries.acquire_connection_number_lock(
+        conn,
+        account_id=account_id,
+        connector=connector,
+        external_account_id=external_account_id,
+    )
+    digits = queries.phone_digits(external_account_id)
+    if not digits:
+        return
+    if await queries.has_pending_management_call_for_number(
+        conn,
+        account_id=account_id,
+        connector=connector,
+        method=_NUMBER_RELEASE_METHOD,
+        phone_digits=digits,
+    ):
+        raise ConflictError(
+            f"{connector} number {external_account_id} is being unregistered; "
+            "cannot bind a connection to it",
+            detail={
+                "id": connection_id,
+                "external_account_id": external_account_id,
+                "reason": "number_unregister_pending",
+            },
+        )
+
+
 async def attach_connection(
     pool: asyncpg.Pool[Any], connection_id: str, *, account_id: str, session_id: str
 ) -> Connection:
@@ -338,7 +391,8 @@ async def attach_connection(
     async with pool.acquire() as conn:
         async with conn.transaction():
             locked = await conn.fetchrow(
-                "SELECT archived_at FROM connections WHERE id = $1 AND account_id = $2 FOR UPDATE",
+                "SELECT archived_at, connector, external_account_id FROM connections "
+                "WHERE id = $1 AND account_id = $2 FOR UPDATE",
                 connection_id,
                 account_id,
             )
@@ -352,6 +406,13 @@ async def attach_connection(
                     f"connection {connection_id} is archived; cannot attach a session to it",
                     detail={"id": connection_id},
                 )
+            await _lock_number_and_refuse_if_releasing(
+                conn,
+                account_id=account_id,
+                connector=locked["connector"],
+                external_account_id=locked["external_account_id"],
+                connection_id=connection_id,
+            )
             session = await queries.get_session_bare(conn, session_id, account_id=account_id)
             if session.archived_at is not None:
                 raise ConflictError(
@@ -451,7 +512,8 @@ async def configure_per_chat(
     """
     async with pool.acquire() as conn, conn.transaction():
         locked = await conn.fetchrow(
-            "SELECT archived_at FROM connections WHERE id = $1 AND account_id = $2 FOR UPDATE",
+            "SELECT archived_at, connector, external_account_id FROM connections "
+            "WHERE id = $1 AND account_id = $2 FOR UPDATE",
             connection_id,
             account_id,
         )
@@ -465,6 +527,13 @@ async def configure_per_chat(
                 f"connection {connection_id} is archived; cannot configure",
                 detail={"id": connection_id},
             )
+        await _lock_number_and_refuse_if_releasing(
+            conn,
+            account_id=account_id,
+            connector=locked["connector"],
+            external_account_id=locked["external_account_id"],
+            connection_id=connection_id,
+        )
         # Validate the template account-scoped *inside the tx*, mirroring
         # ``attach_connection``'s ``get_session_bare`` check. Without this,
         # a caller-supplied ``session_template_id`` goes straight into
@@ -791,7 +860,8 @@ async def reparent_connection(
         # in the same critical section. Without it, an archive could
         # commit between our read and the UPDATE.
         locked = await conn.fetchrow(
-            "SELECT archived_at, account_id, secrets_ciphertext, secrets_nonce "
+            "SELECT archived_at, account_id, secrets_ciphertext, secrets_nonce, "
+            "connector, external_account_id "
             "FROM connections WHERE id = $1 FOR UPDATE",
             connection_id,
         )
@@ -804,6 +874,17 @@ async def reparent_connection(
             raise ConflictError(
                 f"connection {connection_id} is archived; cannot reparent",
                 detail={"id": connection_id},
+            )
+        # Reparent carries the active binding into the DESTINATION account,
+        # i.e. it creates a live binding for this number there: serialize it
+        # against a destination-side unregister like attach does (#2322).
+        if await queries.get_active_binding(conn, connection_id, account_id=locked["account_id"]):
+            await _lock_number_and_refuse_if_releasing(
+                conn,
+                account_id=destination_account_id,
+                connector=locked["connector"],
+                external_account_id=locked["external_account_id"],
+                connection_id=connection_id,
             )
         # Re-key the secrets blob inside the same transaction: decrypt
         # under the source account's subkey, re-encrypt under the
