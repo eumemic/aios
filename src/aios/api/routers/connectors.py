@@ -11,7 +11,8 @@ The file groups three sections:
    field for the routes that operate on a specific connection.
 2. **Operator-facing per-connector management** (``AuthDep``, operator
    API key):
-   * Signal: ``/signal/register``, ``/signal/verify``, ``/signal/profile``.
+   * Signal: ``/signal/register``, ``/signal/verify``, ``/signal/profile``,
+     ``/signal/unregister``.
    * WhatsApp: ``/whatsapp/start-pairing``, ``/whatsapp/confirm-pairing``,
      ``/whatsapp/unpair``.
    These block-await the connector's resolution via the
@@ -52,6 +53,7 @@ from aios.db.listen import (
 )
 from aios.errors import (
     AiosError,
+    ConflictError,
     ConnectorCallFailedError,
     ForbiddenError,
     NotFoundError,
@@ -1188,6 +1190,12 @@ class SignalProfileRequest(BaseModel):
     about: str | None = None
 
 
+class SignalUnregisterRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    external_account_id: str
+
+
 def _is_captcha_required(result: Any) -> bool:
     return isinstance(result, dict) and result.get("status") == "captcha_required"
 
@@ -1200,6 +1208,7 @@ async def _signal_management_call(
     method: str,
     params: dict[str, Any],
     timeout_s: float,
+    refuse_if_number_bound: str | None = None,
 ) -> Any:
     result, is_error = await management_calls.submit_call(
         db_url,
@@ -1209,6 +1218,7 @@ async def _signal_management_call(
         params=params,
         timeout_s=timeout_s,
         account_id=account_id,
+        refuse_if_number_bound=refuse_if_number_bound,
     )
     if is_error and not _is_captcha_required(result):
         raise ConnectorCallFailedError(
@@ -1304,6 +1314,134 @@ async def post_signal_profile(
         params=body.model_dump(exclude_none=True),
         timeout_s=30.0,
     )
+
+
+@router.post(
+    "/signal/unregister",
+    operation_id="post_connector_signal_unregister",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def post_signal_unregister(
+    body: SignalUnregisterRequest,
+    db_url: DbUrlDep,
+    pool: PoolDep,
+    account_id: AccountIdDep,
+) -> None:
+    """Release the number from this connector's signal-cli device.
+
+    Equivalent to ``signal-cli -a <phone> unregister`` run by the
+    connector against its own config dir.  Detaching an aios connection
+    only changes the aios binding — Signal keeps the number registered
+    to the device until this runs, so re-registering it elsewhere fails.
+    Detach (or archive) the connection first: once unregistered, the
+    connector can no longer send or receive on the number.
+
+    That precondition is ENFORCED, not just documented: unregistering is
+    irreversible (the number must be re-registered and re-verified), so if
+    any of the caller's non-archived signal connections for this number
+    (matched on ASCII digits 0-9 only) is still in use, the request is
+    refused with 409 ``conflict`` and no management call is dispatched.
+    "In use" means the connection has an active binding (single_session or
+    per_chat) OR any bound chat (``chat_sessions`` row: an operator
+    ``bind-chat``, or a per_chat chat left behind by ``unconfigure``), since
+    a bound chat routes inbound with no binding at all.  Unbind those chats
+    too.  A malformed number with no digits is a 422.
+
+    The check holds under concurrency (#2322 F2): the read below is only a
+    fast path.  The authoritative check runs again inside ``submit_call``,
+    in the same transaction as the INSERT of the management-call row and
+    under the per-number advisory lock that every binding-creating path
+    (attach, configure per_chat, reparent) also takes.  A binding racing
+    this request either commits first (this request then gets 409) or is
+    itself refused with 409 while the unregister call is pending.
+
+    "Pending" ends only when the call row is TERMINAL (the connector
+    resolved it, or an operator cancelled it via
+    ``/signal/unregister/cancel``), never at wall-clock expiry (#2322 F3).
+    A 504 timeout here does NOT mean the unregister will not run: the
+    connector may still execute it, so binds on the number stay refused
+    (409 ``number_unregister_pending``) until it resolves.
+    """
+    digits = queries.phone_digits(body.external_account_id)
+    if not digits:
+        raise ValidationError(
+            "external_account_id must be a phone number",
+            detail={"external_account_id": body.external_account_id},
+        )
+    async with pool.acquire() as conn:
+        attached = await queries.list_attached_connections_for_phone(
+            conn, "signal", digits, account_id=account_id
+        )
+    if attached:
+        raise ConflictError(
+            f"signal number {body.external_account_id} is still attached; "
+            "detach (or archive) the connection before unregistering",
+            detail={
+                "external_account_id": body.external_account_id,
+                "reason": "connection_still_attached",
+                "connection_ids": [c.id for c in attached],
+            },
+        )
+    await _signal_management_call(
+        db_url,
+        pool,
+        account_id=account_id,
+        method="unregister",
+        params=body.model_dump(exclude_none=True),
+        timeout_s=30.0,
+        refuse_if_number_bound=body.external_account_id,
+    )
+
+
+class SignalUnregisterCancelResponse(BaseModel):
+    cancelled_call_ids: list[str]
+
+
+@router.post(
+    "/signal/unregister/cancel",
+    operation_id="post_connector_signal_unregister_cancel",
+    response_model=SignalUnregisterCancelResponse,
+)
+async def post_signal_unregister_cancel(
+    body: SignalUnregisterRequest,
+    pool: PoolDep,
+    account_id: AccountIdDep,
+) -> SignalUnregisterCancelResponse:
+    """Operator escape hatch: stop a pending unregister from blocking binds.
+
+    While an ``unregister`` call for a number is non-terminal, every path
+    that would make the number routable again (attach, configure per_chat,
+    reparent in, bind-chat) is refused with 409
+    ``number_unregister_pending``.  That holds past the call's wall-clock
+    expiry, because a connector that already received the call can still
+    execute it (#2322 F3).  Normally the connector clears it by resolving
+    the call, and a non-terminal unregister is redelivered on every
+    connector reconnect, so a crash before execution is retried.
+
+    Use this when that cannot happen: the connector is gone for good, or
+    it ran the unregister but its result was lost.  Every still-pending
+    unregister call for the number (matched on ASCII digits 0-9) is marked
+    ``failed`` with code ``cancelled_by_operator``.  The connector's late
+    result for a cancelled call is ignored.  CAUTION: this does not recall
+    a call the connector has already received.  If the connector is still
+    alive, it may still unregister the number after you re-attach.  Only
+    cancel when you know the connector will not run the call.
+
+    Returns the ids of the calls that were cancelled (empty if none were
+    pending).  A malformed number with no digits is a 422.
+    """
+    if not queries.phone_digits(body.external_account_id):
+        raise ValidationError(
+            "external_account_id must be a phone number",
+            detail={"external_account_id": body.external_account_id},
+        )
+    cancelled = await connections_service.cancel_number_unregister(
+        pool,
+        account_id=account_id,
+        connector="signal",
+        external_account_id=body.external_account_id,
+    )
+    return SignalUnregisterCancelResponse(cancelled_call_ids=cancelled)
 
 
 # ─── operator-facing whatsapp management routes ───────────────────────

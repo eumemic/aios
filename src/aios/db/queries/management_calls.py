@@ -8,6 +8,13 @@ from typing import Any
 
 import asyncpg
 
+# Management-call methods that hold a guard on their number until the row is
+# TERMINAL (#2322): the binding-creating paths refuse while one is pending,
+# whatever its ``expires_at``.  The SSE backfill therefore keeps redelivering
+# them past expiry so a connector restart still drives them to a terminal
+# status.
+REDELIVER_UNTIL_TERMINAL_METHODS: frozenset[str] = frozenset({"unregister"})
+
 
 async def insert_management_call(
     conn: asyncpg.Connection[Any],
@@ -35,13 +42,107 @@ async def insert_management_call(
     )
 
 
+async def has_pending_management_call_for_number(
+    conn: asyncpg.Connection[Any],
+    *,
+    account_id: str,
+    connector: str,
+    method: str,
+    phone_digits: str,
+) -> bool:
+    """Whether a NON-TERMINAL ``method`` call targets this number.
+
+    Matches ``params->>'external_account_id'`` digits-only, the same
+    normal form :func:`acquire_connection_number_lock` keys on.
+
+    Deliberately ignores ``expires_at`` (#2322 F3): ``expires_at`` only
+    bounds how long the OPERATOR waits.  A connector that has already
+    received the call executes it whenever its serial management loop
+    reaches it, expired or not, and its result POST is still accepted.  So
+    the call can run until the row reaches a terminal status
+    (``succeeded`` / ``failed``), and the guard holds until then — no clock
+    is involved.  A non-terminal ``unregister`` row is redelivered on every
+    connector (re)connect regardless of expiry
+    (:func:`list_pending_management_calls_for_connector`), and the operator
+    can terminalise one explicitly
+    (:func:`cancel_pending_management_calls_for_number`).
+    """
+    return bool(
+        await conn.fetchval(
+            """
+            SELECT EXISTS (
+                SELECT 1
+                  FROM pending_management_calls
+                 WHERE connector = $1
+                   AND account_id = $2
+                   AND method = $3
+                   AND status = 'pending'
+                   AND regexp_replace(params->>'external_account_id', '[^0-9]', '', 'g') = $4
+            )
+            """,
+            connector,
+            account_id,
+            method,
+            phone_digits,
+        )
+    )
+
+
+async def cancel_pending_management_calls_for_number(
+    conn: asyncpg.Connection[Any],
+    *,
+    account_id: str,
+    connector: str,
+    method: str,
+    phone_digits: str,
+) -> list[str]:
+    """Terminalise (``failed``, ``cancelled_by_operator``) every still-pending
+    ``method`` call for this number; return the ids moved.
+
+    The operator escape hatch for a guard that would otherwise never clear
+    (connector gone for good, or a result POST that was lost after the
+    connector executed the call).  Conditional on ``status = 'pending'``
+    exactly like :func:`mark_management_call_resolved`, so it never
+    overwrites a real result.  Callers must hold the number lock.
+    """
+    rows = await conn.fetch(
+        """
+        UPDATE pending_management_calls
+           SET status      = 'failed',
+               result      = $5::jsonb,
+               is_error    = true,
+               resolved_at = now()
+         WHERE connector = $1
+           AND account_id = $2
+           AND method = $3
+           AND status = 'pending'
+           AND regexp_replace(params->>'external_account_id', '[^0-9]', '', 'g') = $4
+         RETURNING id
+        """,
+        connector,
+        account_id,
+        method,
+        phone_digits,
+        json.dumps({"error": "cancelled by operator", "code": "cancelled_by_operator"}),
+    )
+    return sorted(r["id"] for r in rows)
+
+
 async def list_pending_management_calls_for_connector(
     conn: asyncpg.Connection[Any],
     connector: str,
     *,
     account_id: str,
 ) -> list[dict[str, Any]]:
-    """Pending, unexpired management calls for ``connector`` scoped to ``account_id``.
+    """Pending management calls for ``connector`` scoped to ``account_id``.
+
+    Unexpired calls of every method, plus every still-pending call of a
+    method in :data:`REDELIVER_UNTIL_TERMINAL_METHODS` regardless of
+    ``expires_at`` (#2322 F3).  Such a call blocks binding creation on its
+    number until it is terminal; redelivering it means a connector that
+    crashed (or restarted) before executing it picks it up again and
+    resolves it, instead of the number staying un-bindable forever.  It is
+    safe to run late precisely because no binding can exist meanwhile.
 
     Used by the runtime SSE backfill on connector reconnect.  Output dict
     shape::
@@ -60,11 +161,12 @@ async def list_pending_management_calls_for_connector(
          WHERE connector = $1
            AND account_id = $2
            AND status = 'pending'
-           AND expires_at > now()
+           AND (expires_at > now() OR method = ANY($3::text[]))
          ORDER BY created_at ASC
         """,
         connector,
         account_id,
+        list(REDELIVER_UNTIL_TERMINAL_METHODS),
     )
     return [
         {

@@ -120,3 +120,23 @@ async def test_daemon_stdout_normal_json_line_does_not_log_warning() -> None:
     assert any(e["event"] == "signal.daemon.stdout" and e["log_level"] == "info" for e in logs)
     assert [e for e in logs if e["event"] == "signal.daemon.exception"] == []
     assert daemon_module.daemon_exception_count == 0
+
+
+# ── unregister: releases the number from Signal's servers ──
+
+
+async def test_unregister_sends_unregister_rpc_for_account(tmp_path: Path) -> None:
+    """``unregister`` is the in-process equivalent of
+    ``signal-cli -a <phone> unregister`` (#2322): one JSON-RPC call
+    scoped to the account, no ``deleteAccount`` (the Signal account
+    itself survives; only this device's registration is released)."""
+    calls: list[tuple[str, dict[str, Any] | None]] = []
+
+    async def _call(method: str, params: dict[str, Any] | None = None, **_: Any) -> Any:
+        calls.append((method, params))
+        return {}
+
+    d = _daemon(["+16575274288"], tmp_path)
+    d.rpc.call = _call  # type: ignore[method-assign]
+    await d.unregister(phone="+16575274288")
+    assert calls == [("unregister", {"account": "+16575274288"})]

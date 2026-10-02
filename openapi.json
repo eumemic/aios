@@ -10047,6 +10047,119 @@
         }
       }
     },
+    "/v1/connectors/signal/unregister": {
+      "post": {
+        "tags": [
+          "connectors"
+        ],
+        "summary": "Post Signal Unregister",
+        "description": "Release the number from this connector's signal-cli device.\n\nEquivalent to ``signal-cli -a <phone> unregister`` run by the\nconnector against its own config dir.  Detaching an aios connection\nonly changes the aios binding \u2014 Signal keeps the number registered\nto the device until this runs, so re-registering it elsewhere fails.\nDetach (or archive) the connection first: once unregistered, the\nconnector can no longer send or receive on the number.\n\nThat precondition is ENFORCED, not just documented: unregistering is\nirreversible (the number must be re-registered and re-verified), so if\nany of the caller's non-archived signal connections for this number\n(matched on ASCII digits 0-9 only) is still in use, the request is\nrefused with 409 ``conflict`` and no management call is dispatched.\n\"In use\" means the connection has an active binding (single_session or\nper_chat) OR any bound chat (``chat_sessions`` row: an operator\n``bind-chat``, or a per_chat chat left behind by ``unconfigure``), since\na bound chat routes inbound with no binding at all.  Unbind those chats\ntoo.  A malformed number with no digits is a 422.\n\nThe check holds under concurrency (#2322 F2): the read below is only a\nfast path.  The authoritative check runs again inside ``submit_call``,\nin the same transaction as the INSERT of the management-call row and\nunder the per-number advisory lock that every binding-creating path\n(attach, configure per_chat, reparent) also takes.  A binding racing\nthis request either commits first (this request then gets 409) or is\nitself refused with 409 while the unregister call is pending.\n\n\"Pending\" ends only when the call row is TERMINAL (the connector\nresolved it, or an operator cancelled it via\n``/signal/unregister/cancel``), never at wall-clock expiry (#2322 F3).\nA 504 timeout here does NOT mean the unregister will not run: the\nconnector may still execute it, so binds on the number stay refused\n(409 ``number_unregister_pending``) until it resolves.",
+        "operationId": "post_connector_signal_unregister",
+        "parameters": [
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SignalUnregisterRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/connectors/signal/unregister/cancel": {
+      "post": {
+        "tags": [
+          "connectors"
+        ],
+        "summary": "Post Signal Unregister Cancel",
+        "description": "Operator escape hatch: stop a pending unregister from blocking binds.\n\nWhile an ``unregister`` call for a number is non-terminal, every path\nthat would make the number routable again (attach, configure per_chat,\nreparent in, bind-chat) is refused with 409\n``number_unregister_pending``.  That holds past the call's wall-clock\nexpiry, because a connector that already received the call can still\nexecute it (#2322 F3).  Normally the connector clears it by resolving\nthe call, and a non-terminal unregister is redelivered on every\nconnector reconnect, so a crash before execution is retried.\n\nUse this when that cannot happen: the connector is gone for good, or\nit ran the unregister but its result was lost.  Every still-pending\nunregister call for the number (matched on ASCII digits 0-9) is marked\n``failed`` with code ``cancelled_by_operator``.  The connector's late\nresult for a cancelled call is ignored.  CAUTION: this does not recall\na call the connector has already received.  If the connector is still\nalive, it may still unregister the number after you re-attach.  Only\ncancel when you know the connector will not run the call.\n\nReturns the ids of the calls that were cancelled (empty if none were\npending).  A malformed number with no digits is a 422.",
+        "operationId": "post_connector_signal_unregister_cancel",
+        "parameters": [
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SignalUnregisterRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SignalUnregisterCancelResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/connectors/whatsapp/start-pairing": {
       "post": {
         "tags": [
@@ -18846,6 +18959,36 @@
         ],
         "title": "SignalRegisterResponse",
         "description": "``status=\"captcha_required\"`` is a 200, not a 4xx \u2014 it's an actionable\nnext step (solve the captcha, repost with the token), and 4xx would bury\nthe URL inside FastAPI's error envelope."
+      },
+      "SignalUnregisterCancelResponse": {
+        "properties": {
+          "cancelled_call_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Cancelled Call Ids"
+          }
+        },
+        "type": "object",
+        "required": [
+          "cancelled_call_ids"
+        ],
+        "title": "SignalUnregisterCancelResponse"
+      },
+      "SignalUnregisterRequest": {
+        "properties": {
+          "external_account_id": {
+            "type": "string",
+            "title": "External Account Id"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "external_account_id"
+        ],
+        "title": "SignalUnregisterRequest"
       },
       "SignalVerifyRequest": {
         "properties": {

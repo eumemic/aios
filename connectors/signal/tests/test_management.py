@@ -37,6 +37,7 @@ def daemon() -> MagicMock:
     d.register = AsyncMock()
     d.verify = AsyncMock(return_value={"uuid": "u-abc"})
     d.update_profile = AsyncMock()
+    d.unregister = AsyncMock()
     return d
 
 
@@ -105,6 +106,20 @@ class TestUpdateProfile:
         daemon.update_profile.assert_awaited_once_with(
             phone="+1", given_name="Alice", family_name=None, about=None
         )
+
+
+class TestUnregister:
+    @pytest.mark.asyncio
+    async def test_calls_daemon_and_echoes_account(self, probe: _Probe, daemon: MagicMock) -> None:
+        result = await probe.unregister(external_account_id="+16575274288")
+        assert result == {"external_account_id": "+16575274288"}
+        daemon.unregister.assert_awaited_once_with(phone="+16575274288")
+
+    @pytest.mark.asyncio
+    async def test_rpc_error_propagates(self, probe: _Probe, daemon: MagicMock) -> None:
+        daemon.unregister.side_effect = RpcError("Specified account does not exist")
+        with pytest.raises(RpcError, match="does not exist"):
+            await probe.unregister(external_account_id="+1")
 
 
 class TestCaptchaPredicate:

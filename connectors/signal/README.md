@@ -94,6 +94,28 @@ Inbound messages route to the bound session.  The agent's
 focal channel automatically when the session has a focal channel set
 via ``switch_channel``.
 
+### 7. Release a number
+
+Detaching or archiving the connection only changes the aios binding —
+Signal still holds the number registered to this connector's
+signal-cli device, so registering it elsewhere fails.  To release it:
+
+```bash
+aios connections detach <connection_id>   # stop routing first
+aios signal unregister +15551234567       # POST /v1/connectors/signal/unregister
+```
+
+The connector runs ``signal-cli unregister`` for that account against
+its own config dir (no container exec needed).  The Signal account
+itself is not deleted.
+
+Unregistering is irreversible (the number must be registered and
+verified again before the connector can use it), so the server enforces
+the detach-first ordering: if any of your non-archived signal
+connections for that number (matched on digits only) is still attached,
+the request is refused with ``409 conflict`` and nothing is sent to the
+connector.
+
 ## Configuration reference
 
 The phone is on connection secrets, not env.  The connector reads

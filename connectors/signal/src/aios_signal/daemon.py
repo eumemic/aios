@@ -382,6 +382,12 @@ class SignalDaemon:
             params["about"] = about
         await self.rpc.call("updateProfile", params)
 
+    async def unregister(self, *, phone: str) -> None:
+        # Releases this device's registration so the number can be
+        # registered elsewhere (#2322).  ``deleteAccount`` is deliberately
+        # not sent: the Signal account itself is left intact.
+        await self.rpc.call("unregister", {"account": phone})
+
 
 async def _spawn_subprocess(args: list[str]) -> asyncio.subprocess.Process:
     """Spawn signal-cli detached into its own session + process group.
