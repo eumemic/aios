@@ -11,7 +11,8 @@ The file groups three sections:
    field for the routes that operate on a specific connection.
 2. **Operator-facing per-connector management** (``AuthDep``, operator
    API key):
-   * Signal: ``/signal/register``, ``/signal/verify``, ``/signal/profile``.
+   * Signal: ``/signal/register``, ``/signal/verify``, ``/signal/profile``,
+     ``/signal/unregister``.
    * WhatsApp: ``/whatsapp/start-pairing``, ``/whatsapp/confirm-pairing``,
      ``/whatsapp/unpair``.
    These block-await the connector's resolution via the
@@ -1188,6 +1189,12 @@ class SignalProfileRequest(BaseModel):
     about: str | None = None
 
 
+class SignalUnregisterRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    external_account_id: str
+
+
 def _is_captcha_required(result: Any) -> bool:
     return isinstance(result, dict) and result.get("status") == "captcha_required"
 
@@ -1301,6 +1308,36 @@ async def post_signal_profile(
         pool,
         account_id=account_id,
         method="updateProfile",
+        params=body.model_dump(exclude_none=True),
+        timeout_s=30.0,
+    )
+
+
+@router.post(
+    "/signal/unregister",
+    operation_id="post_connector_signal_unregister",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def post_signal_unregister(
+    body: SignalUnregisterRequest,
+    db_url: DbUrlDep,
+    pool: PoolDep,
+    account_id: AccountIdDep,
+) -> None:
+    """Release the number from this connector's signal-cli device.
+
+    Equivalent to ``signal-cli -a <phone> unregister`` run by the
+    connector against its own config dir.  Detaching an aios connection
+    only changes the aios binding — Signal keeps the number registered
+    to the device until this runs, so re-registering it elsewhere fails.
+    Detach (or archive) the connection first: once unregistered, the
+    connector can no longer send or receive on the number.
+    """
+    await _signal_management_call(
+        db_url,
+        pool,
+        account_id=account_id,
+        method="unregister",
         params=body.model_dump(exclude_none=True),
         timeout_s=30.0,
     )

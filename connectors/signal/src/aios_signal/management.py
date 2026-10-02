@@ -1,4 +1,7 @@
-"""Signal-cli ``register`` / ``verify`` / ``updateProfile`` via the management-call plane."""
+"""Signal-cli management ops via the management-call plane.
+
+``register`` / ``verify`` / ``updateProfile`` / ``unregister``.
+"""
 
 from __future__ import annotations
 
@@ -86,4 +89,16 @@ class SignalManagementMixin:
             family_name=family_name,
             about=about,
         )
+        return {"external_account_id": external_account_id}
+
+    @management_handler()
+    async def unregister(self, *, external_account_id: str) -> dict[str, Any]:
+        """Release the number: ``signal-cli -a <phone> unregister`` in-process.
+
+        Detaching an aios connection only changes the aios binding; Signal
+        still holds the number registered to this device until it is
+        unregistered here (#2322).
+        """
+        assert self._daemon is not None
+        await self._daemon.unregister(phone=external_account_id)
         return {"external_account_id": external_account_id}

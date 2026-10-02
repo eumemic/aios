@@ -1,4 +1,4 @@
-"""``aios signal {register, verify, profile}`` — signal-cli management ops."""
+"""``aios signal {register, verify, profile, unregister}`` — signal-cli management ops."""
 
 from __future__ import annotations
 
@@ -13,10 +13,12 @@ from aios.cli.runtime import get_state, run_or_die
 from aios_sdk._generated.api.connectors import (
     post_connector_signal_profile,
     post_connector_signal_register,
+    post_connector_signal_unregister,
     post_connector_signal_verify,
 )
 from aios_sdk._generated.models.signal_profile_request import SignalProfileRequest
 from aios_sdk._generated.models.signal_register_request import SignalRegisterRequest
+from aios_sdk._generated.models.signal_unregister_request import SignalUnregisterRequest
 from aios_sdk._generated.models.signal_verify_request import SignalVerifyRequest
 
 app = typer.Typer(name="signal", help="Signal-cli management operations.", no_args_is_help=True)
@@ -127,5 +129,28 @@ def profile(
             result = unwrap(post_connector_signal_profile.sync_detailed(client=client, body=body))
         print_note(f"profile updated for {phone}")
         render_single(result.to_dict())
+
+    run_or_die(_run)
+
+
+@app.command("unregister")
+@covers("post_connector_signal_unregister")
+def unregister(
+    ctx: typer.Context,
+    phone: Annotated[str, typer.Argument(help="E.164 phone, e.g. +15551234567.")],
+) -> None:
+    """Release a phone number from the connector's signal-cli device.
+
+    Runs ``signal-cli -a <phone> unregister`` inside the connector, so the
+    number can be registered elsewhere.  Detaching a connection alone does
+    NOT release the number.  After this the connector can no longer send
+    or receive on it.
+    """
+
+    def _run() -> None:
+        with get_state(ctx).sdk_client() as client:
+            body = SignalUnregisterRequest(external_account_id=phone)
+            unwrap(post_connector_signal_unregister.sync_detailed(client=client, body=body))
+        print_note(f"unregistered {phone}; the number can now be registered elsewhere")
 
     run_or_die(_run)

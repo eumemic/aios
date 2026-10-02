@@ -10047,6 +10047,59 @@
         }
       }
     },
+    "/v1/connectors/signal/unregister": {
+      "post": {
+        "tags": [
+          "connectors"
+        ],
+        "summary": "Post Signal Unregister",
+        "description": "Release the number from this connector's signal-cli device.\n\nEquivalent to ``signal-cli -a <phone> unregister`` run by the\nconnector against its own config dir.  Detaching an aios connection\nonly changes the aios binding \u2014 Signal keeps the number registered\nto the device until this runs, so re-registering it elsewhere fails.\nDetach (or archive) the connection first: once unregistered, the\nconnector can no longer send or receive on the number.",
+        "operationId": "post_connector_signal_unregister",
+        "parameters": [
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SignalUnregisterRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/connectors/whatsapp/start-pairing": {
       "post": {
         "tags": [
@@ -18846,6 +18899,20 @@
         ],
         "title": "SignalRegisterResponse",
         "description": "``status=\"captcha_required\"`` is a 200, not a 4xx \u2014 it's an actionable\nnext step (solve the captcha, repost with the token), and 4xx would bury\nthe URL inside FastAPI's error envelope."
+      },
+      "SignalUnregisterRequest": {
+        "properties": {
+          "external_account_id": {
+            "type": "string",
+            "title": "External Account Id"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "external_account_id"
+        ],
+        "title": "SignalUnregisterRequest"
       },
       "SignalVerifyRequest": {
         "properties": {
