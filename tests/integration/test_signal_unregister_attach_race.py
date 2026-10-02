@@ -499,3 +499,72 @@ async def test_operator_cancel_terminalises_and_unblocks_attach(
         assert not await queries.mark_management_call_resolved(
             conn, account_id=ACCOUNT, call_id=call_id, result={}, is_error=False
         )
+
+
+@pytest.mark.parametrize("aged_past_expiry", [False, True])
+async def test_reparent_chat_bound_connection_in_while_unregister_pending_is_refused(
+    detached_signal: tuple[asyncpg.Pool[Any], str, str, str],
+    migrated_db_url: str,
+    aged_past_expiry: bool,
+) -> None:
+    """#2322 F4: a connection with an operator-bound chat and NO binding is
+    still "in use" (resolver tier 1 routes it).  Reparent moves its
+    ``chat_sessions`` rows into the destination, so it must be refused under
+    the number lock while the destination's unregister is non-terminal --
+    whether or not the call row has passed ``expires_at``."""
+    pool, owner_connection_id, _, _ = detached_signal
+    _a, _e, other_session = await seed_agent_env_session(
+        pool, account_id="acc_other", prefix="sig-race-chat-other"
+    )
+    async with pool.acquire() as conn:
+        await queries.archive_connection(conn, owner_connection_id, account_id=ACCOUNT)
+        other = await queries.insert_connection(
+            conn,
+            connector="signal",
+            external_account_id="1 (657) 527-4288",
+            metadata={},
+            account_id="acc_other",
+        )
+    await connections_service.bind_chat_to_session(
+        pool,
+        other.id,
+        account_id="acc_other",
+        chat_id="+15550001111",
+        session_id=other_session.id,
+    )
+    async with _FakeConnector(pool, resolve=False) as connector:
+        unregister = asyncio.create_task(_unregister(pool, migrated_db_url))
+        await asyncio.wait_for(connector.seen.wait(), timeout=5)
+        unregister.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await unregister
+        if aged_past_expiry:
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    "UPDATE pending_management_calls "
+                    "SET expires_at = now() - interval '1 second' "
+                    "WHERE method = 'unregister'"
+                )
+        reparent_error = await _outcome(
+            connections_service.reparent_connection(
+                pool,
+                other.id,
+                destination_account_id=ACCOUNT,
+                requester_account_id="acc_root",
+                crypto_box=CryptoBox(os.urandom(32)),
+            )
+        )
+
+    assert connector.live_at_dispatch == [[]]
+    assert isinstance(reparent_error, ConflictError), (
+        f"reparent_result={reparent_error!r}: reparent carried a routing bound "
+        "chat into an account with a pending unregister"
+    )
+    assert reparent_error.detail["reason"] == "number_unregister_pending"
+    async with pool.acquire() as conn:
+        assert (
+            await queries.list_attached_connections_for_phone(
+                conn, "signal", DIGITS, account_id=ACCOUNT
+            )
+            == []
+        )

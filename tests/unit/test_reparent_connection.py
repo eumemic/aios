@@ -274,7 +274,7 @@ class TestReparentConnection:
                 AsyncMock(side_effect=[_root_account("acc_root"), _child_account("acc_dest")]),
             ),
             patch(
-                "aios.services.connections.queries.get_active_binding",
+                "aios.services.connections._lock_number_and_refuse_if_releasing",
                 AsyncMock(return_value=None),
             ),
             patch(
@@ -403,7 +403,7 @@ class TestReparentConnection:
                 ),
             ),
             patch(
-                "aios.services.connections.queries.get_active_binding",
+                "aios.services.connections._lock_number_and_refuse_if_releasing",
                 AsyncMock(return_value=None),
             ),
             patch(

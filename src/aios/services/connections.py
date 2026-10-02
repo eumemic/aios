@@ -927,17 +927,26 @@ async def reparent_connection(
                 f"connection {connection_id} is archived; cannot reparent",
                 detail={"id": connection_id},
             )
-        # Reparent carries the active binding into the DESTINATION account,
-        # i.e. it creates a live binding for this number there: serialize it
-        # against a destination-side unregister like attach does (#2322).
-        if await queries.get_active_binding(conn, connection_id, account_id=locked["account_id"]):
-            await _lock_number_and_refuse_if_releasing(
-                conn,
-                account_id=destination_account_id,
-                connector=locked["connector"],
-                external_account_id=locked["external_account_id"],
-                connection_id=connection_id,
-            )
+        # Reparent carries everything that makes the connection "in use" --
+        # its active binding AND every ``chat_sessions`` row (bound chats
+        # route inbound via resolver tier 1 with no binding at all) -- into
+        # the DESTINATION account.  Serialize it against a destination-side
+        # unregister like attach / bind_chat do (#2322 F2, F4).
+        #
+        # Unconditional on purpose: gating on "has an active binding" missed
+        # chat-only connections (F4), and gating on any narrower notion of
+        # "in use" would have to stay in lockstep with
+        # ``list_attached_connections_for_phone``.  Refusing to move even an
+        # idle connection for a number whose release is pending costs nothing
+        # (the operator can retry once the unregister is terminal or
+        # cancelled) and keeps the property independent of that definition.
+        await _lock_number_and_refuse_if_releasing(
+            conn,
+            account_id=destination_account_id,
+            connector=locked["connector"],
+            external_account_id=locked["external_account_id"],
+            connection_id=connection_id,
+        )
         # Re-key the secrets blob inside the same transaction: decrypt
         # under the source account's subkey, re-encrypt under the
         # destination's. Skip when no secrets are configured — leaving
