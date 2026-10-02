@@ -85,6 +85,14 @@ def sync_detailed(
     refused with 409 ``conflict`` and no management call is dispatched.
     A malformed number with no digits is a 422.
 
+    The check holds under concurrency (#2322 F2): the read below is only a
+    fast path.  The authoritative check runs again inside ``submit_call``,
+    in the same transaction as the INSERT of the management-call row and
+    under the per-number advisory lock that every binding-creating path
+    (attach, configure per_chat, reparent) also takes.  A binding racing
+    this request either commits first (this request then gets 409) or is
+    itself refused with 409 while the unregister call is pending.
+
     Args:
         authorization (None | str | Unset):
         body (SignalUnregisterRequest):
@@ -133,6 +141,14 @@ def sync(
     refused with 409 ``conflict`` and no management call is dispatched.
     A malformed number with no digits is a 422.
 
+    The check holds under concurrency (#2322 F2): the read below is only a
+    fast path.  The authoritative check runs again inside ``submit_call``,
+    in the same transaction as the INSERT of the management-call row and
+    under the per-number advisory lock that every binding-creating path
+    (attach, configure per_chat, reparent) also takes.  A binding racing
+    this request either commits first (this request then gets 409) or is
+    itself refused with 409 while the unregister call is pending.
+
     Args:
         authorization (None | str | Unset):
         body (SignalUnregisterRequest):
@@ -175,6 +191,14 @@ async def asyncio_detailed(
     (matched on digits only) still has an active binding, the request is
     refused with 409 ``conflict`` and no management call is dispatched.
     A malformed number with no digits is a 422.
+
+    The check holds under concurrency (#2322 F2): the read below is only a
+    fast path.  The authoritative check runs again inside ``submit_call``,
+    in the same transaction as the INSERT of the management-call row and
+    under the per-number advisory lock that every binding-creating path
+    (attach, configure per_chat, reparent) also takes.  A binding racing
+    this request either commits first (this request then gets 409) or is
+    itself refused with 409 while the unregister call is pending.
 
     Args:
         authorization (None | str | Unset):
@@ -221,6 +245,14 @@ async def asyncio(
     (matched on digits only) still has an active binding, the request is
     refused with 409 ``conflict`` and no management call is dispatched.
     A malformed number with no digits is a 422.
+
+    The check holds under concurrency (#2322 F2): the read below is only a
+    fast path.  The authoritative check runs again inside ``submit_call``,
+    in the same transaction as the INSERT of the management-call row and
+    under the per-number advisory lock that every binding-creating path
+    (attach, configure per_chat, reparent) also takes.  A binding racing
+    this request either commits first (this request then gets 409) or is
+    itself refused with 409 while the unregister call is pending.
 
     Args:
         authorization (None | str | Unset):

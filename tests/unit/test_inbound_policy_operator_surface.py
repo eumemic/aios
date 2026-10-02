@@ -257,10 +257,35 @@ def _bind_pool() -> tuple[MagicMock, MagicMock]:
 
     conn = MagicMock()
     conn.transaction = MagicMock(return_value=_AsyncCm())
-    conn.fetchrow = AsyncMock(return_value={"archived_at": None})
+    # The ``SELECT … FOR UPDATE`` row shape the bind paths read: the
+    # archived-state re-check plus the (NOT NULL) number identity that keys
+    # the per-number advisory lock (#2322).
+    conn.fetchrow = AsyncMock(
+        return_value={
+            "archived_at": None,
+            "connector": "signal",
+            "external_account_id": "+15551234567",
+        }
+    )
+    # ``acquire_connection_number_lock`` → ``SELECT pg_advisory_xact_lock(...)``.
+    conn.execute = AsyncMock()
+    # ``has_pending_management_call_for_number`` → ``SELECT EXISTS (...)``:
+    # no unregister in flight, so the bind proceeds.
+    conn.fetchval = AsyncMock(return_value=False)
     pool = MagicMock()
     pool.acquire = MagicMock(return_value=_AsyncCm(conn))
     return pool, conn
+
+
+def _assert_number_lock_and_pending_check(conn: MagicMock) -> None:
+    """The bind took the per-number advisory lock and ran the pending-
+    unregister check (both inside the bind transaction, #2322)."""
+    lock_sql, lock_key = conn.execute.await_args.args
+    assert "pg_advisory_xact_lock" in lock_sql
+    assert lock_key == "aios_connection_number:acc_1:signal:15551234567"
+    check_sql, *check_args = conn.fetchval.await_args.args
+    assert "pending_management_calls" in check_sql
+    assert check_args == ["signal", "acc_1", "unregister", "15551234567"]
 
 
 async def test_attach_defaults_inbound_policy_closed(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -288,6 +313,7 @@ async def test_attach_defaults_inbound_policy_closed(monkeypatch: pytest.MonkeyP
     await svc.attach_connection(pool, "conn_1", session_id="ses_1", account_id="acc_1")
 
     default_mock.assert_awaited_once_with(conn, "conn_1", account_id="acc_1")
+    _assert_number_lock_and_pending_check(conn)
 
 
 async def test_configure_per_chat_defaults_inbound_policy_closed(
@@ -317,3 +343,4 @@ async def test_configure_per_chat_defaults_inbound_policy_closed(
     await svc.configure_per_chat(pool, "conn_1", session_template_id="stpl_1", account_id="acc_1")
 
     default_mock.assert_awaited_once_with(conn, "conn_1", account_id="acc_1")
+    _assert_number_lock_and_pending_check(conn)
