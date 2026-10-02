@@ -105,8 +105,8 @@ LEGACY_BUILTIN_RENAMES = Retirement(
 #: removed ``complete_goal``/``fail_goal`` from ``BuiltinToolType`` + the registry
 #: but shipped neither shim nor migration, wedging the live kedalion-ultron agent
 #: into an infinite reschedule; #1563 closed the gap with the
-#: ``_RETIRED_BUILTINS`` + ``load_tool_specs`` read shim and the 0122 data
-#: migration. These builtins have NO canonical successor (``return``/``error``
+#: 0122 data migration (plus a temporary ``load_tool_specs`` drop read-shim,
+#: removed in #1569 now that the boot gate proves zero residue on every surface). These builtins have NO canonical successor (``return``/``error``
 #: are general step verbs, not model-listed builtins) → ``action=drop``.
 RETIRED_GOAL_OUTCOME_BUILTINS = Retirement(
     domain=TOOL_SURFACE_DOMAIN,
@@ -122,12 +122,32 @@ RETIRED_GOAL_OUTCOME_BUILTINS = Retirement(
 )
 
 
+#: Obligation/call-surface vocabulary unification (#1516). The task-named
+#: outgoing view and cancel verb are renamed to the source-agnostic call-edge
+#: terminology. Persisted surfaces are migrated by ONE retirement revision, 0183:
+#: the backfill, then the contract residue abort-guard, in the same transaction
+#: (the expand step is a data no-op and is not emitted). ``contract_rev`` names
+#: 0183 so the boot gate enforces it and the read-tolerance validator stops
+#: accepting ``stop_task``/``list_tasks`` (same as 0122, which is also
+#: introduced and contracted at one rev).
+TASK_TO_CALL_BUILTIN_RENAMES = Retirement(
+    domain=TOOL_SURFACE_DOMAIN,
+    action="rename",
+    mappings=(("stop_task", "cancel_call"), ("list_tasks", "list_calls")),
+    surfaces=TOOL_SURFACES,
+    introduced_rev="0183",
+    contract_rev="0183",
+    sla_days=30,
+)
+
+
 #: The registry: the single list of declared retirements. Append new descriptors
 #: here; downstream tooling (validator / boot-gate / migration generator)
 #: consults this and nothing else.
 REGISTRY: tuple[Retirement, ...] = (
     LEGACY_BUILTIN_RENAMES,
     RETIRED_GOAL_OUTCOME_BUILTINS,
+    TASK_TO_CALL_BUILTIN_RENAMES,
 )
 
 
@@ -149,7 +169,17 @@ def rename_map(
         for token, successor in retirement.token_map().items():
             if successor is not None:
                 out[token] = successor
-    return out
+    # Resolve chained renames to the FINAL successor (``cancel_run`` → ``stop_task`` →
+    # ``cancel_call``): an upcast must never land on an intermediate name that a later
+    # retirement has itself contracted, or the restored row would fail validation.
+    resolved: dict[str, str] = {}
+    for token, successor in out.items():
+        seen = {token}
+        while successor in out and successor not in seen:
+            seen.add(successor)
+            successor = out[successor]
+        resolved[token] = successor
+    return resolved
 
 
 def tolerated_rename_map(
@@ -170,8 +200,8 @@ def tolerated_rename_map(
     in the live-exercise issue).
 
     Only ``action="rename"`` descriptors contribute — a ``drop`` has no successor
-    to map to and is handled at the list level (``load_tool_specs``), not by the
-    per-``ToolSpec`` before-validator. ``registry`` is injectable so callers and
+    to map to; once contracted, a persisted drop token simply fails ``ToolSpec``
+    validation (there is no drop read-shim, #1569). ``registry`` is injectable so callers and
     tests can scope the lookup to a synthetic set of descriptors.
 
     The ``contract_rev IS NULL`` predicate here is the single tolerance gate;
@@ -205,8 +235,9 @@ def dropped_tokens(
     ``return``/``error`` step verbs, not any model-listed builtin), so a
     persisted occurrence is *removed* rather than remapped. This is the single
     list the re-upcast hook (:mod:`aios.retirements.upcast`) consults to scrub
-    drops, mirroring the list-level drop the read shim
-    (``load_tool_specs``) applies. ``registry`` is injectable for tests.
+    drops at a restore/import boundary. There is no read-side drop shim (#1569):
+    a drop token reaching ``load_tool_specs`` fails validation. ``registry`` is
+    injectable for tests.
     """
 
     out: set[str] = set()

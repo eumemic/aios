@@ -444,7 +444,7 @@ async def test_reconcile_clears_host_pointer_when_canonical_image_is_absent(
 
 
 @pytest.mark.asyncio
-async def test_reconcile_skips_snapshot_evicted_this_tick(
+async def test_reconcile_never_resurrects_snapshot_reclaimed_this_tick(
     fake_pool: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """An observational pressure pass retains the canonical image and allows
@@ -469,7 +469,7 @@ async def test_reconcile_skips_snapshot_evicted_this_tick(
     monkeypatch.setattr("aios.sandbox.registry.queries.unscoped_set_session_snapshot", set_pointer)
 
     # Pointer reconciliation legitimately heals the NULL pointer.
-    await registry._gc_reconcile_pointers([verdict], states, instance_id, already_evicted=set())
+    await registry._gc_reconcile_pointers([verdict], states, instance_id)
     set_pointer.assert_awaited_once()
     set_pointer.reset_mock()
 
@@ -478,17 +478,19 @@ async def test_reconcile_skips_snapshot_evicted_this_tick(
         return_value=replace(states["sess_x"], snapshot_ref=verdict.removal_ref)
     )
     registry._reclaim_pool_candidate = AsyncMock(return_value=True)  # type: ignore[method-assign]
+    # The tick threads ONE ``retained`` list through pass 3 and pass 4.
+    retained = [verdict]
     pressure = await registry._gc_pool_budget_pass(
-        [verdict], states, 1_000_000, instance_id, dry_run=False
+        retained, states, 1_000_000, instance_id, dry_run=False
     )
     assert not pressure.pressured
     assert pressure.pool_used_bytes == 0
     registry._reclaim_pool_candidate.assert_awaited_once_with(verdict, states, instance_id)
+    # Pass 3 drops what it reclaimed — the sole seam keeping pass 4 away from it.
+    assert retained == []
 
     # Reconciliation must not resurrect a pointer removed by pressure reclamation.
-    await registry._gc_reconcile_pointers(
-        [verdict], states, instance_id, already_evicted={"sess_x"}
-    )
+    await registry._gc_reconcile_pointers(retained, states, instance_id)
     assert set_pointer.await_count == 0
 
 

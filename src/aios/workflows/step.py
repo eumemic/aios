@@ -62,10 +62,7 @@ from aios.services.sessions import (
     write_gate_opened,
 )
 from aios.tools.registry import tool_executes_class
-from aios.tools.schema_errors import (
-    format_schema_violation,
-    normalize_and_format_schema_violation,
-)
+from aios.tools.schema_errors import normalize_and_format_schema_violation
 from aios.workflows import run_llm, run_sandbox, run_tools
 from aios.workflows.child_id import child_session_id
 from aios.workflows.child_run_id import child_run_id
@@ -114,18 +111,20 @@ def _unresolvable_ref(schema: dict[str, Any]) -> str | None:
     return None
 
 
-def _validate_output_against_schema(value: Any, schema: dict[str, Any]) -> str | None:
-    """Validate a run's terminal ``output`` against the request's ``output_schema``.
+def _validate_output_against_schema(value: Any, schema: dict[str, Any]) -> tuple[Any, str | None]:
+    """The run-target output-schema gate for a run's terminal ``output``.
 
-    ``None`` on success; otherwise a human-readable message built by the shared
-    no-echo formatter (:func:`aios.tools.schema_errors.format_schema_violation` —
-    #1769 spec v2: never echoes the full ``output``, states expected-vs-got JSON
-    types, and includes the schema), the same shape the session ``return`` tool
-    produces, minus the self-correct hint — a run does NOT bounce-and-retry, it
-    fails loud. Drives the run-target ``output_schema_violation`` error-arm in
-    :func:`_complete_run`.
+    Returns ``(normalized_output, error)``. ``error`` is ``None`` on success;
+    otherwise a no-echo message (#1769 spec v2) without a self-correct hint — a
+    run does NOT bounce-and-retry, it fails loud. Drives the run-target
+    ``output_schema_violation`` error-arm in :func:`_complete_run`.
+
+    Delegates to the ONE shared output gate
+    (:func:`aios.tools.schema_errors.normalize_and_format_schema_violation`,
+    #2096 / #2178) — there is deliberately no strict-only variant, so this
+    boundary can never diverge from the ``return`` and caller-side boundaries.
     """
-    return format_schema_violation(
+    return normalize_and_format_schema_violation(
         value,
         schema,
         root="output",
@@ -1537,14 +1536,7 @@ async def _complete_run(
     # errored completion passes through (the error already explains the outcome).
     schema_error = None
     if not is_error and run.request_id is not None and run.request_output_schema is not None:
-        output, schema_error = normalize_and_format_schema_violation(
-            output,
-            run.request_output_schema,
-            root="output",
-            intro="run output does not conform to the request's required schema.",
-            retry_hint=None,
-            site="workflows.step.run_output",
-        )
+        output, schema_error = _validate_output_against_schema(output, run.request_output_schema)
     if schema_error is not None:
         output = schema_error
         is_error = True

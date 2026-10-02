@@ -1,40 +1,49 @@
-"""Read-tolerance for the RETIRED ``complete_goal``/``fail_goal`` builtins (#1562).
+"""The RETIRED ``complete_goal``/``fail_goal`` builtins now fail closed on read (#1569).
 
-#1525 removed ``complete_goal``/``fail_goal`` from ``BuiltinToolType`` + the registry but shipped
-neither a read shim nor a data migration. A long-lived agent whose persisted ``tools`` JSONB still
-listed those builtins then failed ``ToolSpec`` validation on every wake — a pre-context-build throw
-that wedged the agent into an infinite reschedule (the kedalion-ultron incident). They have NO
-canonical successor (``return``/``error`` are general step verbs, not model-listed builtins), so
-the entries are DROPPED, not remapped.
+#1525 removed ``complete_goal``/``fail_goal`` from ``BuiltinToolType`` + the registry without a
+migration; #1563 closed the gap with migration 0122 (which scrubbed every tool-bearing surface)
+plus a temporary read shim in ``load_tool_specs`` that silently dropped the retired entries.
 
-``load_tool_specs`` is the list-level read-tolerance choke point used by every DB read path
-(agents / agent_versions / workflows / workflow_versions / wf_runs / sessions); these tests pin
-the drop + order/preservation semantics, and ``test_agent_row_with_retired_builtin_hydrates_clean``
-is the CI-gap test the incident calls for: test agents are born from the *current* catalog so none
-carry retired builtins, which is exactly why the wedge was invisible to CI.
+The 0122 contract migration has run everywhere, and the fail-closed boot-admission gate (#1575)
+re-proves zero residue for these tokens on every registered surface at every boot. The read shim
+is therefore removed (migrate-and-clean-break, no permanent fallback): a persisted ``tools``
+array that still carries a retired builtin now RAISES instead of being silently tolerated.
 """
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+from typing import Any
+
 import pytest
 from pydantic import ValidationError
 
-from aios.models.agents import load_tool_specs
-
-
-def test_retired_builtin_entry_is_dropped() -> None:
-    specs = load_tool_specs([{"type": "bash"}, {"type": "complete_goal"}, {"type": "read"}])
-    assert [s.type for s in specs] == ["bash", "read"]
+from aios.models.agents import BuiltinToolType, load_tool_specs
 
 
 @pytest.mark.parametrize("retired", ["complete_goal", "fail_goal"])
-def test_each_retired_builtin_is_dropped(retired: str) -> None:
-    specs = load_tool_specs([{"type": retired}, {"type": "bash"}])
-    assert [s.type for s in specs] == ["bash"]
+def test_retired_builtin_entry_raises(retired: str) -> None:
+    with pytest.raises(ValidationError):
+        load_tool_specs([{"type": "bash"}, {"type": retired}, {"type": "read"}])
 
 
-def test_retired_only_list_hydrates_to_empty() -> None:
-    assert load_tool_specs([{"type": "complete_goal"}, {"type": "fail_goal"}]) == []
+def test_retired_only_list_raises() -> None:
+    with pytest.raises(ValidationError):
+        load_tool_specs([{"type": "complete_goal"}, {"type": "fail_goal"}])
+
+
+def test_no_retired_builtin_shim_remains() -> None:
+    import aios.models.agents as agents_mod
+
+    assert not hasattr(agents_mod, "_RETIRED_BUILTINS")
+
+
+@pytest.mark.parametrize("retired", ["complete_goal", "fail_goal"])
+def test_retired_builtin_not_in_current_catalog(retired: str) -> None:
+    """No runtime path can mint a retired type: agents are born from the current catalog."""
+    from typing import get_args
+
+    assert retired not in get_args(BuiltinToolType)
 
 
 def test_clean_list_is_untouched_and_validates() -> None:
@@ -46,39 +55,23 @@ def test_order_preserved_with_custom_and_mcp_entries() -> None:
     specs = load_tool_specs(
         [
             {"type": "bash"},
-            {"type": "fail_goal"},
             {"type": "custom", "name": "foo", "description": "d", "input_schema": {}},
-            {"type": "complete_goal"},
             {"type": "mcp_toolset", "mcp_server_name": "srv"},
         ]
     )
     assert [s.type for s in specs] == ["bash", "custom", "mcp_toolset"]
 
 
-def test_retired_drop_does_not_tolerate_contracted_rename() -> None:
-    """The drop shim does not mask an independently contracted rename token."""
-    with pytest.raises(ValidationError):
-        load_tool_specs([{"type": "complete_goal"}, {"type": "invoke_workflow"}])
-
-
-def test_agent_row_with_retired_builtin_hydrates_clean() -> None:
-    """CI-gap regression: an agent whose persisted ``tools`` JSONB carries a retired builtin
-    hydrates without raising — the exact wedge #1525 introduced and CI missed (test agents are
-    born from the current catalog, so none carry retired builtins)."""
-    from datetime import UTC, datetime
-
-    from aios.db.queries.agents import _row_to_agent
-
+def _agent_row(tools: list[dict[str, Any]]) -> dict[str, Any]:
     now = datetime.now(UTC)
-    row = {
-        "id": "agt_wedged",
+    return {
+        "id": "agt_retired",
         "version": 3,
         "name": "ultron",
         "model": "anthropic/claude-opus-4-6",
         "system": "",
-        # Pool reads arrive already parsed (the jsonb codec decodes), so pass
-        # parsed Python here, exactly what ``_row_to_agent`` receives in prod.
-        "tools": [{"type": "bash"}, {"type": "complete_goal"}, {"type": "fail_goal"}],
+        # Pool reads arrive already parsed (the jsonb codec decodes).
+        "tools": tools,
         "skills": [],
         "mcp_servers": [],
         "http_servers": [],
@@ -96,7 +89,18 @@ def test_agent_row_with_retired_builtin_hydrates_clean() -> None:
         "archived_at": None,
     }
 
-    agent = _row_to_agent(row)
 
-    # The retired builtins are gone; the legitimate one survives. No exception = no wedge.
-    assert [t.type for t in agent.tools] == ["bash"]
+def test_agent_row_with_retired_builtin_raises() -> None:
+    """Hydrating a persisted agent row that still carries a retired builtin now RAISES —
+    we have migrated off (0122 + boot-gate residue proof), so there is no silent fallback."""
+    from aios.db.queries.agents import _row_to_agent
+
+    with pytest.raises(ValidationError):
+        _row_to_agent(_agent_row([{"type": "bash"}, {"type": "complete_goal"}]))
+
+
+def test_agent_row_with_current_vocabulary_hydrates() -> None:
+    from aios.db.queries.agents import _row_to_agent
+
+    agent = _row_to_agent(_agent_row([{"type": "bash"}, {"type": "read"}]))
+    assert [t.type for t in agent.tools] == ["bash", "read"]

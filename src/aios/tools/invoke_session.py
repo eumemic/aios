@@ -65,10 +65,7 @@ from aios.services import tasks as tasks_service
 from aios.services import workflows as wf_service
 from aios.tools.invoke import ToolBail, current_tool_call_id, validate_output_schema_or_bail
 from aios.tools.registry import ToolResult, registry
-from aios.tools.schema_errors import (
-    format_schema_violation,
-    normalize_and_format_schema_violation,
-)
+from aios.tools.schema_errors import normalize_and_format_schema_violation
 from aios.tools.workflow_management import slim_workflow_schema
 
 # Per-park await budget. The tool task is fire-and-forget (implicit-async), so a
@@ -212,21 +209,23 @@ def _parse[M: BaseModel](model: type[M], arguments: dict[str, Any]) -> M:
 # ─── shared result shaping ───────────────────────────────────────────────────
 
 
-def _validate_output(value: Any, schema: dict[str, Any] | None) -> ToolResult | None:
-    """Validate the resolved ``value`` against ``output_schema`` (fail-loud).
+def _validate_output(value: Any, schema: dict[str, Any] | None) -> tuple[Any, ToolResult | None]:
+    """Caller-side output-schema gate for a resolved ``call_*`` answer (fail-loud).
 
-    ``None`` on success (or no schema); otherwise a model-visible error ToolResult
-    (``output_schema_violation``) built by the shared no-echo formatter
-    (:func:`aios.tools.schema_errors.format_schema_violation` — #1769 spec v2) so
-    the caller sees a non-conforming answer as an error rather than silently
-    accepting it — mirrors ``workflow_completion``'s ``return`` enforcement, but
-    on the *caller* side for a run/peer answer that bypassed the servicer's own
-    ``return`` schema gate. No retry hint: the CALLER doesn't own the answer, it
-    can't make the peer/run re-answer by retrying this call.
+    Returns ``(normalized_value, violation)``. ``violation`` is ``None`` on success
+    (or when there is no schema); otherwise a model-visible error ToolResult
+    (``output_schema_violation``) so the caller sees a non-conforming answer as an
+    error rather than silently accepting it. No retry hint: the CALLER doesn't own
+    the answer, it can't make the peer/run re-answer by retrying this call.
+
+    Delegates to the ONE shared output gate
+    (:func:`aios.tools.schema_errors.normalize_and_format_schema_violation`,
+    #2096 / #2178) — there is deliberately no strict-only variant, so this
+    boundary can never diverge from the ``return`` and workflow-run boundaries.
     """
     if schema is None:
-        return None
-    message = format_schema_violation(
+        return value, None
+    normalized, message = normalize_and_format_schema_violation(
         value,
         schema,
         root="",
@@ -235,8 +234,8 @@ def _validate_output(value: Any, schema: dict[str, Any] | None) -> ToolResult | 
         site="invoke_session.call_output",
     )
     if message is None:
-        return None
-    return ToolResult(content=message, is_error=True)
+        return normalized, None
+    return normalized, ToolResult(content=message, is_error=True)
 
 
 def _ok_result(result: Any) -> dict[str, Any]:
@@ -307,18 +306,7 @@ async def _park_and_resolve(
     )
     if resp.outcome != "ok":
         return _error_result(resp.error)
-    result = resp.result
-    if output_schema is None:
-        return _ok_result(result)
-    result, message = normalize_and_format_schema_violation(
-        result,
-        output_schema,
-        root="",
-        intro="output_schema_violation: the answer does not conform to output_schema.",
-        retry_hint=None,
-        site="invoke_session.call_output",
-    )
-    violation = ToolResult(content=message, is_error=True) if message is not None else None
+    result, violation = _validate_output(resp.result, output_schema)
     return violation if violation is not None else _ok_result(result)
 
 

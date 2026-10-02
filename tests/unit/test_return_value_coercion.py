@@ -209,25 +209,75 @@ async def _complete_workflow_output(monkeypatch: Any, value: Any) -> tuple[str, 
     return commit.await_args.kwargs["status"], commit.await_args.kwargs["output"]
 
 
-async def _resolve_call_output(monkeypatch: Any, value: Any) -> Any:
-    monkeypatch.setattr(
-        "aios.tools.invoke_session._park_on_task",
-        AsyncMock(return_value=AwaitResponse(outcome="ok", result=value)),
-    )
-    from aios.tools.invoke_session import _park_and_resolve
+def _stub_call_handlers(monkeypatch: Any, value: Any) -> AsyncMock:
+    """Stub the pool/services under the REAL ``call_session``/``call_workflow``
+    handlers so each answer resolves to ``value``."""
+    from types import SimpleNamespace
 
-    return await _park_and_resolve(
-        object(),
-        servicer_kind="session",
-        servicer_id="ses_1",
-        request_id="req_1",
-        account_id="acc_1",
-        output_schema=_OBJ_SCHEMA,
+    from aios.models.tasks import TaskHandle
+
+    monkeypatch.setattr(runtime, "require_pool", lambda: object())
+    monkeypatch.setattr(
+        "aios.services.sessions.load_session_account_id", AsyncMock(return_value="acc_1")
     )
+    monkeypatch.setattr(
+        "aios.services.sessions.get_session_basic",
+        AsyncMock(return_value=SimpleNamespace(environment_id="env_1", parent_run_id=None)),
+    )
+    monkeypatch.setattr(
+        "aios.services.sessions.invoke",
+        AsyncMock(
+            return_value=TaskHandle(
+                servicer_kind="session", servicer_id="ses_target", request_id="req_1"
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        "aios.services.workflows.create_run", AsyncMock(return_value=SimpleNamespace(id="wfr_1"))
+    )
+    await_task = AsyncMock(return_value=AwaitResponse(outcome="ok", result=value))
+    monkeypatch.setattr("aios.services.tasks.await_task", await_task)
+    monkeypatch.setattr(
+        "aios.config.get_settings", lambda: SimpleNamespace(db_url="postgresql://x")
+    )
+    return await_task
+
+
+async def _call_session_output(monkeypatch: Any, value: Any) -> Any:
+    """Drive the real ``call_session`` handler (session servicer)."""
+    from aios.tools.invoke_session import call_session_handler
+
+    await_task = _stub_call_handlers(monkeypatch, value)
+    result = await call_session_handler(
+        "ses_caller", {"session_id": "ses_target", "input": "go", "output_schema": _OBJ_SCHEMA}
+    )
+    assert await_task.await_args is not None
+    assert await_task.await_args.kwargs["servicer_kind"] == "session"
+    return result
+
+
+async def _call_workflow_output(monkeypatch: Any, value: Any) -> Any:
+    """Drive the real ``call_workflow`` handler (run servicer)."""
+    from aios.tools.invoke_session import call_workflow_handler
+
+    await_task = _stub_call_handlers(monkeypatch, value)
+    result = await call_workflow_handler(
+        "ses_caller", {"workflow_id": "wf_1", "input": {}, "output_schema": _OBJ_SCHEMA}
+    )
+    assert await_task.await_args is not None
+    assert await_task.await_args.kwargs["servicer_kind"] == "run"
+    return result
 
 
 class TestCrossPathConsistency:
-    """The same terminal payload receives the same verdict at all four boundaries."""
+    """The same terminal payload receives the same verdict at all four boundaries.
+
+    The four legs are driven through distinct entry points: ``return``
+    (``_enforce_output_schema``), workflow-run completion (``_complete_run``), and
+    the REAL ``call_session`` and ``call_workflow`` handlers — each handler is
+    invoked separately (session vs run servicer), so neither caller-side leg is a
+    duplicate of the other (#2178).
+    """
 
     async def test_encoded_object_is_accepted_and_normalized_everywhere(
         self, monkeypatch: Any
@@ -237,8 +287,8 @@ class TestCrossPathConsistency:
 
         session_value, session_error = await _enforce_output_schema("ses_1", "req_1", encoded)
         workflow_status, workflow_value = await _complete_workflow_output(monkeypatch, encoded)
-        call_session = await _resolve_call_output(monkeypatch, encoded)
-        call_workflow = await _resolve_call_output(monkeypatch, encoded)
+        call_session = await _call_session_output(monkeypatch, encoded)
+        call_workflow = await _call_workflow_output(monkeypatch, encoded)
 
         assert session_error is None
         assert session_value == {"n": 1}  # return / workflow_completion
@@ -258,8 +308,8 @@ class TestCrossPathConsistency:
         workflow_status, workflow_value = await _complete_workflow_output(
             monkeypatch, encoded_invalid
         )
-        call_session = await _resolve_call_output(monkeypatch, encoded_invalid)
-        call_workflow = await _resolve_call_output(monkeypatch, encoded_invalid)
+        call_session = await _call_session_output(monkeypatch, encoded_invalid)
+        call_workflow = await _call_workflow_output(monkeypatch, encoded_invalid)
 
         assert session_error is not None
         assert session_value == encoded_invalid

@@ -3018,8 +3018,8 @@ class SandboxRegistry:
         # Pass 3b — per-account snapshot cap (quota tiers / plan limits, §5.7).
         account_pressure = await self._gc_account_cap_pass(retained, image_states, instance_id)
 
-        # Pass 4 — pointer reconciliation against local store truth. Pressure
-        # passes are observational and never remove lifecycle-protected images.
+        # Pass 4 — pointer reconciliation against local store truth. Pass 3
+        # drops every image it reclaims from ``retained``; pass 3b only reports.
         await self._gc_reconcile_pointers(retained, image_states, instance_id)
 
         log.info(
@@ -3531,8 +3531,6 @@ class SandboxRegistry:
         retained: list[GcImageVerdict],
         states: dict[str, SessionSnapshotState],
         instance_id: str,
-        *,
-        already_evicted: set[str] | None = None,
     ) -> GcPressureResult:
         """Report account pressure without deleting canonical session state."""
         from aios.harness import runtime
@@ -3624,8 +3622,6 @@ class SandboxRegistry:
         retained: list[GcImageVerdict],
         states: dict[str, SessionSnapshotState],
         instance_id: str,
-        *,
-        already_evicted: set[str] | None = None,
     ) -> None:
         """Heal a NULL/stale pointer for a retained canonical tag (§5.5 pass 4).
 
@@ -3634,10 +3630,9 @@ class SandboxRegistry:
         heal). Multi-host compare-and-swap is deferred — the ``snapshot_host``
         column is the seam that makes it additive.
 
-        ``already_evicted`` names sessions whose canonical image passes 3/3b
-        removed this tick. They are still in ``retained`` (the eviction passes
-        don't mutate it) with a tick-start NULL/stale pointer, so without this
-        skip the heal would write a pointer to an image that no longer exists.
+        A canonical image reclaimed by pass 3 this tick is removed from
+        ``retained`` by that pass, so this heal never sees it and cannot
+        resurrect a pointer to an image that no longer exists.
         """
         # This pass enumerates Docker images and therefore has authority only
         # when Docker itself is the canonical store.  In TarballStore mode an
@@ -3645,7 +3640,6 @@ class SandboxRegistry:
         # would make an external ``docker image prune -af`` destructive.
         if not isinstance(self._store, LocalDaemonStore):
             return
-        skip = already_evicted or set()
         base_sizes: dict[str, int] = {}  # shared across the pass (sessions share a base)
         for v in retained:
             if not v.is_canonical:
@@ -3653,8 +3647,6 @@ class SandboxRegistry:
             sid = v.session_id
             if sid is None:
                 continue
-            if sid in skip:
-                continue  # evicted this tick — its image is gone; never resurrect the pointer
             st = states.get(sid)
             if st is None:
                 continue

@@ -85,7 +85,7 @@ from aios.db import queries
 from aios.harness import runtime
 from aios.models.sessions import Obligation
 from aios.services import sessions as sessions_service
-from aios.tools.invoke import ToolBail, validate_output_schema_or_bail
+from aios.tools.invoke import ToolBail, current_tool_call_id, validate_output_schema_or_bail
 from aios.tools.registry import ToolResult, registry
 
 # ─── argument models ─────────────────────────────────────────────────────────
@@ -190,6 +190,16 @@ async def create_goal_handler(
     # (#1512) — `return` validates its value against it servicer-side.
     goal_input: dict[str, Any] = {"goal": args.goal}
 
+    # The goal is a reflexive call, so its edge carries the launching ``tool_call_id``
+    # exactly as ``invoke_session._caller`` stamps a ``call_*`` edge: that is the key
+    # ``list_calls`` (origin=self) and ``cancel_call`` locate it by
+    # (``list_caller_tasks`` / ``find_parked_servicer``). Omitted, not ``null``, when no
+    # tool context is set (a non-dispatch caller), keeping the edge clean.
+    caller: dict[str, Any] = {"kind": "session", "id": session_id}
+    tool_call_id = current_tool_call_id()
+    if tool_call_id is not None:
+        caller["tool_call_id"] = tool_call_id
+
     handle = await sessions_service.invoke(
         pool,
         account_id=account_id,
@@ -197,7 +207,7 @@ async def create_goal_handler(
         target=session_id,  # the target IS this session — a self-goal (#1414).
         input=goal_input,
         output_schema=args.output_schema,
-        caller={"kind": "session", "id": session_id},
+        caller=caller,
     )
     return {
         "goal_id": handle.request_id,
@@ -219,7 +229,8 @@ CREATE_GOAL_DESCRIPTION = (
     "against output_schema — a non-conforming value is rejected and the goal stays "
     "open), or `error(request_id=<goal_id>, message=...)` to abandon it. List your "
     "open goals with `list_obligations`/`list_calls` (origin=self) and drop one with "
-    "`cancel_call` (by its tool_call_id) — there is no separate goal-list or "
+    "`cancel_call` (by the tool_call_id of the create_goal call that opened it, as "
+    "list_calls shows) — there is no separate goal-list or "
     "goal-cancel verb. This is the highest-leverage way to actually close a task: "
     "declare a checkable 'done' up front, then you can't quiesce until a conforming "
     "result proves it."
