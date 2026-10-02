@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- **`tool` CLI always writes parseable JSON to stdout on transport failure
+  (#2227).** A broker request that timed out used to print a Python traceback
+  and nothing on stdout, so callers doing `json.loads` saw `Expecting value`,
+  and a lenient caller read the timeout as an empty result. Timeouts, an
+  unreachable broker, a missing socket, non-JSON broker responses and non-2xx
+  broker replies now write one JSON line to stdout, e.g.
+  `{"error": {"kind": "timeout", "timeout_s": 30.0, "path": "/builtins/http_request"}}`,
+  and exit non-zero (2 for transport failures, 1 for broker HTTP errors). The
+  human-readable message goes to stderr. Successful calls are unchanged, and the
+  30 s timeout is unchanged too.
 - **Oversized request inputs are refused at the caller, never truncated
   (#2122).** `agent()` in a workflow now has a documented input limit:
   1,000,000 characters (Unicode code points, the same `MAX_USER_MESSAGE_CHARS`
