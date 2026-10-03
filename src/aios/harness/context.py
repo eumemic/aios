@@ -681,8 +681,13 @@ def render_user_event(
     model: str | None = None,
     session_id: str | None = None,
     workspace_path: Path | None = None,
+    unavailable: list[str] | None = None,
 ) -> dict[str, Any]:
     """Render a user event into its chat-completions message form.
+
+    ``unavailable``, when given, collects the sandbox paths of attachments whose
+    files couldn't be read (rendered as text markers instead): request rebuild
+    (#2471) reports those as missing data rather than as a drifted render.
 
     Rendering is a deterministic function of the event's stamped
     ``orig_channel``, ``focal_channel_at_arrival``, ``created_at``, and
@@ -802,6 +807,7 @@ def render_user_event(
                     model=model,
                     session_id=session_id,
                     workspace_path=workspace_path,
+                    unavailable=unavailable,
                 )
         return msg
 
@@ -823,6 +829,7 @@ def _apply_attachments(
     model: str | None,
     session_id: str | None,
     workspace_path: Path | None = None,
+    unavailable: list[str] | None = None,
 ) -> None:
     leading_text = msg.get("content") if isinstance(msg.get("content"), str) else ""
     marker_lines: list[str] = []
@@ -883,6 +890,8 @@ def _apply_attachments(
                 error=str(err),
             )
             marker_lines.append(text_marker(record))
+            if unavailable is not None:
+                unavailable.append(str(effective.get("in_sandbox_path")))
             continue
         cache_key = (str(host_path), st.st_mtime_ns, st.st_size)
         cached = _attachment_cache_get(cache_key)
@@ -916,6 +925,8 @@ def _apply_attachments(
                 error=str(err),
             )
             marker_lines.append(text_marker(record))
+            if unavailable is not None:
+                unavailable.append(str(effective.get("in_sandbox_path")))
             continue
         image_format = inline_image_format(payload)
         if image_format is None:
@@ -1421,6 +1432,9 @@ class ContextResult:
     # the trailing-assistant guard condition — reported so the composer can
     # act on it structurally.
     needs_trailing_notice: bool
+    # Sandbox paths of attachments whose files couldn't be read; they rendered as
+    # text markers. Request rebuild (#2471) reports them as missing data.
+    unavailable_attachments: tuple[str, ...] = ()
 
 
 def _quarantine_placeholder(seq: int) -> dict[str, Any]:
@@ -1609,6 +1623,7 @@ def build_messages(
     # Walk events in seq order.
     emitted_tcids: set[str] = set()
     messages: list[dict[str, Any]] = []
+    unavailable_attachments: list[str] = []
     # Blind-spot messages, keyed by the seq of the assistant they render AFTER:
     # ``(seq, rendered message)`` entries drained in log order when the walk
     # reaches that assistant (``_drain_after``). Two producers feed it — user
@@ -1717,6 +1732,7 @@ def build_messages(
                     model=model,
                     session_id=session_id,
                     workspace_path=workspace_path,
+                    unavailable=unavailable_attachments,
                 )
                 if is_reminder_event("message", e.data):
                     # A durable reminder is model-visible but NOT a stimulus:
@@ -1969,6 +1985,7 @@ def build_messages(
         reacting_to=max_stimulus_seq,
         tail_origin=tail_origin,
         needs_trailing_notice=needs_trailing_notice,
+        unavailable_attachments=tuple(unavailable_attachments),
     )
 
 

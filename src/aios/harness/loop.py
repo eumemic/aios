@@ -59,6 +59,7 @@ from aios.harness.model_workflow import (
     launch_model_workflow_park,
     take_pending_harvest,
 )
+from aios.harness.request_capture import capture_request, store_capture
 from aios.harness.step_context import (
     compose_step_context,
     compute_step_prelude,
@@ -1259,6 +1260,7 @@ async def _run_session_step_body(
         account_id=account_id,
     )
 
+    in_flight_tool_call_ids = frozenset(inflight_tool_registry.in_flight_tool_call_ids(session_id))
     try:
         step_ctx = await compose_step_context(
             pool=pool,
@@ -1268,9 +1270,7 @@ async def _run_session_step_body(
             channels=channels,
             prelude=prelude,
             events=events,
-            in_flight_tool_call_ids=frozenset(
-                inflight_tool_registry.in_flight_tool_call_ids(session_id)
-            ),
+            in_flight_tool_call_ids=in_flight_tool_call_ids,
             omission=windowed.omission,
             capability_model=capability_model,
             persist_image_rewrites=True,
@@ -1331,6 +1331,27 @@ async def _run_session_step_body(
         session_id=session_id,
     )
 
+    async def _capture() -> dict[str, Any]:
+        """Record this request (#2471) just before it is sent: hash it off the event
+        loop, store its blobs, and return the ``request`` record for the span that
+        opens the send (``model_request_start``, or the workflow-model park)."""
+        capture = await asyncio.to_thread(
+            capture_request,
+            llm_request,
+            system_prompt=prelude.system_prompt,
+            model=agent.model,
+            capability_model=capability_model,
+            binding=agent.binding,
+            after_seq=windowed.after_seq,
+            through_seq=events[-1].seq if events else None,
+            omission=windowed.omission,
+            reminder_seqs=step_ctx.reminder_seqs,
+            in_flight_tool_call_ids=in_flight_tool_call_ids,
+            tz_name=step_ctx.tz_name,
+        )
+        await store_capture(pool, capture, account_id=account_id)
+        return capture.record
+
     # ── workflow: model binding — async two-step model-dispatch + harvest (#1634) ──
     #
     # When ``agent.model`` is ``workflow:<wf_id>[@version]`` the inference is produced
@@ -1372,6 +1393,7 @@ async def _run_session_step_body(
                     request=llm_request,
                     reacting_to=step_ctx.reacting_to,
                     account_id=account_id,
+                    request_record=await _capture(),
                     run_id=park_run_id,
                 )
             except RateLimitedError as exc:
@@ -1600,12 +1622,13 @@ async def _run_session_step_body(
             )
             return _StepResult()
 
-        # Emit span start so consumers can measure inference latency.
+        # Emit span start so consumers can measure inference latency. It carries the
+        # request record, so the request is recoverable from durable state (#2471).
         start_event = await sessions_service.append_event(
             pool,
             session_id,
             "span",
-            {"event": "model_request_start"},
+            {"event": "model_request_start", "request": await _capture()},
             account_id=account_id,
         )
 

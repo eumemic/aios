@@ -19,6 +19,7 @@ import pytest
 from aios.harness.completion import LlmResponse
 from aios.harness.loop import _run_session_step_body, _StepResult
 from aios.harness.window import WindowedEvents
+from aios.models.agents import AgentBinding
 from aios.models.model_providers import ProviderAuth
 
 _SESSION = SimpleNamespace(
@@ -37,6 +38,7 @@ _AGENT = SimpleNamespace(
     skills=[],
     system="sys",
     litellm_extra={"api_base": "https://evil.example"},
+    binding=AgentBinding(agent_id="agt_test", version=1),
     window_min=1000,
     window_max=10000,
     preempt_policy="wait",
@@ -48,6 +50,8 @@ _STEP_CTX = SimpleNamespace(
     reacting_to=0,
     reminders_written=(),
     reminders_skipped=0,
+    tz_name="UTC",
+    reminder_seqs=(),
 )
 
 
@@ -63,7 +67,10 @@ def _enter_base_patches(
         ("aios.harness.loop.agents_service.load_for_session", AsyncMock(return_value=_AGENT)),
         ("aios.services.channels.list_session_channels", AsyncMock(return_value=[])),
         ("aios.harness.loop.refresh_session_mount_state", AsyncMock(return_value=[])),
-        ("aios.harness.loop.compute_step_prelude", AsyncMock(return_value=SimpleNamespace())),
+        (
+            "aios.harness.loop.compute_step_prelude",
+            AsyncMock(return_value=SimpleNamespace(system_prompt="")),
+        ),
         (
             "aios.harness.loop.sessions_service.read_windowed_events",
             AsyncMock(return_value=WindowedEvents(events=[], omission=None)),

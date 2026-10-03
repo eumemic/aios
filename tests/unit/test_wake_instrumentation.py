@@ -21,6 +21,7 @@ from procrastinate.testing import InMemoryConnector
 
 from aios.harness.completion import LlmResponse
 from aios.harness.window import WindowedEvents
+from aios.models.agents import AgentBinding
 from aios.services.sessions import AssistantAppendResult
 
 
@@ -244,6 +245,7 @@ class TestStepStartEndSpans:
             skills=[],
             system="sys",
             litellm_extra={},
+            binding=AgentBinding(agent_id="agt_test", version=1),
             window_min=1000,
             window_max=10000,
             preempt_policy="wait",
@@ -302,6 +304,8 @@ class TestStepStartEndSpans:
                         skill_versions=[],
                         reminders_written=(),
                         reminders_skipped=0,
+                        tz_name="UTC",
+                        reminder_seqs=(),
                     )
                 ),
             ),
@@ -366,6 +370,7 @@ class TestStepStartEndSpans:
             skills=[],
             system="sys",
             litellm_extra={},
+            binding=AgentBinding(agent_id="agt_test", version=1),
             window_min=1000,
             window_max=10000,
             preempt_policy="wait",
@@ -418,6 +423,8 @@ class TestStepStartEndSpans:
                         skill_versions=[],
                         reminders_written=(),
                         reminders_skipped=0,
+                        tz_name="UTC",
+                        reminder_seqs=(),
                     )
                 ),
             ),
@@ -491,6 +498,7 @@ class TestStepStartEndSpans:
             skills=[],
             system="sys",
             litellm_extra={},
+            binding=AgentBinding(agent_id="agt_test", version=1),
             window_min=1000,
             window_max=10000,
             preempt_policy="wait",
@@ -541,6 +549,8 @@ class TestStepStartEndSpans:
                         skill_versions=[],
                         reminders_written=(),
                         reminders_skipped=0,
+                        tz_name="UTC",
+                        reminder_seqs=(),
                     )
                 ),
             ),
@@ -600,6 +610,7 @@ class TestStepStartEndSpans:
             skills=[],
             system="sys",
             litellm_extra={},
+            binding=AgentBinding(agent_id="agt_test", version=1),
             window_min=1000,
             window_max=10000,
             preempt_policy="wait",
@@ -650,6 +661,8 @@ class TestStepStartEndSpans:
                         skill_versions=[],
                         reminders_written=(),
                         reminders_skipped=0,
+                        tz_name="UTC",
+                        reminder_seqs=(),
                     )
                 ),
             ),
@@ -709,6 +722,7 @@ class TestStepStartEndSpans:
             skills=[],
             system="sys",
             litellm_extra={},
+            binding=AgentBinding(agent_id="agt_test", version=1),
             window_min=1000,
             window_max=10000,
             preempt_policy="wait",
@@ -761,6 +775,8 @@ class TestStepStartEndSpans:
                         skill_versions=[],
                         reminders_written=(),
                         reminders_skipped=0,
+                        tz_name="UTC",
+                        reminder_seqs=(),
                     )
                 ),
             ),
@@ -815,6 +831,7 @@ async def _harness_with_guard(
         skills=[],
         system="sys",
         litellm_extra={},
+        binding=AgentBinding(agent_id="agt_test", version=1),
         window_min=1000,
         window_max=10000,
         preempt_policy="wait",
@@ -854,6 +871,8 @@ async def _harness_with_guard(
                     skill_versions=[],
                     reminders_written=(),
                     reminders_skipped=0,
+                    tz_name="UTC",
+                    reminder_seqs=(),
                 )
             ),
         ),

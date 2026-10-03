@@ -183,6 +183,7 @@ async def test_model_workflow_launch_inherits_session_vaults(
         ref=WorkflowModelRef("wf_1"),
         request=LlmRequest(messages=[]),
         reacting_to=1,
+        request_record={},
         account_id="acc_1",
     )
 
