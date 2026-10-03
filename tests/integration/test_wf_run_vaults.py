@@ -1382,3 +1382,50 @@ async def test_subrun_composes_against_child_frozen_clamp(
         environment_id=ENV,
     )
     assert {t.type for t in subrun.tools} == {"bash"}  # composed clamp: read dropped
+
+
+async def test_sub_run_binds_within_its_parent_runs_vaults(vault_pool: asyncpg.Pool[Any]) -> None:
+    """#2472: a sub-run's vaults are bounded by its parent RUN's, even on an operator
+    chain where the root bound its own as-is. Omitted inherits all of them in rank
+    order, a subset narrows, and a vault the parent doesn't hold is refused."""
+    pool = vault_pool
+    v1 = await _make_vault(pool, "sub-v1")
+    v2 = await _make_vault(pool, "sub-v2")
+    v3 = await _make_vault(pool, "sub-v3")
+    wf = await wf_service.create_workflow(pool, account_id=ACC, name="wf-sub-v", script=_SCRIPT)
+    root = await wf_service.create_run(
+        pool,
+        account_id=ACC,
+        authority=OperatorAuthority(),
+        workflow_id=wf.id,
+        environment_id=ENV,
+        vault_ids=[v2, v1],
+    )
+
+    inherited = await wf_service.create_run(
+        pool, account_id=ACC, authority=RunAuthority(root.id), workflow_id=wf.id, environment_id=ENV
+    )
+    narrowed = await wf_service.create_run(
+        pool,
+        account_id=ACC,
+        authority=RunAuthority(root.id),
+        workflow_id=wf.id,
+        environment_id=ENV,
+        vault_ids=[v1],
+    )
+    async with pool.acquire() as conn:
+        assert await wf_queries.get_run_vault_ids(conn, inherited.id, account_id=ACC) == [v2, v1]
+        assert await wf_queries.get_run_vault_ids(conn, narrowed.id, account_id=ACC) == [v1]
+
+    before = await _run_count(pool)
+    with pytest.raises(ForbiddenError) as exc:
+        await wf_service.create_run(
+            pool,
+            account_id=ACC,
+            authority=RunAuthority(root.id),
+            workflow_id=wf.id,
+            environment_id=ENV,
+            vault_ids=[v1, v3],
+        )
+    assert exc.value.detail == {"ungranted_vault_ids": [v3]}
+    assert await _run_count(pool) == before

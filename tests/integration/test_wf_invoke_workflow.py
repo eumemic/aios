@@ -315,10 +315,11 @@ async def _list(pool: asyncpg.Pool[Any], run_id: str) -> list[Any]:
 #     ``launcher_session_id is not None``) is SKIPPED — the sub-run runs
 #     un-attenuated on the tool/mcp/http axis.
 #
-# The fix threads the parent run's ``launcher_session_id`` down the
-# ``parent_run_id`` lineage, so the sub-run is clamped to, and acts for, the
-# ORIGINATING session. Both exposures close at once. (#2467 later moved the guard
-# onto the immutable ``principal``, which the sub-run inherits the same way.)
+# The fix threaded the parent run's ``launcher_session_id`` down the
+# ``parent_run_id`` lineage, so the sub-run acted for the ORIGINATING session. #2467
+# moved the guard onto the immutable ``principal``, which the sub-run inherits, and
+# #2472 clamps every sub-run to its parent run's frozen surface (``RunAuthority``),
+# which the parent already took from the originating session at its own launch.
 
 
 async def _make_launcher_session(pool: asyncpg.Pool[Any], agent_id: str) -> Session:
@@ -591,6 +592,9 @@ async def test_as_agent_reroots_an_operator_subrun_at_the_agent_surface(
     assert sub.as_agent == AsAgent(agent_id=agent_id, version=1)
     assert [t.type for t in surface_of(sub).tools] == ["read"]
     assert sub.principal == "operator"
+    async with pool.acquire() as conn:
+        facts = await wf_queries.sub_run_facts(conn, parent_run, account_id="acc_wf", max_nodes=10)
+    assert [n["as_agent"] for n in facts["nodes"]] == [{"agent_id": agent_id, "version": 1}]
 
 
 @pytest.mark.parametrize(
