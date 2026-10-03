@@ -643,6 +643,9 @@ async def list_connection_tools_for_session(
     runtime container is the source of truth for what tools its
     connector type serves (PR 5).  The flattened tool-spec list is
     ready to feed through :func:`tools.registry.to_openai_tools_custom`.
+    Ordered by connector, so a session bound to several connector types gets
+    the same tool list every step (tool order is part of the request, and
+    of its prompt-cache key).
     """
     rows = await conn.fetch(
         f"""
@@ -659,6 +662,7 @@ async def list_connection_tools_for_session(
             )
         }
             )
+         ORDER BY cat.connector
         """,
         session_id,
         account_id,
