@@ -262,12 +262,12 @@ async def test_ratio_below_1_never_inflates_window(monkeypatch: pytest.MonkeyPat
 
 @pytest.mark.asyncio
 async def test_windowed_read_reports_omission() -> None:
-    """A real drop returns the omitted-span facts, queried against the
-    SAME boundary value as the retained range scan (exact complements).
+    """A real drop returns the omitted-span facts, read from the boundary row
+    whose ``seq`` is the retained range scan's lower bound (exact complements).
 
     Post-#1657 the omitted count is the boundary row's ``cumulative_messages``
-    running counter (O(1) index seek), not a ``count(*)`` scan — but the
-    boundary value it is read at must still equal the retained scan's drop.
+    running counter (O(1) index seek), not a ``count(*)`` scan — and the
+    retained scan must start right after that same row.
     """
     account_id = "acc_test_stub"
     conn = _FakeConn(total_local=3_000, ratio_n=4, ratio_mean=0.0)
@@ -281,12 +281,12 @@ async def test_windowed_read_reports_omission() -> None:
         account_id=account_id,
     )
     assert result.omission == WindowOmission(began_at=_BEGAN_AT, omitted_messages=7)
-    # Complement check: both the retained scan and the omission boundary seek
-    # saw the same drop boundary.
+    # Complement check: the retained scan starts right after the boundary row
+    # the omission was read from (the fake boundary row sits at seq 5).
     assert conn.omission_calls, "expected the omission boundary row to be queried"
-    _sid, retained_drop, *_ = conn.omission_calls[-1]
-    _sid2, omitted_drop, *_ = conn.omission_calls[-1]
-    assert retained_drop == omitted_drop
+    _sid, _account_id, retained_after_seq, *_ = conn.fetch_calls[-1]
+    assert retained_after_seq == 5
+    assert result.after_seq == 5
 
 
 @pytest.mark.asyncio

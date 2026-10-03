@@ -127,8 +127,10 @@ class WindowedEvents:
 
     ``after_seq`` is the slate's exclusive lower bound — the seq of the last
     dropped message — or ``None`` when the slate is the whole log. Request
-    capture (#2471) records it so a rebuild re-reads exactly this slate with
-    :func:`~aios.db.queries.events.read_windowed_context_events`."""
+    capture (#2471) records it so a rebuild can re-read this slate with
+    :func:`~aios.db.queries.events.read_windowed_context_events`. It is only the
+    lower bound: rows appended after the read (this step's own reminder rows
+    among them) also satisfy it, so a rebuild needs the slate's last seq too."""
 
     events: list[Event]
     omission: WindowOmission | None

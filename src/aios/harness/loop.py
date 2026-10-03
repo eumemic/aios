@@ -1242,6 +1242,7 @@ async def _run_session_step_body(
             # per turn regardless of how many sweep ticks elapse. The harvest task's
             # ``defer_wake`` (or a later sweep re-wake) re-enters and harvests.
             return _StepResult()
+    persist_reminders = not isinstance(disposition, HarvestedInference)
 
     # Span the remainder of the prologue so "why is the step slow?"
     # can separate context-build cost from model-call cost (issue #78).
@@ -1272,7 +1273,7 @@ async def _run_session_step_body(
             omission=windowed.omission,
             capability_model=capability_model,
             persist_image_rewrites=True,
-            persist_reminders=not isinstance(disposition, HarvestedInference),
+            persist_reminders=persist_reminders,
         )
     except Exception:
         await sessions_service.append_event(
@@ -1310,7 +1311,8 @@ async def _run_session_step_body(
             "event_count_read": len(events),
             "message_count": len(messages),
             "tools_count": len(tools),
-            "reminders_written": list(step_ctx.reminders_written),
+            # A harvest step persists no reminder rows; don't report its plan as written.
+            "reminders_written": list(step_ctx.reminders_written) if persist_reminders else [],
             "reminders_skipped": step_ctx.reminders_skipped,
         },
         account_id=account_id,
