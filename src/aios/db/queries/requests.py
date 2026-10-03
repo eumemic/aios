@@ -12,6 +12,7 @@ from typing import Any
 
 import asyncpg
 
+from aios.db.queries.events import _row_to_event
 from aios.models.events import Event
 
 
@@ -48,8 +49,6 @@ async def get_events_by_seq(
     conn: asyncpg.Connection[Any], session_id: str, *, account_id: str, seqs: list[int]
 ) -> list[Event]:
     """The session's events at ``seqs``, in seq order."""
-    from aios.db.queries.events import _row_to_event
-
     rows = await conn.fetch(
         "SELECT * FROM events WHERE session_id = $1 AND account_id = $2 AND seq = ANY($3) "
         "ORDER BY seq",

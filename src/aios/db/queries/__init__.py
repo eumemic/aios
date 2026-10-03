@@ -633,6 +633,11 @@ from .prune import (  # noqa: E402
     prune_unpinned_archived_workflows,
     reconcile_terminal_archival_batch,
 )
+from .requests import (  # noqa: E402
+    get_blobs,
+    get_events_by_seq,
+    insert_blobs,
+)
 from .sandboxes import (  # noqa: E402
     acquire_workspace_advisory_xact_lock,
     acquire_workspace_hierarchy_advisory_xact_locks,
@@ -935,6 +940,7 @@ __all__ = [
     "get_active_credential_by_target_url",
     "get_agent",
     "get_agent_version",
+    "get_blobs",
     "get_browser_call",
     "get_browser_call_unscoped",
     "get_browser_grant",
@@ -950,6 +956,7 @@ __all__ = [
     "get_environment_config_for_id",
     "get_environment_config_for_session",
     "get_event",
+    "get_events_by_seq",
     "get_file",
     "get_latest_skill_version",
     "get_management_call",
@@ -999,6 +1006,7 @@ __all__ = [
     "insert_account_key",
     "insert_agent",
     "insert_binding",
+    "insert_blobs",
     "insert_browser_call",
     "insert_browser_grant",
     "insert_chat_session",

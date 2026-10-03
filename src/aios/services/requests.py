@@ -11,7 +11,10 @@ The result is a kind:
 
 * :class:`Rebuilt` with ``fidelity``:
   * ``"exact"``: the rebuild hashes to the captured ``payload_sha``. It is the
-    request that was sent.
+    request the session composed, which is not byte for byte the provider wire
+    body: the send path then adds cache breakpoints and provider kwargs
+    (``completion.call_litellm``), may strip media to fit a body limit, and a
+    workflow-as-model run receives it as its input instead.
   * ``"inexact"``: same target model, different bytes. The renderer has changed
     since (compare ``render_version``), or an image the request inlined has
     changed on disk.
@@ -27,6 +30,7 @@ import asyncio
 import json
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Literal
 
 import asyncpg
@@ -73,12 +77,14 @@ async def rebuild_request(
     session has no such span, or the span records no request (it predates
     capture, or it is an ``auto_review`` checker call).
     """
-    from aios.services import sessions as sessions_service
-
     async with pool.acquire() as conn:
         span = await queries.get_event(conn, session_id, request_event_id, account_id=account_id)
         record = span.data.get("request") if span.kind == "span" else None
-        if span.data.get("event") not in REQUEST_SPAN_EVENTS or not isinstance(record, dict):
+        if (
+            span.data.get("event") not in REQUEST_SPAN_EVENTS
+            or not isinstance(record, dict)
+            or "payload_sha" not in record
+        ):
             raise NotFoundError(
                 f"event {request_event_id} is not a captured request",
                 detail={"id": request_event_id},
@@ -88,20 +94,25 @@ async def rebuild_request(
         if any(sha not in blobs for sha in shas):
             return Missing(what="blob", record=record)
         slate = record["slate"]
-        through_seq = slate["through_seq"]
-        events = [
-            e
-            for e in await queries.read_windowed_context_events(
-                conn, session_id, account_id=account_id, after_seq=slate["after_seq"]
+        # A ``None`` last seq is an empty slate: the step read no events.
+        events = (
+            []
+            if slate["through_seq"] is None
+            else await queries.read_windowed_context_events(
+                conn,
+                session_id,
+                account_id=account_id,
+                after_seq=slate["after_seq"],
+                through_seq=slate["through_seq"],
             )
-            if through_seq is not None and e.seq <= through_seq
-        ]
+        )
         reminder_rows = await request_queries.get_events_by_seq(
             conn, session_id, account_id=account_id, seqs=list(record["reminder_seqs"])
         )
-    workspace_path = await sessions_service.load_session_workspace_path(
-        pool, session_id, account_id=account_id
-    )
+    # The bind source the send resolved ``/workspace`` attachments against. A rebuild
+    # outside the worker (no worker filesystem) can't read them: it reports those
+    # attachments Missing, or inexact.
+    workspace_path = record.get("workspace_path")
 
     model = target_model or record["capability_model"]
     omission = record["omission"]
@@ -111,7 +122,7 @@ async def rebuild_request(
         system_prompt=_decode(blobs[record["system_sha"]]),
         model=model,
         session_id=session_id,
-        workspace_path=workspace_path,
+        workspace_path=None if workspace_path is None else Path(workspace_path),
         in_flight_tool_call_ids=frozenset(record["inflight_tool_call_ids"]),
         tz_name=record["tz"],
         omission=(

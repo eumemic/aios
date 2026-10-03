@@ -1434,7 +1434,7 @@ class ContextResult:
     needs_trailing_notice: bool
     # Sandbox paths of attachments whose files couldn't be read; they rendered as
     # text markers. Request rebuild (#2471) reports them as missing data.
-    unavailable_attachments: tuple[str, ...] = ()
+    unavailable_attachments: tuple[str, ...]
 
 
 def _quarantine_placeholder(seq: int) -> dict[str, Any]:

@@ -306,6 +306,7 @@ class TestStepStartEndSpans:
                         reminders_skipped=0,
                         tz_name="UTC",
                         reminder_seqs=(),
+                        workspace_path=None,
                     )
                 ),
             ),
@@ -425,6 +426,7 @@ class TestStepStartEndSpans:
                         reminders_skipped=0,
                         tz_name="UTC",
                         reminder_seqs=(),
+                        workspace_path=None,
                     )
                 ),
             ),
@@ -551,6 +553,7 @@ class TestStepStartEndSpans:
                         reminders_skipped=0,
                         tz_name="UTC",
                         reminder_seqs=(),
+                        workspace_path=None,
                     )
                 ),
             ),
@@ -663,6 +666,7 @@ class TestStepStartEndSpans:
                         reminders_skipped=0,
                         tz_name="UTC",
                         reminder_seqs=(),
+                        workspace_path=None,
                     )
                 ),
             ),
@@ -777,6 +781,7 @@ class TestStepStartEndSpans:
                         reminders_skipped=0,
                         tz_name="UTC",
                         reminder_seqs=(),
+                        workspace_path=None,
                     )
                 ),
             ),
@@ -873,6 +878,7 @@ async def _harness_with_guard(
                     reminders_skipped=0,
                     tz_name="UTC",
                     reminder_seqs=(),
+                    workspace_path=None,
                 )
             ),
         ),

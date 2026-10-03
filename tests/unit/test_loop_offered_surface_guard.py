@@ -98,6 +98,7 @@ def _drive(
         reminders_skipped=0,
         tz_name="UTC",
         reminder_seqs=(),
+        workspace_path=None,
     )
     assistant_msg = {
         "role": "assistant",
