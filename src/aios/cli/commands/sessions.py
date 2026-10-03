@@ -6,7 +6,6 @@ import json
 import sys
 from pathlib import Path
 from typing import Annotated, Any
-from urllib.parse import quote
 
 import typer
 
@@ -85,8 +84,12 @@ def request(
     ] = None,
 ) -> None:
     def _run() -> None:
-        query = f"?model={quote(model, safe='')}" if model is not None else ""
-        raw_single(ctx, "GET", f"/v1/sessions/{session_id}/requests/{request_id}{query}")
+        raw_single(
+            ctx,
+            "GET",
+            f"/v1/sessions/{session_id}/requests/{request_id}",
+            params={"model": model},
+        )
 
     run_or_die(_run)
 
