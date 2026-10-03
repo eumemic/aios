@@ -40,23 +40,17 @@ def is_workflow_binding(model: str | None) -> bool:
     return model is not None and is_workflow_model(model)
 
 
-def enforce_workflow_binding_privilege(model: str | None, *, is_operator: bool) -> None:
-    """Raise :class:`ForbiddenError` if a non-operator principal binds/selects a
-    ``workflow:`` model.
+def enforce_workflow_binding_privilege(model: str | None) -> None:
+    """Raise :class:`ForbiddenError` if a self-authoring principal binds a ``workflow:``
+    model.
 
-    The single privilege check shared by every spawn path. ``model`` is the model
-    string a path is about to bind or select (the ``create_agent``/``update_agent``
-    ``model`` field, the per-call ``agent(model=…)`` override, or a generic child's
-    resolved model). ``is_operator`` is whether the **owning principal** of the
-    acting run/session is the operator (an operator/HTTP-launched edge) rather than
-    a self-authoring agent.
+    The authoring path's check: ``create_agent``/``update_agent`` call it only for a
+    creating or editing session, and the operator/HTTP path never calls it. The spawn
+    edge (``workflows.step``) reads the run's ``principal`` and journals a catchable
+    rejection instead of raising.
 
     A no-op for a raw provider model (the overwhelmingly common case) or ``None``.
-    For a ``workflow:`` binding it permits the operator and fails closed for a
-    self-authoring principal — the binding privilege is operator-only to start.
     """
-    if is_operator:
-        return
     if is_workflow_binding(model):
         raise ForbiddenError(
             "binding or selecting a workflow: model is operator-only; a self-authoring "

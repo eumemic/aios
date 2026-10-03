@@ -1,8 +1,8 @@
 """Unit tests for the ``workflow:`` model-binding privilege guard (#1636).
 
-The pure authorization helper shared by every spawn path: it decides whether a
-principal may bind/select a ``workflow:`` model, keyed on operator vs self-authoring.
-A raw provider model is always admissible; a ``workflow:`` binding is operator-only.
+The pure authorization helper the authoring path (``create_agent``/``update_agent``
+by a session) calls: a self-authoring principal may bind a raw provider model but
+not a ``workflow:`` one. The operator path never calls it.
 """
 
 from __future__ import annotations
@@ -34,22 +34,17 @@ class TestIsWorkflowBinding:
 
 
 class TestEnforceWorkflowBindingPrivilege:
-    def test_operator_may_bind_workflow_model(self) -> None:
-        # An operator principal binds a workflow: model freely — no raise.
-        enforce_workflow_binding_privilege("workflow:wf_1", is_operator=True)
-
     def test_self_authoring_cannot_bind_workflow_model(self) -> None:
         with pytest.raises(ForbiddenError) as exc:
-            enforce_workflow_binding_privilege("workflow:wf_1", is_operator=False)
+            enforce_workflow_binding_privilege("workflow:wf_1")
         # The denied binding is surfaced in the structured detail.
         assert exc.value.detail == {"model": "workflow:wf_1"}
 
     def test_self_authoring_raw_provider_model_is_allowed(self) -> None:
         # The common case: a self-authoring principal binding an ordinary provider
         # model is untouched — the guard is a no-op for non-workflow bindings.
-        enforce_workflow_binding_privilege("test/dummy", is_operator=False)
+        enforce_workflow_binding_privilege("test/dummy")
 
-    def test_none_model_is_noop_for_both_principals(self) -> None:
+    def test_none_model_is_noop(self) -> None:
         # ``None`` (e.g. update_agent preserving the field) introduces no binding.
-        enforce_workflow_binding_privilege(None, is_operator=False)
-        enforce_workflow_binding_privilege(None, is_operator=True)
+        enforce_workflow_binding_privilege(None)

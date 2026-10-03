@@ -1274,17 +1274,16 @@ async def _open_agent_capability(
                 f"trusted_inference_api_bases allowlist to permit this spawn",
             )
     # #1636: the ``workflow:`` model-binding privilege at the spawn-edge dispatch seam,
-    # keyed on the RUN's owning principal — operator iff the run is operator/HTTP-launched
-    # (no launcher session). Covers BOTH unnamed paths: the per-call ``agent(model=…)``
-    # override and the generic agentless child's resolved model (``stamped_model``); a
-    # NAMED child additionally inherits the agent's stored ``model`` when no override is
-    # given, so that string is checked too. A self-authoring run may neither select nor
-    # bind a ``workflow:`` model — a catchable rejection, before any child row exists.
-    # Orthogonal to the #823 api_base clamp above (that bounds *where* inference routes;
-    # this bounds *whether* it may route through a workflow at all).
-    is_operator_run = run.launcher_session_id is None
+    # keyed on the RUN's immutable principal (#2467). Covers BOTH unnamed paths: the
+    # per-call ``agent(model=…)`` override and the generic agentless child's resolved
+    # model (``stamped_model``); a NAMED child additionally inherits the agent's stored
+    # ``model`` when no override is given, so that string is checked too. A
+    # self-authoring run may neither select nor bind a ``workflow:`` model — a catchable
+    # rejection, before any child row exists. Orthogonal to the #823 api_base clamp above
+    # (that bounds *where* inference routes; this bounds *whether* it may route through a
+    # workflow at all).
     selected_model = stamped_model if agent_id is None else (model or agent.model)
-    if not is_operator_run and is_workflow_binding(selected_model):
+    if run.principal != "operator" and is_workflow_binding(selected_model):
         return await _reject(
             "workflow_model_forbidden",
             f"selecting a workflow: model ({selected_model!r}) is operator-only; this "
@@ -1457,17 +1456,11 @@ async def _open_invoke_workflow_capability(
             vault_ids=run_vaults,
             run_id=sub_run_id,
             parent_run_id=run.id,
-            # #1653: propagate the ORIGINATING principal down the ``parent_run_id``
-            # lineage. Without this the sub-run's ``launcher_session_id`` defaults to
-            # NULL, so ``is_operator_run`` (this module) and the launcher surface clamp
-            # (service.py) both mis-read it as an edgeless operator/HTTP run — letting a
-            # self-authoring agent (1) bind the operator-only ``workflow:`` model for a
-            # grandchild and (2) run the sub-run un-attenuated on the tool axis. The
-            # parent run already carries the originating principal: a NON-NULL session
-            # for an agent- or trigger-launched chain (the sub-run inherits it and is
-            # correctly non-operator), or NULL for a genuine operator/HTTP root (the
-            # sub-run stays operator, like the parent). Inheriting it verbatim is the
-            # whole fix — it reflects the originator at every depth of a nested chain.
+            # #1653: propagate the originating launcher down the ``parent_run_id``
+            # lineage, so ``create_run`` clamps the sub-run to that session's surface
+            # (#794) and the insert trigger stamps the sub-run's principal from it. NULL
+            # for an operator chain, and also once the launching session is deleted —
+            # ``create_run`` refuses that case (#2467), since nothing is left to clamp to.
             launcher_session_id=run.launcher_session_id,
             request_id=cap.call_key,  # the invoke_workflow() call IS the request
             caller={"kind": "run", "id": run.id, "awaited": True},

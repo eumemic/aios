@@ -8,6 +8,7 @@ from attrs import define as _attrs_define
 from attrs import field as _attrs_field
 from dateutil.parser import isoparse
 
+from ..models.wf_run_principal import WfRunPrincipal
 from ..models.wf_run_status import WfRunStatus
 from ..models.wf_run_workspace import WfRunWorkspace
 from ..types import UNSET, Unset
@@ -50,6 +51,9 @@ class WfRun:
             id (str):
             account_id (str):
             environment_id (str):
+            principal (WfRunPrincipal): Who the run acts for: `operator` (launched through the operator API, or a sub-run of
+                an operator run) or `session` (launched by an agent session, directly or through its runs). Fixed at creation;
+                deleting the launching session doesn't change it.
             script (str):
             script_sha (str):
             host_semantics_epoch (int):
@@ -88,6 +92,7 @@ class WfRun:
     id: str
     account_id: str
     environment_id: str
+    principal: WfRunPrincipal
     script: str
     script_sha: str
     host_semantics_epoch: int
@@ -136,6 +141,8 @@ class WfRun:
         account_id = self.account_id
 
         environment_id = self.environment_id
+
+        principal = self.principal.value
 
         script = self.script
 
@@ -304,6 +311,7 @@ class WfRun:
                 "id": id,
                 "account_id": account_id,
                 "environment_id": environment_id,
+                "principal": principal,
                 "script": script,
                 "script_sha": script_sha,
                 "host_semantics_epoch": host_semantics_epoch,
@@ -386,6 +394,8 @@ class WfRun:
         account_id = d.pop("account_id")
 
         environment_id = d.pop("environment_id")
+
+        principal = WfRunPrincipal(d.pop("principal"))
 
         script = d.pop("script")
 
@@ -661,6 +671,7 @@ class WfRun:
             id=id,
             account_id=account_id,
             environment_id=environment_id,
+            principal=principal,
             script=script,
             script_sha=script_sha,
             host_semantics_epoch=host_semantics_epoch,

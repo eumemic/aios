@@ -308,6 +308,7 @@ def test_wf_run_budget_usd_round_trip() -> None:
         script="async def main(input): return None",
         script_sha="sha",
         host_semantics_epoch=1,
+        principal="operator",
         status="pending",
         last_event_seq=0,
         created_at=__import__("datetime").datetime.now(__import__("datetime").UTC),

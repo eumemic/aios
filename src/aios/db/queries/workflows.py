@@ -44,6 +44,7 @@ from aios.models.agents import (
 from aios.models.sessions import Err, Ok, Outcome
 from aios.models.workflows import (
     TERMINAL_RUN_STATUSES,
+    RunPrincipal,
     WfRun,
     WfRunEvent,
     WfRunEventType,
@@ -114,6 +115,7 @@ def _row_to_wf_run(row: asyncpg.Record) -> WfRun:
         workspace_path=row.get("workspace_path"),
         parent_run_id=row["parent_run_id"],
         launcher_session_id=row["launcher_session_id"],
+        principal=row["principal"],
         depth=row["depth"],
         request_id=row.get("request_id"),
         caller=row.get("caller"),
@@ -550,23 +552,33 @@ async def get_wf_run(conn: asyncpg.Connection[Any], run_id: str, *, account_id: 
     )
 
 
-async def get_run_depth(conn: asyncpg.Connection[Any], run_id: str, *, account_id: str) -> int:
-    """Read a run's DOWN-counting trusted invoke-depth (#1124), account-scoped.
+class RunLineage(NamedTuple):
+    """What a sub-launch reads off its parent run: the DOWN-counting trusted
+    invoke-depth (#1124) and the principal (#2467)."""
 
-    The remaining trusted-edge budget on ``run_id`` — what a sub-launch off this run
-    may carry as ``depth - 1``. ACCOUNT-SCOPED: a foreign or missing parent raises
-    ``NotFoundError`` (the same-account trust the deleted ``run_ancestor_depth`` CTE
-    enforced per hop, now a single point read). The depth is immutable once written,
-    so the read is race-free without locking.
+    depth: int
+    principal: RunPrincipal
+
+
+async def get_run_lineage(
+    conn: asyncpg.Connection[Any], run_id: str, *, account_id: str
+) -> RunLineage:
+    """Read a run's :class:`RunLineage`, account-scoped.
+
+    ``depth`` is the remaining trusted-edge budget on ``run_id`` — what a sub-launch
+    off this run may carry as ``depth - 1``. ACCOUNT-SCOPED: a foreign or missing parent
+    raises ``NotFoundError`` (the same-account trust the deleted ``run_ancestor_depth``
+    CTE enforced per hop, now a single point read). Both columns are immutable once
+    written, so the read is race-free without locking.
     """
-    depth: int | None = await conn.fetchval(
-        "SELECT depth FROM wf_runs WHERE id = $1 AND account_id = $2",
+    row = await conn.fetchrow(
+        "SELECT depth, principal FROM wf_runs WHERE id = $1 AND account_id = $2",
         run_id,
         account_id,
     )
-    if depth is None:
+    if row is None:
         raise NotFoundError(f"workflow run {run_id} not found", detail={"id": run_id})
-    return depth
+    return RunLineage(depth=row["depth"], principal=row["principal"])
 
 
 async def list_wf_runs(
@@ -699,7 +711,9 @@ async def insert_wf_run(
 ) -> WfRun:
     """Insert a fresh ``pending`` run that snapshots ``script`` (+ ``script_sha``) and the
     declared tool surface (``tools``/``mcp_servers``/``http_servers``) — pinned at launch.
-    ``launcher_session_id`` records the agent session that launched it (NULL = operator).
+    ``launcher_session_id`` records the agent session that launched it (NULL for an
+    operator launch). The row's ``principal`` is stamped by the ``wf_runs`` insert trigger
+    (0184) from the launcher and the parent run, so no caller passes it.
 
     ``workflow_id`` is the source definition the snapshot came from, or ``None`` for an
     INLINE run (T5, #1466) — a one-shot run launched from an inline script with NO

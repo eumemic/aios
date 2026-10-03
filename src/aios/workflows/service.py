@@ -470,19 +470,26 @@ async def create_run(
             # raises NotFoundError. If a future path ever lets ``parent_run_id``
             # be caller-supplied, this same-account read is the gate (like
             # ``environment_id`` above).
-            parent_depth = await wf_queries.get_run_depth(
-                conn, parent_run_id, account_id=account_id
-            )
+            parent = await wf_queries.get_run_lineage(conn, parent_run_id, account_id=account_id)
+            # #2467: a run whose launching session was deleted still acts for that
+            # session, but the launcher clamp above has no surface left to read.
+            # Launching unclamped would hand the sub-workflow its whole declared surface.
+            if parent.principal != "operator" and launcher_session_id is None:
+                raise ForbiddenError(
+                    "the session that launched this run no longer exists, so the run "
+                    "can't launch sub-runs",
+                    detail={"parent_run_id": parent_run_id},
+                )
             # Refuse-before-write: a parent with one (or zero) hop left cannot open
             # another trusted edge — the child would be born at depth 0 with no way
             # to bottom the chain out at the budget. The decrement IS the cycle
-            # bound; this is the only refusal, no wait-for-graph.
-            if parent_depth <= 1:
+            # bound; this is the only depth refusal, no wait-for-graph.
+            if parent.depth <= 1:
                 raise WorkflowRunDepthExceededError(
                     f"trusted invoke-edge would exceed depth budget {INVOKE_MAX_DEPTH}",
                     detail={"max_depth": INVOKE_MAX_DEPTH, "parent_run_id": parent_run_id},
                 )
-            child_depth = parent_depth - 1
+            child_depth = parent.depth - 1
         if launcher_session_id is not None:
             held_ids = await get_session_vault_ids(conn, launcher_session_id, account_id=account_id)
             held = set(held_ids)
