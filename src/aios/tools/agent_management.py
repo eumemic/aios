@@ -50,7 +50,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from aios.harness import runtime
-from aios.models.agents import AgentCreate, AgentUpdate
+from aios.models.agents import Agent, AgentCreate, AgentUpdate
 from aios.services import agents as agents_service
 from aios.services import sessions as sessions_service
 from aios.tools.input import tool_input
@@ -70,6 +70,26 @@ _AGENT_LIST_EXCLUDE = {
     "metadata",
     "litellm_extra",
 }
+
+
+def _agent_echo(agent: Agent) -> dict[str, Any]:
+    """The full agent as a tool returns it, with an inline ``litellm_extra.api_key``
+    reported only as ``api_key_set``.
+
+    An inline credential is the operator's, never the model's (the model_providers
+    convention). The model can't write ``litellm_extra``, so the redacted echo can't
+    round-trip into an edit. Every handler that returns a full agent goes through
+    here: ``update_agent`` keeps the prior ``litellm_extra``, so it would otherwise
+    echo the key as well.
+    """
+    echo = agent.model_dump(mode="json")
+    extra = echo["litellm_extra"]
+    if "api_key" in extra:
+        echo["litellm_extra"] = {
+            **{k: v for k, v in extra.items() if k != "api_key"},
+            "api_key_set": True,
+        }
+    return echo
 
 
 # ─── argument models (parameters_schema + parse, in one place) ───────────────
@@ -198,7 +218,7 @@ async def create_agent_handler(session_id: str, arguments: dict[str, Any]) -> di
         output_style=body.output_style,
         creator_session_id=session_id,
     )
-    return agent.model_dump(mode="json")
+    return _agent_echo(agent)
 
 
 async def update_agent_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -227,7 +247,7 @@ async def update_agent_handler(session_id: str, arguments: dict[str, Any]) -> di
         output_style=args.output_style,
         editor_session_id=session_id,
     )
-    return agent.model_dump(mode="json")
+    return _agent_echo(agent)
 
 
 async def archive_agent_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -243,17 +263,7 @@ async def get_agent_handler(session_id: str, arguments: dict[str, Any]) -> dict[
     account_id = await sessions_service.load_session_account_id(pool, session_id)
     args = tool_input(_GetAgentArgs, arguments)
     agent = await agents_service.get_agent(pool, args.agent_id, account_id=account_id)
-    echo = agent.model_dump(mode="json")  # FULL — incl. surface + version (the re-read loop)
-    # An inline credential is the operator's, never the model's: echo only that one
-    # is set (the model_providers convention). The model can't write litellm_extra,
-    # so the redacted echo can't round-trip into an edit.
-    extra = echo.get("litellm_extra")
-    if isinstance(extra, dict) and "api_key" in extra:
-        echo["litellm_extra"] = {
-            **{k: v for k, v in extra.items() if k != "api_key"},
-            "api_key_set": True,
-        }
-    return echo
+    return _agent_echo(agent)  # FULL — incl. surface + version (the re-read loop)
 
 
 async def list_agents_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
