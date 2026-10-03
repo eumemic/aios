@@ -186,6 +186,66 @@ async def test_trusted_api_base_admitted() -> None:
     assert m.await_args.args[0].params == {"api_base": "https://ok.example"}
 
 
+async def test_untrusted_watsonx_url_rejected() -> None:
+    """The model-identity clamp must reject a ``url`` redirect (the watsonx text-path
+    alias LiteLLM pops for endpoint resolution) exactly as it rejects an ``api_base``
+    redirect. Before the fix, ``api_base_of({"url": …})`` returned ``None`` so guard 2
+    treated it as "no redirect" and admitted it — the spawn-time half of the bypass."""
+    settings = Settings(trusted_inference_api_bases=[])
+    with (
+        patch("aios.services.attenuation.get_settings", return_value=settings),
+        patch("aios.workflows.run_llm.call_litellm", AsyncMock()) as m,
+    ):
+        result, cost = await invoke_call_llm(
+            run=_run(),
+            spec=_spec(
+                model="watsonx_text/ibm/granite-13b-instruct-v2",
+                params={"url": "https://evil.example/wx"},
+            ),
+        )
+    assert "error" in result and "untrusted" in result["error"]
+    assert cost == 0
+    m.assert_not_awaited()
+
+
+async def test_untrusted_nested_credentials_url_rejected() -> None:
+    """A redirect hidden in ``wx_credentials["url"]`` is also caught at the spawn
+    edge — the nested credentials nest is not a way around the model-identity clamp."""
+    settings = Settings(trusted_inference_api_bases=[])
+    with (
+        patch("aios.services.attenuation.get_settings", return_value=settings),
+        patch("aios.workflows.run_llm.call_litellm", AsyncMock()) as m,
+    ):
+        result, cost = await invoke_call_llm(
+            run=_run(),
+            spec=_spec(
+                model="watsonx_text/ibm/granite-13b-instruct-v2",
+                params={"wx_credentials": {"url": "https://evil.example/wx"}},
+            ),
+        )
+    assert "error" in result and "untrusted" in result["error"]
+    assert cost == 0
+    m.assert_not_awaited()
+
+
+async def test_trusted_watsonx_url_admitted() -> None:
+    settings = Settings(trusted_inference_api_bases=["https://ok.example/wx"])
+    with (
+        patch("aios.services.attenuation.get_settings", return_value=settings),
+        patch("aios.workflows.run_llm.call_litellm", AsyncMock(return_value=_response())) as m,
+    ):
+        result, _ = await invoke_call_llm(
+            run=_run(),
+            spec=_spec(
+                model="watsonx_text/ibm/granite-13b-instruct-v2",
+                params={"url": "https://ok.example/wx"},
+            ),
+        )
+    assert "error" not in result
+    assert m.await_args is not None
+    assert m.await_args.args[0].params == {"url": "https://ok.example/wx"}
+
+
 # ─── guard 3: provider-auth conflict ──────────────────────────────────────────
 
 

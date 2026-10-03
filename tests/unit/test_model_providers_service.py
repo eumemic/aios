@@ -213,6 +213,103 @@ class TestProviderAuthConflict:
             is True
         )
 
+    def test_watsonx_url_redirect_conflicts_for_ancestor_row(self) -> None:
+        """The watsonx text-completion ``url`` redirect is honored by LiteLLM's
+        ``_complete_watsonx_text`` exactly as ``api_base`` is on the chat path, so
+        the guard must treat it as a redirect. Before the fix, ``api_base_of`` read
+        only ``api_base``/``base_url`` and returned ``None`` for ``{"url": …}``,
+        so an ancestor's inherited key rode onto a caller-chosen endpoint."""
+        resolved = ProviderAuth(api_key="k", api_base=None, owner_account_id="acc_parent")
+        assert (
+            provider_auth_conflict(
+                litellm_extra={"url": "https://evil.example"},
+                resolved=resolved,
+                account_id="acc_child",
+                account_is_root=False,
+            )
+            is True
+        )
+
+    def test_watsonx_url_redirect_admitted_for_own_row(self) -> None:
+        """Mirror of ``test_self_owned_row_admits_redirect`` on the ``url`` axis: an
+        account's own key redirected by its own agent is not escalation."""
+        resolved = ProviderAuth(api_key="k", api_base=None, owner_account_id="acc_x")
+        assert (
+            provider_auth_conflict(
+                litellm_extra={"url": "https://x.example"},
+                resolved=resolved,
+                account_id="acc_x",
+                account_is_root=False,
+            )
+            is False
+        )
+
+    def test_watsonx_url_redirect_conflicts_for_no_row_non_root(self) -> None:
+        """A non-root account with no own row redirecting onto the worker's env key
+        (root-owned) via a ``url`` is the same exfil shape as via ``api_base``."""
+        assert (
+            provider_auth_conflict(
+                litellm_extra={"url": "https://evil.example"},
+                resolved=None,
+                account_id="acc_child",
+                account_is_root=False,
+            )
+            is True
+        )
+
+    def test_watsonx_url_redirect_admitted_for_no_row_root(self) -> None:
+        assert (
+            provider_auth_conflict(
+                litellm_extra={"url": "https://evil.example"},
+                resolved=None,
+                account_id="acc_root",
+                account_is_root=True,
+            )
+            is False
+        )
+
+    def test_wx_credentials_nested_url_conflicts_for_ancestor_row(self) -> None:
+        """A redirect hidden one level deep in ``wx_credentials["url"]`` (which
+        LiteLLM pops as the endpoint) must trip the guard just like a top-level
+        ``url`` — the nested credentials nest is not a way around the detector."""
+        resolved = ProviderAuth(api_key="k", api_base=None, owner_account_id="acc_parent")
+        assert (
+            provider_auth_conflict(
+                litellm_extra={"wx_credentials": {"url": "https://evil.example"}},
+                resolved=resolved,
+                account_id="acc_child",
+                account_is_root=False,
+            )
+            is True
+        )
+
+    def test_watsonx_credentials_nested_url_conflicts_for_ancestor_row(self) -> None:
+        resolved = ProviderAuth(api_key="k", api_base=None, owner_account_id="acc_parent")
+        assert (
+            provider_auth_conflict(
+                litellm_extra={"watsonx_credentials": {"url": "https://evil.example"}},
+                resolved=resolved,
+                account_id="acc_child",
+                account_is_root=False,
+            )
+            is True
+        )
+
+    def test_credentials_without_url_is_no_redirect(self) -> None:
+        """A credentials blob carrying only an ``apikey``/``token`` (no nested ``url``)
+        does not redirect the endpoint, so it must not trip the redirect guard —
+        the inline-key exemption is a separate (already-covered) concern."""
+        resolved = ProviderAuth(api_key="k", api_base=None, owner_account_id="acc_parent")
+        assert (
+            provider_auth_conflict(
+                litellm_extra={"wx_credentials": {"apikey": "sk-x"}},
+                resolved=resolved,
+                account_id="acc_child",
+                account_is_root=False,
+            )
+            is False
+        )
+
 
 # ─── wire models: empty api_key rejected ──────────────────────────────────────
 
@@ -543,6 +640,54 @@ async def test_check_conflict_looks_up_root_only_on_no_row_arm() -> None:
     assert result == service.PROVIDER_AUTH_CONFLICT_MESSAGE
 
 
+async def test_check_conflict_looks_up_root_for_watsonx_url_redirect() -> None:
+    """A ``url`` redirect (no resolved row) must reach the root lookup just like an
+    ``api_base`` redirect — before the fix, ``api_base_of({"url": …})`` was ``None``
+    so the root-lookup arm was skipped and the guard returned ``None`` (clean pass),
+    letting a non-root account ride the env key onto a caller-chosen endpoint."""
+    conn = MagicMock()
+    pool = fake_pool_yielding_conn(conn)
+    get_account = AsyncMock(return_value=_account("acc_child", parent_account_id="acc_root"))
+    with patch("aios.db.queries.get_account", get_account):
+        result = await service._check_provider_auth_conflict(
+            pool,
+            account_id="acc_child",
+            litellm_extra={"url": "https://evil.example"},
+            resolved=None,
+        )
+    get_account.assert_awaited_once()
+    assert result == service.PROVIDER_AUTH_CONFLICT_MESSAGE
+
+
+async def test_check_conflict_looks_up_root_for_nested_credentials_url() -> None:
+    conn = MagicMock()
+    pool = fake_pool_yielding_conn(conn)
+    get_account = AsyncMock(return_value=_account("acc_child", parent_account_id="acc_root"))
+    with patch("aios.db.queries.get_account", get_account):
+        result = await service._check_provider_auth_conflict(
+            pool,
+            account_id="acc_child",
+            litellm_extra={"wx_credentials": {"url": "https://evil.example"}},
+            resolved=None,
+        )
+    get_account.assert_awaited_once()
+    assert result == service.PROVIDER_AUTH_CONFLICT_MESSAGE
+
+
+async def test_check_conflict_skips_db_for_credentials_without_url() -> None:
+    """A credentials blob without a nested ``url`` is not a redirect; the root lookup
+    must not fire (gating on the whole dict would waste a DB trip on every such call)."""
+    pool = MagicMock()
+    pool.acquire = MagicMock(side_effect=AssertionError("must not touch the pool"))
+    result = await service._check_provider_auth_conflict(
+        pool,
+        account_id="acc_x",
+        litellm_extra={"wx_credentials": {"apikey": "sk-x"}},
+        resolved=None,
+    )
+    assert result is None
+
+
 async def test_check_conflict_message_is_static_no_account_ids_or_depth() -> None:
     """Fix #3 (red team, severity 45): the conflict message must not leak
     ancestor account ids or tree depth — it's session-visible."""
@@ -613,4 +758,36 @@ async def test_fused_entry_point_surfaces_conflict_with_resolved_auth(
 
     assert conflict == service.PROVIDER_AUTH_CONFLICT_MESSAGE
     assert auth is not None  # still resolved — the CALLER decides not to use it on conflict
+    assert auth.owner_account_id == "acc_parent"
+
+
+async def test_fused_entry_point_surfaces_conflict_for_watsonx_url_redirect(
+    crypto_box: CryptoBox,
+) -> None:
+    """End-to-end mirror of the reported exploit: a leaf account inheriting an
+    ancestor's ``watsonx_text`` row (api_base=None) issues a call with
+    ``params={"url": "https://attacker"}``. The fused resolve+check entry point must
+    surface a conflict exactly as it does for an ``api_base`` redirect — before the
+    fix, ``api_base_of({"url": …})`` returned ``None`` so the check passed clean and
+    the ancestor's key rode onto the attacker's endpoint."""
+    owner_subkey = crypto_box.derive_account_subkey("acc_parent")
+    blob = owner_subkey.encrypt("sk-ancestor")
+    resolved = ResolvedModelProvider(owner_account_id="acc_parent", api_base=None, blob=blob)
+    conn = MagicMock()
+    pool = fake_pool_yielding_conn(conn)
+
+    with patch(
+        "aios.services.model_providers.queries.resolve_model_provider",
+        AsyncMock(return_value=resolved),
+    ):
+        auth, conflict = await service.resolve_provider_auth_or_conflict(
+            pool,
+            crypto_box,
+            account_id="acc_leaf",
+            model="watsonx_text/ibm/granite-13b-instruct-v2",
+            litellm_extra={"url": "https://attacker.example/wx"},
+        )
+
+    assert conflict == service.PROVIDER_AUTH_CONFLICT_MESSAGE
+    assert auth is not None
     assert auth.owner_account_id == "acc_parent"
