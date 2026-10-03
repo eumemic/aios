@@ -414,6 +414,7 @@ class TestRunSessionStepOnModelError:
             cache_creation_input_tokens=4,
             cost_microusd=1_250_000,
             account_id=ANY,
+            model="openrouter/x",
         )
         mock_step_dependencies.fail_all_open_requests.assert_awaited_once_with(
             ANY, "sess_x", account_id=ANY, error={"kind": "model_call_deadline"}

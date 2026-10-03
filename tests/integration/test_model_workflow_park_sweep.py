@@ -279,7 +279,7 @@ async def _resolve_inner_run_and_harvest(
         # Charge the run's ``call_llm`` meter once — the spend a real inference leaf
         # inside the run would book at its own site (the harvest re-charges nothing).
         await wf_queries.add_run_call_llm_cost_microusd(
-            conn, run_id, _INNER_COST_MICROUSD, account_id=_ACCOUNT
+            conn, run_id, _INNER_COST_MICROUSD, account_id=_ACCOUNT, model="test/model"
         )
     await write_harvest_event(
         pool,

@@ -392,6 +392,7 @@ _DB_HELPER_SYMBOLS = frozenset(
         "wf_queries.get_wf_run",
         "wf_queries.get_visible_run",
         "wf_queries.run_exists",
+        "wf_queries.sub_run_facts",
         "request_queries.get_blobs",
         "request_queries.get_events_by_seq",
         "request_queries.insert_blobs",

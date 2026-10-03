@@ -647,3 +647,61 @@ async def test_a_bad_or_unknown_version_is_a_catchable_rejection(
         events = await _invoke_once(pool, target, version)
         kinds = [e.payload["error"]["kind"] for e in events if e.type == "call_result"]
         assert kinds == [kind], (target, version, kinds)
+
+
+# ── #2472 D3: sub_runs() reads facts about the run's creation subtree ─────────
+
+_READS_FACTS = (
+    "async def main(input):\n"
+    "    await invoke_workflow(input['wf'], {}, version=1, label='arm')\n"
+    "    return await sub_runs()\n"
+)
+
+
+async def test_sub_runs_reports_each_sub_run_with_its_version_label_and_usage(
+    wf_runtime: asyncpg.Pool[Any],
+) -> None:
+    pool = wf_runtime
+    wf_id = await _two_versions(pool)
+    parent_wf = await _insert_workflow(pool, "reads-facts", _READS_FACTS)
+    parent = await _make_run(pool, parent_wf, input={"wf": wf_id})
+
+    await run_workflow_step(parent)
+    async with pool.acquire() as conn:
+        started = next(
+            e for e in await wf_queries.list_run_events(conn, parent) if e.type == "call_started"
+        )
+    sub_id = started.payload["child_run_id"]
+    await run_workflow_step(sub_id)
+    async with pool.acquire() as conn:
+        await wf_queries.add_run_call_llm_cost_microusd(
+            conn,
+            sub_id,
+            1234,
+            account_id="acc_wf",
+            input_tokens=100,
+            output_tokens=20,
+            model="openrouter/arm-model",
+        )
+    # Harvest the sub-run (sub_runs() resolves and journals inline), then the step
+    # that fast-forwards through it and completes.
+    await run_workflow_step(parent)
+    await run_workflow_step(parent)
+
+    facts = (await _run(pool, parent)).output
+    assert facts["truncated"] is False
+    [node] = facts["nodes"]
+    assert (node["kind"], node["id"], node["label"]) == ("run", sub_id, "arm")
+    assert (node["workflow_id"], node["workflow_version"]) == (wf_id, 1)
+    assert node["status"] == "completed" and node["ended_at"] is not None
+    assert node["parent"] == {"kind": "run", "id": parent}
+    assert node["usage"] == [
+        {
+            "model": "openrouter/arm-model",
+            "input_tokens": 100,
+            "output_tokens": 20,
+            "cache_read_input_tokens": 0,
+            "cache_creation_input_tokens": 0,
+            "cost_microusd": 1234,
+        }
+    ]

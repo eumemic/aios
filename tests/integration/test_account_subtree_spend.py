@@ -74,7 +74,9 @@ async def _add_workflow_spent(conn: asyncpg.Connection[Any], account_id: str, mi
         host_semantics_epoch=HOST_SEMANTICS_EPOCH,
         depth=10,
     )
-    await wf_queries.add_run_call_llm_cost_microusd(conn, run.id, micro, account_id=account_id)
+    await wf_queries.add_run_call_llm_cost_microusd(
+        conn, run.id, micro, account_id=account_id, model="test/model"
+    )
 
 
 class TestSubtreeSpentMicrousd:

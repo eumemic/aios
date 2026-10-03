@@ -921,6 +921,24 @@ async def _run_workflow_step_body(
                     },
                 )
                 disposition = _escalate(disposition, "owed_drive")
+            elif cap.capability_id == "sub_runs":
+                # Metadata about the run's own creation subtree (#2472 D3): no
+                # declaration needed, like budget(); never inputs, outputs or journals.
+                facts = await wf_queries.sub_run_facts(
+                    conn,
+                    run_id,
+                    account_id=account_id,
+                    max_nodes=get_settings().trace_max_nodes,
+                )
+                await wf_queries.append_run_event(
+                    conn,
+                    account_id=account_id,
+                    run_id=run_id,
+                    type="call_result",
+                    call_key=cap.call_key,
+                    payload={"result": facts, "is_error": False},
+                )
+                disposition = _escalate(disposition, "owed_drive")
             elif cap.capability_id == "tool":
                 spec = cap.spec if isinstance(cap.spec, dict) else {}
                 tool_name = spec.get("tool_name")
