@@ -11,7 +11,7 @@ from aios.models.workflows import WfRunCreate
 from aios.tools.invoke_session import _CallWorkflowArgs
 from aios.workflows import service
 from aios.workflows.determinism import content_hash
-from aios.workflows.wf_script_host import agent
+from aios.workflows.wf_script_host import agent, invoke_workflow
 
 
 def test_http_run_defaults_to_fresh_workspace() -> None:
@@ -72,3 +72,15 @@ async def test_service_shared_without_launcher_rejected_before_database() -> Non
             environment_id="env_1",
             workspace="shared",
         )
+
+
+def test_invoke_workflow_version_enters_call_identity_only_when_set() -> None:
+    """An unpinned call keeps the spec (and so the call key) it had before
+    ``version=`` existed, so an in-flight run's memo still matches on replay."""
+    unpinned = invoke_workflow("wf_1", {})
+    pinned = invoke_workflow("wf_1", {}, version=1)
+    assert unpinned._spec == {"workflow_id": "wf_1", "input": {}, "output_schema": None}
+    assert pinned._spec["version"] == 1
+    assert content_hash(unpinned._capability_id, unpinned._spec) != content_hash(
+        pinned._capability_id, pinned._spec
+    )
