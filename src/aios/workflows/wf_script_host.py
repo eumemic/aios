@@ -215,6 +215,7 @@ def invoke_workflow(
     workflow_id: str,
     input: Any,
     *,
+    version: int | None = None,
     output_schema: Any = None,
     label: str | None = None,
 ) -> _Capability:
@@ -230,7 +231,9 @@ def invoke_workflow(
     terminal output; a mismatch fails the sub-run loud (``output_schema_violation``)
     and surfaces here as an :class:`AgentError`. A sub-run that errors or goes gone
     raises :class:`AgentError` at the ``await``. ``label`` is an observability
-    annotation and does not enter the call key.
+    annotation and does not enter the call key. ``version`` pins the sub-run to that
+    registered version of the workflow; omitted, it runs the version current at
+    launch.
     """
     annotations: dict[str, Any] = {}
     if label is not None:
@@ -238,17 +241,16 @@ def invoke_workflow(
     # output_schema as a canonical JSON *string* (mirror agent()) so a schema's
     # numeric literals survive the call_key hash; reconstructed with json.loads in
     # the worker's _open_invoke_workflow_capability.
-    return _Capability(
-        "invoke_workflow",
-        {
-            "workflow_id": workflow_id,
-            "input": input,
-            "output_schema": None
-            if output_schema is None
-            else canonical_schema_json(output_schema),
-        },
-        annotations,
-    )
+    spec: dict[str, Any] = {
+        "workflow_id": workflow_id,
+        "input": input,
+        "output_schema": None if output_schema is None else canonical_schema_json(output_schema),
+    }
+    # Only when set: an unpinned call keeps the spec, and so the call key, it always
+    # had, so an in-flight run's memo still matches on replay.
+    if version is not None:
+        spec["version"] = version
+    return _Capability("invoke_workflow", spec, annotations)
 
 
 def budget() -> _Capability:
