@@ -42,6 +42,7 @@ from aios.models.agents import (
 )
 from aios.models.attenuation import surface_of
 from aios.models.vaults import VaultCredentialCreate
+from aios.models.workflows import OperatorAuthority, RunAuthority, SessionAuthority
 from aios.services import agents as agents_service
 from aios.services import attenuation as attenuation_service
 from aios.services import sessions as sessions_service
@@ -71,12 +72,11 @@ async def _create_run_via_session(
     run = await wf_service.create_run(
         pool,
         account_id=account_id,
+        authority=SessionAuthority(session_id, session.parent_run_id),
         workflow_id=args["workflow_id"],
         environment_id=session.environment_id,
         input=args.get("input"),
         vault_ids=args.get("vault_ids", []),
-        launcher_session_id=session_id,
-        parent_run_id=session.parent_run_id,
         budget_usd=args.get("budget_usd"),
     )
     return run.model_dump(mode="json")
@@ -195,10 +195,15 @@ async def test_resolver_asymmetry(vault_pool: asyncpg.Pool[Any], crypto_box: Cry
     )
     wf = await wf_service.create_workflow(pool, account_id=ACC, name="w-res", script=_SCRIPT)
     bound = await wf_service.create_run(
-        pool, account_id=ACC, workflow_id=wf.id, environment_id=ENV, vault_ids=[vault_id]
+        pool,
+        account_id=ACC,
+        authority=OperatorAuthority(),
+        workflow_id=wf.id,
+        environment_id=ENV,
+        vault_ids=[vault_id],
     )
     unbound = await wf_service.create_run(
-        pool, account_id=ACC, workflow_id=wf.id, environment_id=ENV
+        pool, account_id=ACC, authority=OperatorAuthority(), workflow_id=wf.id, environment_id=ENV
     )
 
     resolved_vault_id, headers = await resolve_auth_for_target_url_run(
@@ -235,9 +240,9 @@ async def test_launch_time_attenuation(vault_pool: asyncpg.Pool[Any]) -> None:
     inherited = await wf_service.create_run(
         pool,
         account_id=ACC,
+        authority=SessionAuthority(both, None),
         workflow_id=wf.id,
         environment_id=ENV,
-        launcher_session_id=both,
     )
     async with pool.acquire() as conn:
         assert await wf_queries.get_run_vault_ids(conn, inherited.id, account_id=ACC) == [vx, vy]
@@ -246,10 +251,10 @@ async def test_launch_time_attenuation(vault_pool: asyncpg.Pool[Any]) -> None:
     empty = await wf_service.create_run(
         pool,
         account_id=ACC,
+        authority=SessionAuthority(both, None),
         workflow_id=wf.id,
         environment_id=ENV,
         vault_ids=[],
-        launcher_session_id=both,
     )
     async with pool.acquire() as conn:
         assert await wf_queries.get_run_vault_ids(conn, empty.id, account_id=ACC) == []
@@ -258,10 +263,10 @@ async def test_launch_time_attenuation(vault_pool: asyncpg.Pool[Any]) -> None:
     ok = await wf_service.create_run(
         pool,
         account_id=ACC,
+        authority=SessionAuthority(launcher, None),
         workflow_id=wf.id,
         environment_id=ENV,
         vault_ids=[vx],
-        launcher_session_id=launcher,
     )
     async with pool.acquire() as conn:
         assert await wf_queries.get_run_vault_ids(conn, ok.id, account_id=ACC) == [vx]
@@ -270,10 +275,10 @@ async def test_launch_time_attenuation(vault_pool: asyncpg.Pool[Any]) -> None:
     sub = await wf_service.create_run(
         pool,
         account_id=ACC,
+        authority=SessionAuthority(both, None),
         workflow_id=wf.id,
         environment_id=ENV,
         vault_ids=[vx],
-        launcher_session_id=both,
     )
     async with pool.acquire() as conn:
         assert await wf_queries.get_run_vault_ids(conn, sub.id, account_id=ACC) == [vx]
@@ -284,16 +289,21 @@ async def test_launch_time_attenuation(vault_pool: asyncpg.Pool[Any]) -> None:
         await wf_service.create_run(
             pool,
             account_id=ACC,
+            authority=SessionAuthority(launcher, None),
             workflow_id=wf.id,
             environment_id=ENV,
             vault_ids=[vy],
-            launcher_session_id=launcher,
         )
     assert await _run_count(pool) == before
 
     # Operator path (no launcher) binds anything, account-scoped.
     op = await wf_service.create_run(
-        pool, account_id=ACC, workflow_id=wf.id, environment_id=ENV, vault_ids=[vy]
+        pool,
+        account_id=ACC,
+        authority=OperatorAuthority(),
+        workflow_id=wf.id,
+        environment_id=ENV,
+        vault_ids=[vy],
     )
     async with pool.acquire() as conn:
         assert await wf_queries.get_run_vault_ids(conn, op.id, account_id=ACC) == [vy]
@@ -718,6 +728,7 @@ async def test_run_cannot_bind_foreign_or_missing_vault(vault_pool: asyncpg.Pool
         await wf_service.create_run(
             pool,
             account_id=ACC,
+            authority=OperatorAuthority(),
             workflow_id=wf.id,
             environment_id=ENV,
             vault_ids=[foreign_vault.id],
@@ -729,6 +740,7 @@ async def test_run_cannot_bind_foreign_or_missing_vault(vault_pool: asyncpg.Pool
         await wf_service.create_run(
             pool,
             account_id=ACC,
+            authority=OperatorAuthority(),
             workflow_id=wf.id,
             environment_id=ENV,
             vault_ids=["vlt_does_not_exist"],
@@ -871,7 +883,9 @@ async def test_create_run_builtin_threads_parent_run_id(vault_pool: asyncpg.Pool
     agent = await _make_agent(pool, "builtin-nested")
     sess = await _make_session(pool, agent)
     wf = await wf_service.create_workflow(pool, account_id=ACC, name="wf-bi-nest", script=_SCRIPT)
-    root = await wf_service.create_run(pool, account_id=ACC, workflow_id=wf.id, environment_id=ENV)
+    root = await wf_service.create_run(
+        pool, account_id=ACC, authority=OperatorAuthority(), workflow_id=wf.id, environment_id=ENV
+    )
 
     # Make the session a real child: parent_run_id + a frozen surface (the run-spawn
     # machinery populates both; load_for_session fails closed on a parent_run_id session
@@ -903,7 +917,11 @@ async def test_create_run_depth_cap(vault_pool: asyncpg.Pool[Any]) -> None:
     expected_depth = INVOKE_MAX_DEPTH
     for _ in range(INVOKE_MAX_DEPTH):
         run = await wf_service.create_run(
-            pool, account_id=ACC, workflow_id=wf.id, environment_id=ENV, parent_run_id=parent
+            pool,
+            account_id=ACC,
+            authority=RunAuthority(parent) if parent is not None else OperatorAuthority(),
+            workflow_id=wf.id,
+            environment_id=ENV,
         )
         assert run.depth == expected_depth  # the down-counter decrements each hop
         parent = run.id
@@ -913,7 +931,11 @@ async def test_create_run_depth_cap(vault_pool: asyncpg.Pool[Any]) -> None:
     before = await _run_count(pool)
     with pytest.raises(WorkflowRunDepthExceededError):
         await wf_service.create_run(
-            pool, account_id=ACC, workflow_id=wf.id, environment_id=ENV, parent_run_id=parent
+            pool,
+            account_id=ACC,
+            authority=RunAuthority(parent) if parent is not None else OperatorAuthority(),
+            workflow_id=wf.id,
+            environment_id=ENV,
         )
     assert await _run_count(pool) == before
 
@@ -926,28 +948,27 @@ async def test_create_run_edgeless_root_seeds_full_budget(vault_pool: asyncpg.Po
     wf = await wf_service.create_workflow(pool, account_id=ACC, name="wf-root", script=_SCRIPT)
 
     root = await wf_service.create_run(
-        pool, account_id=ACC, workflow_id=wf.id, environment_id=ENV, parent_run_id=None
+        pool, account_id=ACC, authority=OperatorAuthority(), workflow_id=wf.id, environment_id=ENV
     )
     assert root.depth == INVOKE_MAX_DEPTH
 
     # The persisted column agrees with the returned row — the read-side the next hop uses.
     async with pool.acquire() as conn:
-        lineage = await wf_queries.get_run_lineage(conn, root.id, account_id=ACC)
-    assert lineage == wf_queries.RunLineage(depth=INVOKE_MAX_DEPTH, principal="operator")
+        assert await wf_queries.get_run_depth(conn, root.id, account_id=ACC) == INVOKE_MAX_DEPTH
 
 
-async def test_get_run_lineage_account_scoped(vault_pool: asyncpg.Pool[Any]) -> None:
-    """``get_run_lineage`` is account-scoped (#1124): a foreign id raises NotFoundError,
+async def test_get_run_depth_account_scoped(vault_pool: asyncpg.Pool[Any]) -> None:
+    """``get_run_depth`` is account-scoped (#1124): a foreign id raises NotFoundError,
     preserving the same-account trust the deleted ``run_ancestor_depth`` CTE enforced
     per hop — a foreign parent can never launder a fresh full budget."""
     pool = vault_pool
     wf = await wf_service.create_workflow(pool, account_id=ACC, name="wf-scope", script=_SCRIPT)
     root = await wf_service.create_run(
-        pool, account_id=ACC, workflow_id=wf.id, environment_id=ENV, parent_run_id=None
+        pool, account_id=ACC, authority=OperatorAuthority(), workflow_id=wf.id, environment_id=ENV
     )
     async with pool.acquire() as conn:
         with pytest.raises(NotFoundError):
-            await wf_queries.get_run_lineage(conn, root.id, account_id="acc_other")
+            await wf_queries.get_run_depth(conn, root.id, account_id="acc_other")
 
 
 async def test_create_run_rejects_foreign_environment(vault_pool: asyncpg.Pool[Any]) -> None:
@@ -970,7 +991,11 @@ async def test_create_run_rejects_foreign_environment(vault_pool: asyncpg.Pool[A
     before = await _run_count(pool)
     with pytest.raises(NotFoundError):
         await wf_service.create_run(
-            pool, account_id=ACC, workflow_id=wf.id, environment_id="env_foreign"
+            pool,
+            account_id=ACC,
+            authority=OperatorAuthority(),
+            workflow_id=wf.id,
+            environment_id="env_foreign",
         )
     assert await _run_count(pool) == before
 
@@ -1016,7 +1041,9 @@ async def test_launcher_fanout_cap(
     await _create_run_via_session(pool, sess, {"workflow_id": wf.id})
 
     # Operator launches carry no launcher (and are exempt from the launcher cap).
-    op = await wf_service.create_run(pool, account_id=ACC, workflow_id=wf.id, environment_id=ENV)
+    op = await wf_service.create_run(
+        pool, account_id=ACC, authority=OperatorAuthority(), workflow_id=wf.id, environment_id=ENV
+    )
     assert op.launcher_session_id is None
 
 
@@ -1030,12 +1057,20 @@ async def test_account_fanout_cap_binds_every_launch(
     sess = await _make_session(pool, agent)
     wf = await wf_service.create_workflow(pool, account_id=ACC, name="wf-acap", script=_SCRIPT)
 
-    await wf_service.create_run(pool, account_id=ACC, workflow_id=wf.id, environment_id=ENV)
+    await wf_service.create_run(
+        pool, account_id=ACC, authority=OperatorAuthority(), workflow_id=wf.id, environment_id=ENV
+    )
     await _create_run_via_session(pool, sess, {"workflow_id": wf.id})  # agent launch counts too
 
     # Third launch refused on BOTH paths.
     with pytest.raises(RateLimitedError, match="account at outstanding-run cap"):
-        await wf_service.create_run(pool, account_id=ACC, workflow_id=wf.id, environment_id=ENV)
+        await wf_service.create_run(
+            pool,
+            account_id=ACC,
+            authority=OperatorAuthority(),
+            workflow_id=wf.id,
+            environment_id=ENV,
+        )
     with pytest.raises(RateLimitedError, match="account at outstanding-run cap"):
         await _create_run_via_session(pool, sess, {"workflow_id": wf.id})
 
@@ -1068,7 +1103,9 @@ async def test_cancel_run_service_launcher_guard(vault_pool: asyncpg.Pool[Any]) 
 
     # A foreign canceller and an operator-launched run are both forbidden when a
     # canceller_session_id is asserted (the model plane).
-    op = await wf_service.create_run(pool, account_id=ACC, workflow_id=wf.id, environment_id=ENV)
+    op = await wf_service.create_run(
+        pool, account_id=ACC, authority=OperatorAuthority(), workflow_id=wf.id, environment_id=ENV
+    )
     with pytest.raises(ForbiddenError):
         await wf_service.cancel_run(
             pool, run_id=own["id"], account_id=ACC, canceller_session_id=other
@@ -1131,7 +1168,9 @@ async def test_child_surface_is_the_frozen_clamp_not_the_live_agent(
     wf = await wf_service.create_workflow(
         pool, account_id=ACC, name="wf-run-bash", script=_SCRIPT, tools=[ToolSpec(type="bash")]
     )
-    run = await wf_service.create_run(pool, account_id=ACC, workflow_id=wf.id, environment_id=ENV)
+    run = await wf_service.create_run(
+        pool, account_id=ACC, authority=OperatorAuthority(), workflow_id=wf.id, environment_id=ENV
+    )
     child_surface = attenuation_service.clamp(surface_of(agent), surface_of(run))
 
     child = await _spawn_child(pool, run.id, agent, surface=child_surface)
@@ -1146,7 +1185,12 @@ async def test_child_vaults_copied_from_run(vault_pool: asyncpg.Pool[Any]) -> No
     agent = await _make_agent(pool, "vault-child-agent")
     wf = await wf_service.create_workflow(pool, account_id=ACC, name="wf-vc", script=_SCRIPT)
     run = await wf_service.create_run(
-        pool, account_id=ACC, workflow_id=wf.id, environment_id=ENV, vault_ids=[vx]
+        pool,
+        account_id=ACC,
+        authority=OperatorAuthority(),
+        workflow_id=wf.id,
+        environment_id=ENV,
+        vault_ids=[vx],
     )
     async with pool.acquire() as conn:
         run_vaults = await wf_queries.get_run_vault_ids(conn, run.id, account_id=ACC)
@@ -1167,7 +1211,9 @@ async def test_frozen_surface_wins_over_a_later_agent_edit(
     wf = await wf_service.create_workflow(
         pool, account_id=ACC, name="wf-frozen", script=_SCRIPT, tools=[ToolSpec(type="bash")]
     )
-    run = await wf_service.create_run(pool, account_id=ACC, workflow_id=wf.id, environment_id=ENV)
+    run = await wf_service.create_run(
+        pool, account_id=ACC, authority=OperatorAuthority(), workflow_id=wf.id, environment_id=ENV
+    )
     child = await _spawn_child(
         pool, run.id, agent, surface=attenuation_service.clamp(surface_of(agent), surface_of(run))
     )
@@ -1193,7 +1239,9 @@ async def test_load_for_session_fails_closed_on_unfrozen_child(
     agent = await _make_agent(pool, "ghost-child-agent", tools=[ToolSpec(type="bash")])
     sess_id = await _make_session(pool, agent)
     wf = await wf_service.create_workflow(pool, account_id=ACC, name="wf-ghost", script=_SCRIPT)
-    run = await wf_service.create_run(pool, account_id=ACC, workflow_id=wf.id, environment_id=ENV)
+    run = await wf_service.create_run(
+        pool, account_id=ACC, authority=OperatorAuthority(), workflow_id=wf.id, environment_id=ENV
+    )
     # Make it look like a child (parent_run_id) WITHOUT a frozen surface — the corrupt state.
     async with pool.acquire() as conn:
         await conn.execute("UPDATE sessions SET parent_run_id = $1 WHERE id = $2", run.id, sess_id)
@@ -1217,12 +1265,16 @@ async def test_create_run_clamps_top_edge_to_launcher(vault_pool: asyncpg.Pool[A
         tools=[ToolSpec(type="bash"), ToolSpec(type="read")],
     )
     launched = await wf_service.create_run(
-        pool, account_id=ACC, workflow_id=wf.id, environment_id=ENV, launcher_session_id=launcher
+        pool,
+        account_id=ACC,
+        authority=SessionAuthority(launcher, None),
+        workflow_id=wf.id,
+        environment_id=ENV,
     )
     assert {t.type for t in launched.tools} == {"bash"}  # read clamped away
 
     operator = await wf_service.create_run(
-        pool, account_id=ACC, workflow_id=wf.id, environment_id=ENV
+        pool, account_id=ACC, authority=OperatorAuthority(), workflow_id=wf.id, environment_id=ENV
     )
     assert {t.type for t in operator.tools} == {"bash", "read"}  # operator = top — verbatim
 
@@ -1289,9 +1341,9 @@ async def test_create_run_clamps_to_launcher_revoked_mid_launch(
     run = await wf_service.create_run(
         pool,
         account_id=ACC,
+        authority=SessionAuthority(launcher, None),
         workflow_id=wf.id,
         environment_id=ENV,
-        launcher_session_id=launcher,
     )
     assert {t.type for t in run.tools} == {"bash"}  # clamped to the post-revoke surface
 
@@ -1307,7 +1359,9 @@ async def test_subrun_composes_against_child_frozen_clamp(
     wf = await wf_service.create_workflow(
         pool, account_id=ACC, name="wf-parent", script=_SCRIPT, tools=[ToolSpec(type="bash")]
     )
-    run = await wf_service.create_run(pool, account_id=ACC, workflow_id=wf.id, environment_id=ENV)
+    run = await wf_service.create_run(
+        pool, account_id=ACC, authority=OperatorAuthority(), workflow_id=wf.id, environment_id=ENV
+    )
     child = await _spawn_child(
         pool, run.id, agent, surface=attenuation_service.clamp(surface_of(agent), surface_of(run))
     )
@@ -1323,9 +1377,8 @@ async def test_subrun_composes_against_child_frozen_clamp(
     subrun = await wf_service.create_run(
         pool,
         account_id=ACC,
+        authority=SessionAuthority(child.id, run.id),
         workflow_id=sub_wf.id,
         environment_id=ENV,
-        launcher_session_id=child.id,
-        parent_run_id=run.id,
     )
     assert {t.type for t in subrun.tools} == {"bash"}  # composed clamp: read dropped

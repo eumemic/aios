@@ -44,6 +44,7 @@ from aios.models.environments import (
     UnrestrictedNetworking,
 )
 from aios.models.vaults import VaultCredentialCreate
+from aios.models.workflows import OperatorAuthority
 from aios.sandbox import secret_egress_proxy as sep
 from aios.sandbox.egress_ca import get_egress_ca
 from aios.services import environments as environments_service
@@ -217,6 +218,7 @@ async def _provision_swap_run(
     run = await workflows_service.create_run(
         pool,
         account_id=_ACCOUNT_ID,
+        authority=OperatorAuthority(),
         workflow_id=workflow.id,
         environment_id=env.id,
         vault_ids=[vault.id],
@@ -286,6 +288,7 @@ async def test_run_bash_env_var_placeholder_round_trip(docker_harness: Harness) 
         run = await workflows_service.create_run(
             pool,
             account_id=_ACCOUNT_ID,
+            authority=OperatorAuthority(),
             workflow_id=workflow.id,
             environment_id=env.id,
             vault_ids=[vault.id],

@@ -13,6 +13,7 @@ from unittest import mock
 import httpx
 import pytest
 
+from aios.models.workflows import OperatorAuthority
 from tests.helpers.connections import authed_client, wired_app
 
 
@@ -211,7 +212,12 @@ async def run_id(pool: Any) -> str:
     )
     with mock.patch("aios.workflows.service.defer_run_wake", new=mock.AsyncMock()):
         run = await wf_svc.create_run(
-            pool, account_id=account_id, workflow_id=wf.id, environment_id=env.id, input=None
+            pool,
+            account_id=account_id,
+            authority=OperatorAuthority(),
+            workflow_id=wf.id,
+            environment_id=env.id,
+            input=None,
         )
     return run.id
 

@@ -64,7 +64,7 @@ from aios.models.triggers import (
     WakeSessionAction,
     WorkflowAction,
 )
-from aios.models.workflows import WfRun
+from aios.models.workflows import SessionAuthority, WfRun
 from aios.services import sessions as sessions_service
 from aios.services.trigger_lint import OBSERVED_WAKE_WARNING, observed_wake_is_noisy
 from aios.services.wake import (
@@ -843,8 +843,7 @@ async def _run_workflow(
             environment_id=trigger.environment_id,
             input=composed,
             vault_ids=action.vault_ids,
-            launcher_session_id=trigger.owner_session_id,
-            parent_run_id=parent_run_id,
+            authority=SessionAuthority(trigger.owner_session_id, parent_run_id),
             expected_version=action.workflow_version,
             version=action.version,
             trigger_id=trigger.id,

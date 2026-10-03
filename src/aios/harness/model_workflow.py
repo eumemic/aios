@@ -49,6 +49,7 @@ from aios.harness.completion import LlmRequest
 from aios.harness.model_binding import WorkflowModelRef
 from aios.ids import WORKFLOW_RUN, make_id
 from aios.logging import get_logger
+from aios.models.workflows import SessionAuthority
 from aios.services import sessions as sessions_service
 from aios.services import tasks as tasks_service
 from aios.services import workflows as wf_service
@@ -209,8 +210,7 @@ async def launch_model_workflow_park(
         # ``find_unharvested_model_dispatch_parks`` keys on so the crash-recovery sweep
         # can re-derive the park's run from the durable edge alone.
         caller={"kind": "session", "id": session_id, "purpose": "model_dispatch"},
-        launcher_session_id=session_id,
-        parent_run_id=session.parent_run_id,
+        authority=SessionAuthority(session_id, session.parent_run_id),
         # EXPLICIT: a model-dispatch run IS this session's own turn (its output becomes
         # the assistant message), so it deliberately deliberates over the session's live
         # workspace. This used to ride on ``launch_awaited_run``'s ``workspace`` default;

@@ -36,6 +36,7 @@ from aios.db.queries import workflows as wf_queries
 from aios.harness import runtime
 from aios.models.attenuation import Surface
 from aios.models.sessions import Err
+from aios.models.workflows import OperatorAuthority
 from aios.services import agents as agents_service
 from aios.services import sessions as sessions_service
 from aios.services.sessions import AskNewSession, TellNewSession
@@ -94,7 +95,12 @@ async def _make_run(pool: asyncpg.Pool[Any], script: str, *, name: str = "w") ->
     async with pool.acquire() as conn:
         wf = await wf_queries.insert_workflow(conn, account_id=_ACCOUNT, name=name, script=script)
     run = await service.create_run(
-        pool, account_id=_ACCOUNT, workflow_id=wf.id, environment_id=_ENV, input=None
+        pool,
+        account_id=_ACCOUNT,
+        authority=OperatorAuthority(),
+        workflow_id=wf.id,
+        environment_id=_ENV,
+        input=None,
     )
     return run.id
 

@@ -24,7 +24,7 @@ from aios.db.queries import workflows as wf_queries
 from aios.errors import ForbiddenError, NotFoundError
 from aios.harness import runtime
 from aios.models.triggers import TriggerCreate
-from aios.models.workflows import WfRun
+from aios.models.workflows import OperatorAuthority, SessionAuthority, WfRun
 from aios.services import agents as agents_service
 from aios.services import sessions as sessions_service
 from aios.services import triggers as triggers_service
@@ -100,10 +100,10 @@ async def _dispatch_run(pool: asyncpg.Pool[Any], session_id: str) -> WfRun:
     return await service.create_run(
         pool,
         account_id="acc_vis",
+        authority=SessionAuthority(session_id, None),
         workflow_id=await _workflow(pool),
         environment_id="env_vis",
         input={"messages": [{"role": "user", "content": _SECRET}]},
-        launcher_session_id=session_id,
         caller={"kind": "session", "id": session_id, "purpose": "model_dispatch"},
     )
 
@@ -151,10 +151,9 @@ async def test_sub_runs_inherit_session_visibility(pool: asyncpg.Pool[Any]) -> N
     sub = await service.create_run(
         pool,
         account_id="acc_vis",
+        authority=SessionAuthority(owner, parent.id),
         workflow_id=await _workflow(pool),
         environment_id="env_vis",
-        launcher_session_id=owner,
-        parent_run_id=parent.id,
         caller={"kind": "run", "id": parent.id},
     )
     assert sub.visibility == "session"
@@ -170,7 +169,11 @@ async def test_a_run_cannot_read_another_sessions_model_dispatch_run(
     owner = await _session(pool, "owner")
     private = await _dispatch_run(pool, owner)
     reader = await service.create_run(
-        pool, account_id="acc_vis", workflow_id=await _workflow(pool), environment_id="env_vis"
+        pool,
+        account_id="acc_vis",
+        authority=OperatorAuthority(),
+        workflow_id=await _workflow(pool),
+        environment_id="env_vis",
     )
 
     got = await run_tools._read_run_journal(
@@ -232,9 +235,9 @@ async def test_resume_gate_on_another_sessions_private_run_404s(
     shared = await service.create_run(
         pool,
         account_id="acc_vis",
+        authority=SessionAuthority(owner, None),
         workflow_id=await _workflow(pool),
         environment_id="env_vis",
-        launcher_session_id=owner,
     )
     with pytest.raises(NotFoundError):
         await tools.resume_gate_handler(other, {"run_id": private.id, "gate_nonce": "x"})
