@@ -68,6 +68,18 @@ Stripping the child environment (`_STRIPPED_ENV`) does not achieve that by itsel
   poisoning, processes, and `/proc` access from the agent runner do not cross to
   the publisher runner.
 
+## Reporting a missed review: two channels, different write-authority
+
+A run that publishes nothing is reported twice by the `publish` job's last step: an `::error::` annotation and a run-summary entry.
+
+The summary alone is not a detector. It is a file in the runner's `_temp/_runner_file_commands/` directory, and that path is a **documented constant**. Stripping `GITHUB_STEP_SUMMARY` and the other control-file variables from the agent's environment (`_STRIPPED_ENV`) raises the bar and covers the accidental case, but removing the *name* of a resource is not removing *access* to it: an agent with an empty environment can glob `step_summary_*` and append to it, and an unsandboxed agent can `setsid` a process that outlives its step. Measured on the #2404 harness, that allowed both a forged `### eumemic-bot review posted` banner and a 1.2 MB flood that pushes a summary past the runner's 1 MiB limit — at which point the runner skips the upload entirely and the real warning vanishes without an error.
+
+So the miss is also raised as an `::error::` annotation, which the runner parses from the net step's **own stdout** — a stream nothing outside that step can write to. It is printed before the summary write, so a flooded or unwritable summary cannot suppress it. The reviewed agent's output *is* echoed into a step log, so the launcher defuses it first (`defuse_workflow_commands`): every echoed line gets a non-whitespace prefix, and legacy `##[` openers are broken, so the agent can neither forge an annotation nor `::stop-commands::` the launcher's own `NO EVIDENCE` error into plain text. As a further belt, the agent job kills every process left running as `eumemic-review` immediately after the agent step.
+
+`scripts/verify_eumemic_bot_review_gate.sh` runs the mutants for both halves (remove the defusing; remove the annotation) and the empty-environment forge+flood attack against the real net step.
+
+Out of scope: the unsandboxed agent's network egress, which is bounded separately by the workflow's `contents: read` token on a public repository.
+
 ## Scope and failure behaviour
 
 Checkout uses `pull_request.head.sha` with full history. The launcher refuses to run if local `HEAD` does not match `HEAD_SHA`, and requires `BASE_SHA` (`pull_request.base.sha`) to be present locally — fetching it once if it is not — because the prompt hands the agent an explicit `git diff <base>...<head>` range rather than letting it guess the base branch.
