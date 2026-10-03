@@ -33,6 +33,7 @@ from aios.models.triggers import (
     TriggerRunEcho,
     compute_next_fire,
 )
+from aios.models.workflows import RunVisibility
 
 # ─── triggers ───────────────────────────────────────────────────────────────
 
@@ -773,6 +774,8 @@ async def insert_run_completion_fires(
     workflow_id: str,
     run_id: str,
     status: str,
+    visibility: RunVisibility,
+    launcher_session_id: str | None,
 ) -> list[TriggerFireRef]:
     """Match watching ``run_completion`` triggers and insert one ``pending``
     fire-carrier row per match.
@@ -781,10 +784,12 @@ async def insert_run_completion_fires(
     point: commit makes "the run completed" and "these fires are owed"
     atomic). The ``t.account_id = $1`` conjunct is the tenant boundary —
     write-path validation is UX, this is enforcement: a trigger is only ever
-    handed run data its owner could already read via the account-scoped run
-    reads. Matching is covered by the ``triggers_run_completion_watch``
-    partial index; the insert loop is bounded by the per-account
-    enabled-trigger cap.
+    handed run data its owner could already read via the agent run reads. The
+    visibility conjunct is :meth:`RunReader.can_see` read as the trigger's owner
+    (#2468): a session-private run fires only its launching session's triggers,
+    since the fire hands the run's output to the owner by value. Matching is
+    covered by the ``triggers_run_completion_watch`` partial index; the insert
+    loop is bounded by the per-account enabled-trigger cap.
     """
     rows = await conn.fetch(
         """
@@ -797,11 +802,14 @@ async def insert_run_completion_fires(
           AND t.source_spec -> 'statuses' ? $3
           AND t.enabled
           AND s.archived_at IS NULL
+          AND ($4 = 'account' OR t.owner_session_id = $5)
         ORDER BY t.created_at
         """,
         account_id,
         workflow_id,
         status,
+        visibility,
+        launcher_session_id,
     )
     if not rows:
         # The overwhelmingly common case (no watchers) — never pay an

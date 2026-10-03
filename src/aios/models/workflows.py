@@ -15,7 +15,7 @@ reuse the read views directly, the way ``Agent``/``Session`` do.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Literal
+from typing import Any, Literal, NamedTuple
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -37,6 +37,7 @@ from aios.models.agents import (
 WorkspaceMode = Literal["shared", "fresh"]
 
 RunPrincipal = Literal["operator", "session"]  # see ``WfRun.principal``
+RunVisibility = Literal["account", "session"]  # see ``WfRun.visibility``
 
 WfRunStatus = Literal["pending", "running", "suspended", "completed", "errored", "cancelled"]
 WfRunEventType = Literal[
@@ -195,6 +196,14 @@ class WfRun(BaseModel):
             "session doesn't change it."
         )
     )
+    visibility: RunVisibility = Field(
+        description=(
+            "Who may read the run through agent tools: `account` (any session in the "
+            "account) or `session` (only its launching session). A workflow-as-model "
+            "run is `session`, and sub-runs inherit their parent's. The operator API "
+            "reads every run."
+        )
+    )
     # The DOWN-counting trusted invoke-depth (#1124): the budget remaining for
     # this run's OUTGOING trusted edges (run→run sub-launches, run→session ``agent()``
     # children). An edgeless root seeds at the full budget; a nested launch carries
@@ -258,6 +267,20 @@ class WfRun(BaseModel):
     # above is the ceiling; ``usage.cost_microusd`` is the spend against it.
     usage: WfRunUsage | None = None
     usage_parent: UsageNodeRef | None = None
+
+
+class RunReader(NamedTuple):
+    """An agent-side read of runs, acting for ``session_id``: an agent tool reads as its
+    own session, and a run-side tool as its run's launching session (``None`` when the
+    run has none). The operator API reads with no ``RunReader`` at all."""
+
+    session_id: str | None
+
+    def can_see(self, run: WfRun) -> bool:
+        """Mirrored in SQL by ``wf_queries.list_wf_runs``'s ``reader`` filter."""
+        if run.visibility == "account":
+            return True
+        return self.session_id is not None and run.launcher_session_id == self.session_id
 
 
 class WfRunEvent(BaseModel):

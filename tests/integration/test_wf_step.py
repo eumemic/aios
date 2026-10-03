@@ -4305,8 +4305,10 @@ async def test_service_create_and_resume_by_nonce_roundtrip(wf_runtime: asyncpg.
     )
 
     await run_workflow_step(run.id)  # → suspends at the gate
-    assert (await wf_service.get_run(pool, run.id, account_id="acc_wf")).status == "suspended"
-    events = await wf_service.list_run_events(pool, run.id, account_id="acc_wf")
+    assert (
+        await wf_service.get_run(pool, run.id, account_id="acc_wf", reader=None)
+    ).status == "suspended"
+    events = await wf_service.list_run_events(pool, run.id, account_id="acc_wf", reader=None)
     call_started = next(e for e in events if e.type == "call_started")
     nonce = call_started.payload["gate_nonce"]
     assert isinstance(nonce, str) and nonce
@@ -4315,7 +4317,7 @@ async def test_service_create_and_resume_by_nonce_roundtrip(wf_runtime: asyncpg.
         pool, run_id=run.id, account_id="acc_wf", gate_nonce=nonce, result="yes"
     )
     await run_workflow_step(run.id)  # harvest the signal → replay past the gate → complete
-    done = await wf_service.get_run(pool, run.id, account_id="acc_wf")
+    done = await wf_service.get_run(pool, run.id, account_id="acc_wf", reader=None)
     assert done.status == "completed" and done.output == {"answer": "yes"}
 
     # The gate is now resolved — re-resuming with the same (valid) nonce 404s
@@ -4342,7 +4344,7 @@ async def test_service_resume_by_nonce_rejects_bad_nonce_and_cross_tenant(
         pool, account_id="acc_wf", workflow_id=wf.id, environment_id="env_wf"
     )
     await run_workflow_step(run.id)  # → suspended at the gate
-    events = await wf_service.list_run_events(pool, run.id, account_id="acc_wf")
+    events = await wf_service.list_run_events(pool, run.id, account_id="acc_wf", reader=None)
     nonce = next(e for e in events if e.type == "call_started").payload["gate_nonce"]
 
     # Wrong nonce → 404 (no gate matches).
@@ -4356,9 +4358,11 @@ async def test_service_resume_by_nonce_rejects_bad_nonce_and_cross_tenant(
             pool, run_id=run.id, account_id="acc_intruder", gate_nonce=nonce, result="x"
         )
     with pytest.raises(NotFoundError):
-        await wf_service.get_run(pool, run.id, account_id="acc_intruder")
+        await wf_service.get_run(pool, run.id, account_id="acc_intruder", reader=None)
     # The run is untouched — still suspended, resumable by its owner.
-    assert (await wf_service.get_run(pool, run.id, account_id="acc_wf")).status == "suspended"
+    assert (
+        await wf_service.get_run(pool, run.id, account_id="acc_wf", reader=None)
+    ).status == "suspended"
 
 
 # ─── B3 slice 2 — agent() structured output (output_schema) ───────────────────
@@ -6165,7 +6169,7 @@ async def test_get_run_surfaces_summed_child_usage_on_read_path(
         cost_microusd=654321,
     )
 
-    run = await wf_service.get_run(pool, run_id, account_id="acc_wf")
+    run = await wf_service.get_run(pool, run_id, account_id="acc_wf", reader=None)
     assert run.usage is not None
     assert run.usage.input_tokens == 11
     assert run.usage.output_tokens == 22
@@ -6186,7 +6190,7 @@ async def test_get_run_usage_zero_is_observed_not_null(
     """A childless run sums to a REAL zero (distinct from null cannot-determine)."""
     pool = wf_runtime
     run_id = await _make_run(pool, "async def main(input):\n    return 1\n")
-    run = await wf_service.get_run(pool, run_id, account_id="acc_wf")
+    run = await wf_service.get_run(pool, run_id, account_id="acc_wf", reader=None)
     assert run.usage is not None
     assert run.usage.cost_microusd == 0
     assert run.usage.input_tokens == 0
@@ -6205,7 +6209,7 @@ async def test_terminal_run_surfaces_wall_clock_ms(
             "updated_at = created_at + interval '1500 milliseconds' WHERE id = $1",
             run_id,
         )
-    run = await wf_service.get_run(pool, run_id, account_id="acc_wf")
+    run = await wf_service.get_run(pool, run_id, account_id="acc_wf", reader=None)
     assert run.usage is not None
     assert run.usage.wall_clock_ms == 1500
     assert run.usage.iteration_count is None  # still no substrate
@@ -6236,7 +6240,7 @@ async def test_list_runs_enriches_each_run_with_usage(
     await _seed_child_session(pool, sid="ses_la", run_id=run_a, cost_microusd=500, input_tokens=7)
     # run_b has no children → real zero.
 
-    runs = await wf_service.list_runs(pool, account_id="acc_wf")
+    runs = await wf_service.list_runs(pool, account_id="acc_wf", reader=None)
     by_id = {r.id: r for r in runs}
     usage_a = by_id[run_a].usage
     assert usage_a is not None

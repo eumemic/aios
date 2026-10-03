@@ -1723,6 +1723,8 @@ async def _commit_terminal_and_dispatch(
                 workflow_id=run.workflow_id,
                 run_id=run.id,
                 status=status,
+                visibility=run.visibility,
+                launcher_session_id=run.launcher_session_id,
             )
     # Prompt the CALLER run to harvest this answer on its next step rather than waiting
     # out the periodic sweep — mirroring how an agent() child wakes its run. Only for a
