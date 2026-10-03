@@ -178,6 +178,9 @@ from .mint_account_request import MintAccountRequest
 from .mint_account_response import MintAccountResponse
 from .mint_key_request import MintKeyRequest
 from .mint_key_response import MintKeyResponse
+from .missing_request import MissingRequest
+from .missing_request_missing import MissingRequestMissing
+from .missing_request_record import MissingRequestRecord
 from .model_provider import ModelProvider
 from .model_provider_create import ModelProviderCreate
 from .model_provider_update import ModelProviderUpdate
@@ -200,6 +203,10 @@ from .post_connector_runtime_lifecycle_response_post_connector_runtime_lifecycle
 from .post_connector_runtime_session_lifecycle_response_post_connector_runtime_session_lifecycle import (
     PostConnectorRuntimeSessionLifecycleResponsePostConnectorRuntimeSessionLifecycle,
 )
+from .rebuilt_request import RebuiltRequest
+from .rebuilt_request_fidelity import RebuiltRequestFidelity
+from .rebuilt_request_record import RebuiltRequestRecord
+from .rebuilt_request_request import RebuiltRequestRequest
 from .recent_chat import RecentChat
 from .require_approval import RequireApproval
 from .run_completion_source import RunCompletionSource
@@ -564,6 +571,9 @@ __all__ = (
     "MintAccountResponse",
     "MintKeyRequest",
     "MintKeyResponse",
+    "MissingRequest",
+    "MissingRequestMissing",
+    "MissingRequestRecord",
     "ModelProvider",
     "ModelProviderCreate",
     "ModelProviderUpdate",
@@ -578,6 +588,10 @@ __all__ = (
     "PostConnectorRuntimeChatLifecycleResponsePostConnectorRuntimeChatLifecycle",
     "PostConnectorRuntimeLifecycleResponsePostConnectorRuntimeLifecycle",
     "PostConnectorRuntimeSessionLifecycleResponsePostConnectorRuntimeSessionLifecycle",
+    "RebuiltRequest",
+    "RebuiltRequestFidelity",
+    "RebuiltRequestRecord",
+    "RebuiltRequestRequest",
     "RecentChat",
     "RequireApproval",
     "RunCompletionSource",

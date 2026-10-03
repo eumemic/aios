@@ -59,12 +59,15 @@ from aios.models.pagination import (
 )
 from aios.models.sessions import (
     ContextResponse,
+    MissingRequest,
+    RebuiltRequest,
     Session,
     SessionAwaitResponse,
     SessionCloneRequest,
     SessionCreate,
     SessionEgressResponse,
     SessionInterruptRequest,
+    SessionRequest,
     SessionResource,
     SessionResourceEcho,
     SessionStatus,
@@ -84,6 +87,7 @@ from aios.models.triggers import (
 )
 from aios.services import files as files_service
 from aios.services import github_repositories as github_repo_service
+from aios.services import requests as requests_service
 from aios.services import sessions as service
 from aios.services import trace as trace_service
 from aios.services import triggers as triggers_service
@@ -974,6 +978,49 @@ async def get_event(
     Returns 404 when the event does not exist or belongs to a different session.
     """
     return await service.get_event(pool, session_id, event_id, account_id=account_id)
+
+
+@router.get("/{session_id}/requests/{request_id}", operation_id="get_session_request")
+async def get_request(
+    session_id: str,
+    request_id: str,
+    pool: PoolDep,
+    account_id: AccountIdDep,
+    model: str | None = None,
+) -> SessionRequest:
+    """Rebuild a request the session sent (#2471).
+
+    ``request_id`` is the id of the span that opened the send: a
+    ``model_request_start`` event, or a ``model_workflow_park`` event for a
+    workflow-bound agent. The request is recomposed from its captured record,
+    blobs and the event log, using today's renderer, and reported with its
+    fidelity. ``?model=`` renders it for another model's vision and thinking gates
+    instead. 404 when the event isn't a captured request.
+
+    Attachment files are read where the API runs: a request that inlined an image
+    this process can't read reports ``missing: attachment``.
+    """
+    result = await requests_service.rebuild_request(
+        pool,
+        account_id=account_id,
+        session_id=session_id,
+        request_event_id=request_id,
+        target_model=model,
+    )
+    if isinstance(result, requests_service.Missing):
+        return MissingRequest(
+            session_id=session_id,
+            request_id=request_id,
+            missing=result.what,
+            record=result.record,
+        )
+    return RebuiltRequest(
+        session_id=session_id,
+        request_id=request_id,
+        fidelity=result.fidelity,
+        request=result.request,
+        record=result.record,
+    )
 
 
 @router.get("/{session_id}/context", operation_id="get_session_context")

@@ -367,3 +367,37 @@ class TestContextEndpoint:
         ]
         assert len(image_parts) == 1, f"expected one inlined image; messages={messages}"
         assert base64.b64encode(payload).decode() in image_parts[0]["image_url"]["url"]
+
+
+class TestRequestEndpoint:
+    """``GET /v1/sessions/{id}/requests/{request_id}`` (#2471): a sent request,
+    rebuilt from its capture."""
+
+    async def test_a_sent_request_rebuilds_exactly_and_rerenders_on_request(
+        self, http_client: httpx.AsyncClient, harness: Harness
+    ) -> None:
+        from aios.harness.request_capture import forget_stored_blobs
+
+        forget_stored_blobs()
+        harness.script_model([assistant("hi there")])
+        session = await harness.start("hello")
+        await harness.run_until_idle(session.id)
+        events = await harness.all_events(session.id)
+        [span] = [
+            e for e in events if e.kind == "span" and e.data.get("event") == "model_request_start"
+        ]
+
+        resp = await http_client.get(f"/v1/sessions/{session.id}/requests/{span.id}")
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert (body["kind"], body["fidelity"]) == ("rebuilt", "exact")
+        assert body["request"]["messages"][0]["role"] == "system"
+
+        resp = await http_client.get(
+            f"/v1/sessions/{session.id}/requests/{span.id}", params={"model": "openai/other"}
+        )
+        assert resp.json()["fidelity"] == "rerendered"
+
+        not_a_request = next(e for e in events if e.kind == "message")
+        resp = await http_client.get(f"/v1/sessions/{session.id}/requests/{not_a_request.id}")
+        assert resp.status_code == 404
