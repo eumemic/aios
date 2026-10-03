@@ -66,6 +66,7 @@ from aios.models.triggers import (
     TriggerCreate,
     compute_initial_next_fire,
 )
+from aios.models.workflows import OperatorAuthority
 from aios.sandbox.snapshot_store import get_snapshot_store
 from aios.sandbox.volumes import (
     purge_session_directories,
@@ -1074,6 +1075,7 @@ async def invoke(
             input=input,
             caller=caller,
             output_schema=output_schema,
+            authority=OperatorAuthority(),
             # The external/API task caller has no launcher session from which a
             # shared workspace could be inherited. Keep this operator launch on
             # the valid isolated mode; agent launches retain the shared default.

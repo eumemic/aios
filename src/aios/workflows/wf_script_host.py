@@ -218,6 +218,7 @@ def invoke_workflow(
     version: int | None = None,
     output_schema: Any = None,
     label: str | None = None,
+    as_agent: dict[str, Any] | None = None,
 ) -> _Capability:
     """Invoke another workflow as a sub-run and await its result — the dual of
     :func:`agent` (which invokes a child *session*), keyed by id like
@@ -233,7 +234,9 @@ def invoke_workflow(
     raises :class:`AgentError` at the ``await``. ``label`` is an observability
     annotation and does not enter the call key. ``version`` pins the sub-run to that
     registered version of the workflow; omitted, it runs the version current at
-    launch.
+    launch. ``as_agent={"agent_id": ..., "version": N}`` (operator runs only) clamps the
+    sub-run to that agent version's surface as well, so an eval arm runs with the
+    authority that agent would give it.
     """
     annotations: dict[str, Any] = {}
     if label is not None:
@@ -250,6 +253,8 @@ def invoke_workflow(
     # had, so an in-flight run's memo still matches on replay.
     if version is not None:
         spec["version"] = version
+    if as_agent is not None:
+        spec["as_agent"] = as_agent
     return _Capability("invoke_workflow", spec, annotations)
 
 

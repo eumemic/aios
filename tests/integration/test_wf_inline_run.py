@@ -41,6 +41,7 @@ from aios.db.queries import workflows as wf_queries
 from aios.errors import ForbiddenError, ValidationError
 from aios.harness import runtime
 from aios.models.agents import ToolSpec
+from aios.models.workflows import OperatorAuthority, SessionAuthority
 from aios.services import agents as agents_service
 from aios.services import sessions as sessions_service
 from aios.workflows import run_tools, service
@@ -97,6 +98,7 @@ async def test_inline_run_creates_no_workflows_row(wf_pool: asyncpg.Pool[Any]) -
     run = await service.create_run(
         wf_pool,
         account_id="acc_inl",
+        authority=OperatorAuthority(),
         inline=InlineScript(script=_INLINE_SCRIPT),
         environment_id="env_inl",
         input=21,
@@ -115,6 +117,7 @@ async def test_inline_run_executes_and_completes(wf_pool: asyncpg.Pool[Any]) -> 
     run = await service.create_run(
         wf_pool,
         account_id="acc_inl",
+        authority=OperatorAuthority(),
         inline=InlineScript(script=_INLINE_SCRIPT),
         environment_id="env_inl",
         input=21,
@@ -143,6 +146,7 @@ async def test_inline_matches_register_then_run(wf_pool: asyncpg.Pool[Any]) -> N
     registered = await service.create_run(
         wf_pool,
         account_id="acc_inl",
+        authority=OperatorAuthority(),
         workflow_id=wf.id,
         environment_id="env_inl",
         input=21,
@@ -153,6 +157,7 @@ async def test_inline_matches_register_then_run(wf_pool: asyncpg.Pool[Any]) -> N
     inline = await service.create_run(
         wf_pool,
         account_id="acc_inl",
+        authority=OperatorAuthority(),
         inline=InlineScript(script=_INLINE_SCRIPT),
         environment_id="env_inl",
         input=21,
@@ -215,9 +220,9 @@ async def test_inline_surface_clamped_to_launcher_ok(wf_pool: asyncpg.Pool[Any])
     run = await service.create_run(
         wf_pool,
         account_id="acc_inl",
+        authority=SessionAuthority(session_id, None),
         inline=InlineScript(script=script, tools=[ToolSpec(type="bash")]),
         environment_id="env_inl",
-        launcher_session_id=session_id,
     )
     assert run.workflow_id is None
     assert [t.type for t in run.tools] == ["bash"]
@@ -234,9 +239,9 @@ async def test_inline_surface_exceeding_launcher_forbidden(wf_pool: asyncpg.Pool
         await service.create_run(
             wf_pool,
             account_id="acc_inl",
+            authority=SessionAuthority(session_id, None),
             inline=InlineScript(script=script, tools=[ToolSpec(type="bash")]),
             environment_id="env_inl",
-            launcher_session_id=session_id,
         )
 
 
@@ -247,6 +252,7 @@ async def test_inline_operator_surface_verbatim(wf_pool: asyncpg.Pool[Any]) -> N
     run = await service.create_run(
         wf_pool,
         account_id="acc_inl",
+        authority=OperatorAuthority(),
         inline=InlineScript(script=script, tools=[ToolSpec(type="bash")]),
         environment_id="env_inl",
     )
@@ -258,7 +264,9 @@ async def test_inline_operator_surface_verbatim(wf_pool: asyncpg.Pool[Any]) -> N
 
 async def test_neither_arm_is_validation_error(wf_pool: asyncpg.Pool[Any]) -> None:
     with pytest.raises(ValidationError):
-        await service.create_run(wf_pool, account_id="acc_inl", environment_id="env_inl")
+        await service.create_run(
+            wf_pool, account_id="acc_inl", authority=OperatorAuthority(), environment_id="env_inl"
+        )
 
 
 async def test_both_arms_is_validation_error(wf_pool: asyncpg.Pool[Any]) -> None:
@@ -270,6 +278,7 @@ async def test_both_arms_is_validation_error(wf_pool: asyncpg.Pool[Any]) -> None
         await service.create_run(
             wf_pool,
             account_id="acc_inl",
+            authority=OperatorAuthority(),
             workflow_id=wf.id,
             inline=InlineScript(script=_INLINE_SCRIPT),
             environment_id="env_inl",
@@ -281,6 +290,7 @@ async def test_version_rejected_on_inline_arm(wf_pool: asyncpg.Pool[Any]) -> Non
         await service.create_run(
             wf_pool,
             account_id="acc_inl",
+            authority=OperatorAuthority(),
             inline=InlineScript(script=_INLINE_SCRIPT),
             environment_id="env_inl",
             version=2,
@@ -294,6 +304,7 @@ async def test_inline_malformed_script_rejected(wf_pool: asyncpg.Pool[Any]) -> N
         await service.create_run(
             wf_pool,
             account_id="acc_inl",
+            authority=OperatorAuthority(),
             inline=InlineScript(script="def not_main():\n    return 1\n"),
             environment_id="env_inl",
         )

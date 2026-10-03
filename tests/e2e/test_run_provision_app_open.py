@@ -25,6 +25,7 @@ import pytest
 from aios.db.queries import workflows as wf_queries
 from aios.models.agents import ToolSpec
 from aios.models.environments import EnvironmentConfig, LimitedNetworking
+from aios.models.workflows import OperatorAuthority
 from aios.services import environments as environments_service
 from aios.workflows import service as workflows_service
 from tests.conftest import needs_docker
@@ -68,6 +69,7 @@ async def test_create_run_enqueues_wake_with_open_app(docker_harness: Harness) -
     run = await workflows_service.create_run(
         pool,
         account_id=_ACCOUNT_ID,
+        authority=OperatorAuthority(),
         workflow_id=workflow.id,
         environment_id=env.id,
     )

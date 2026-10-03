@@ -44,7 +44,7 @@ from aios.models.agents import (
 from aios.models.sessions import Err, Ok, Outcome
 from aios.models.workflows import (
     TERMINAL_RUN_STATUSES,
-    RunPrincipal,
+    AsAgent,
     RunReader,
     WfRun,
     WfRunEvent,
@@ -117,6 +117,11 @@ def _row_to_wf_run(row: asyncpg.Record) -> WfRun:
         parent_run_id=row["parent_run_id"],
         launcher_session_id=row["launcher_session_id"],
         principal=row["principal"],
+        as_agent=(
+            AsAgent(agent_id=row["as_agent_id"], version=row["as_agent_version"])
+            if row.get("as_agent_id") is not None
+            else None
+        ),
         visibility=row["visibility"],
         depth=row["depth"],
         request_id=row.get("request_id"),
@@ -577,33 +582,23 @@ async def get_visible_run(
     return run
 
 
-class RunLineage(NamedTuple):
-    """What a sub-launch reads off its parent run: the DOWN-counting trusted
-    invoke-depth (#1124) and the principal (#2467)."""
+async def get_run_depth(conn: asyncpg.Connection[Any], run_id: str, *, account_id: str) -> int:
+    """Read a run's DOWN-counting trusted invoke-depth (#1124), account-scoped.
 
-    depth: int
-    principal: RunPrincipal
-
-
-async def get_run_lineage(
-    conn: asyncpg.Connection[Any], run_id: str, *, account_id: str
-) -> RunLineage:
-    """Read a run's :class:`RunLineage`, account-scoped.
-
-    ``depth`` is the remaining trusted-edge budget on ``run_id`` — what a sub-launch
-    off this run may carry as ``depth - 1``. ACCOUNT-SCOPED: a foreign or missing parent
-    raises ``NotFoundError`` (the same-account trust the deleted ``run_ancestor_depth``
-    CTE enforced per hop, now a single point read). Both columns are immutable once
-    written, so the read is race-free without locking.
+    The remaining trusted-edge budget on ``run_id`` — what a sub-launch off this run
+    may carry as ``depth - 1``. ACCOUNT-SCOPED: a foreign or missing parent raises
+    ``NotFoundError`` (the same-account trust the deleted ``run_ancestor_depth`` CTE
+    enforced per hop, now a single point read). The depth is immutable once written,
+    so the read is race-free without locking.
     """
-    row = await conn.fetchrow(
-        "SELECT depth, principal FROM wf_runs WHERE id = $1 AND account_id = $2",
+    depth: int | None = await conn.fetchval(
+        "SELECT depth FROM wf_runs WHERE id = $1 AND account_id = $2",
         run_id,
         account_id,
     )
-    if row is None:
+    if depth is None:
         raise NotFoundError(f"workflow run {run_id} not found", detail={"id": run_id})
-    return RunLineage(depth=row["depth"], principal=row["principal"])
+    return depth
 
 
 async def list_wf_runs(
@@ -744,6 +739,7 @@ async def insert_wf_run(
     workspace: str = "fresh",
     workspace_path: str | None = None,
     trigger_id: str | None = None,
+    as_agent: AsAgent | None = None,
 ) -> WfRun:
     """Insert a fresh ``pending`` run that snapshots ``script`` (+ ``script_sha``) and the
     declared tool surface (``tools``/``mcp_servers``/``http_servers``) — pinned at launch.
@@ -796,11 +792,11 @@ async def insert_wf_run(
                  script, script_sha, source_version, host_semantics_epoch, status, input,
                  tools, mcp_servers, http_servers, budget_total_microusd, default_child_model,
                  depth, tools_vocab_epoch, creator_session_id, creator_run_id, ssh_servers,
-                 trigger_id)
+                 trigger_id, as_agent_id, as_agent_version)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10, $11, $12, $13, $14, $15,
                     'pending', $16::jsonb,
                     $17::jsonb, $18::jsonb, $19::jsonb, $20, $21, $22, $23, $24, $25, $26::jsonb,
-                    $27)
+                    $27, $28, $29)
             ON CONFLICT (id) DO NOTHING
             RETURNING *
             """,
@@ -831,6 +827,8 @@ async def insert_wf_run(
             creator_run_id,
             json.dumps([s.model_dump() for s in (ssh_servers or [])]),
             trigger_id,
+            as_agent.agent_id if as_agent is not None else None,
+            as_agent.version if as_agent is not None else None,
         )
     except asyncpg.ForeignKeyViolationError as exc:
         raise NotFoundError(
@@ -2032,7 +2030,8 @@ async def sub_run_facts(
         runs = {
             r["id"]: r
             for r in await conn.fetch(
-                "SELECT id, workflow_id, source_version, status, terminal_summary, created_at "
+                "SELECT id, workflow_id, source_version, as_agent_id, as_agent_version, status, "
+                "terminal_summary, created_at "
                 "FROM wf_runs WHERE account_id = $1 AND id = ANY($2)",
                 account_id,
                 run_ids,
@@ -2093,6 +2092,11 @@ async def sub_run_facts(
             node |= {
                 "workflow_id": run["workflow_id"],
                 "workflow_version": run["source_version"],
+                "as_agent": (
+                    {"agent_id": run["as_agent_id"], "version": run["as_agent_version"]}
+                    if run["as_agent_id"] is not None
+                    else None
+                ),
                 "status": run["status"],
                 "started_at": _iso(run["created_at"]),
                 "duration_ms": summary.get("duration_ms") if summary is not None else None,

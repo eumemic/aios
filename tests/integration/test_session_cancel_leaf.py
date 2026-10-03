@@ -25,6 +25,7 @@ from aios.errors import NotFoundError
 from aios.harness.inflight_tool_registry import InflightToolRegistry
 from aios.harness.sweep import find_sessions_needing_inference
 from aios.models.sessions import Err, Ok
+from aios.models.workflows import OperatorAuthority
 from aios.services import sessions as service
 from aios.services import tasks as tasks_service
 from tests.integration.conftest import seed_agent_env_session
@@ -234,7 +235,12 @@ async def test_cancel_task_run_seeds_signal_and_tombstone(
             tools=[],
         )
         run = await wf_service.create_run(
-            pool, account_id=_ACCOUNT, workflow_id=wf.id, environment_id=env_id, input=None
+            pool,
+            account_id=_ACCOUNT,
+            authority=OperatorAuthority(),
+            workflow_id=wf.id,
+            environment_id=env_id,
+            input=None,
         )
         await tasks_service.cancel_task(
             pool,

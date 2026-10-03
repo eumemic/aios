@@ -39,7 +39,14 @@ from aios.models.agents import (
     resolve_ssh_server_refs,
 )
 from aios.models.attenuation import Surface, surface_diff, surface_of
-from aios.models.workflows import WfRun
+from aios.models.workflows import (
+    OperatorAuthority,
+    RunAuthority,
+    RunAuthoritySource,
+    RunPrincipal,
+    SessionAuthority,
+    WfRun,
+)
 from aios.sandbox.volumes import run_workspace_dir
 from aios.services import agents as agents_service
 from aios.services import attenuation as attenuation_service
@@ -210,13 +217,12 @@ async def create_run(
     pool: asyncpg.Pool[Any],
     *,
     account_id: str,
+    authority: RunAuthoritySource,
     workflow_id: str | None = None,
     inline: InlineScript | None = None,
     environment_id: str,
     input: Any = None,
     vault_ids: list[str] | None = None,
-    launcher_session_id: str | None = None,
-    parent_run_id: str | None = None,
     run_id: str | None = None,
     request_id: str | None = None,
     caller: dict[str, Any] | None = None,
@@ -256,22 +262,31 @@ async def create_run(
     It is validated as account-owned (``[security]``: a bare FK would accept another
     tenant's env id and leak its image/env-vars/networking into this run).
 
-    ``vault_ids`` binds credentials to the run (resolved at tool-call time, like a
-    session's). When ``launcher_session_id`` is set, omitted/null snapshots all vaults
-    currently held by that session, an explicit empty list binds none, and a nonempty
-    list narrows to that subset. **Launch-time attenuation:** requested vaults must be a
-    subset of the launcher's own — authority never exceeds the invoker, so a breach raises
-    :class:`ForbiddenError`. With no launcher (the HTTP/operator path) the requested
-    vaults bind as-is, account-scoped. Insert + bind are one transaction, so a breach
-    or a bad vault leaves no run row; the wake fires only after commit.
+    ``authority`` is who the run acts under, and it bounds the run (#794, #2472):
 
-    ``parent_run_id`` records run lineage (an agent inside a run launching a sub-run).
-    It also drives the **DOWN-counting trusted depth budget** (#1124): the new run
-    carries ``parent.depth - 1`` and the launch is **refused before any row is written**
-    when the parent run has no budget left — :class:`WorkflowRunDepthExceededError`. The
-    operator/HTTP path passes no parent, so it is an **edgeless root** seeded at the full
-    budget (``INVOKE_MAX_DEPTH``) — a chain launched off it still bottoms out at the
-    budget by construction.
+    * :class:`OperatorAuthority` — the lattice top: the workflow's surface binds as-is
+      and the requested vaults bind as-is, account-scoped.
+    * :class:`SessionAuthority` — the session's *current* surface and vaults.
+    * :class:`RunAuthority` — a sub-run: its parent run's *frozen* surface and vaults,
+      so a chain never widens past its root whatever happens to the launching session
+      later. ``as_agent`` (operator runs only) re-roots the surface bound at an agent
+      version, within the parent's.
+
+    The snapshotted surface is ``clamp(workflow surface, bound)``. ``vault_ids`` binds
+    credentials to the run (resolved at tool-call time, like a session's): omitted/null
+    inherits every vault the authority holds, an explicit empty list binds none, and a
+    nonempty list must be a subset of them, else :class:`ForbiddenError`. Insert + bind
+    are one transaction, so a breach or a bad vault leaves no run row; the wake fires
+    only after commit. The 0184 insert trigger stamps the run's ``principal``; this
+    asserts it agrees with the authority.
+
+    The lineage parent (``SessionAuthority.parent_run_id``, or a sub-run's parent run)
+    drives the **DOWN-counting trusted depth budget** (#1124): the new run carries
+    ``parent.depth - 1`` and the launch is **refused before any row is written** when
+    the parent run has no budget left — :class:`WorkflowRunDepthExceededError`. A run
+    with no lineage parent is an **edgeless root** seeded at the full budget
+    (``INVOKE_MAX_DEPTH``) — a chain launched off it still bottoms out at the budget by
+    construction.
 
     ``expected_version`` is the trigger ``workflow`` action's drift-assertion pin:
     when set, the workflow's CURRENT version must equal it or the launch raises
@@ -288,14 +303,15 @@ async def create_run(
     drift check (a version row has no ``archived_at``, so substituting it would
     silently drop the gate), while the chosen ``get_workflow_version`` drives the
     snapshotted script + surface. **Any version of an archived workflow is refused.**
-    The chosen version's declared surface is clamped against the *current* launcher
+    The chosen version's declared surface is clamped against the authority's bound
     (the clamp is the real bound — a re-run can reproduce an old surface but never
-    exceed the launcher's present authority). The run's ``source_version`` is bound
+    exceed the authority it launches under). The run's ``source_version`` is bound
     to the snapshotted version via a strict composite FK; the run still execs its
     own inline ``script`` copy (reading through the FK is deferred Phase 3).
 
     **Horizontal fan-out caps:** outstanding (non-terminal) runs are bounded per
-    launcher session (``workflow_runs_per_launcher_max``, agent path only) and per
+    launcher session (``workflow_runs_per_launcher_max``; a sub-run counts against its
+    parent's launcher) and per
     account (``workflow_runs_per_account_max``, every launch) — a breach raises
     :class:`RateLimitedError`. COUNT+INSERT are serialized by a per-account advisory
     lock, so the caps are contractual against concurrent launches. (A concurrently
@@ -310,7 +326,7 @@ async def create_run(
     """
     # A shared workspace is inherited from a launcher session. Reject an impossible
     # pointer before minting an id, acquiring a connection, inserting a row, or waking.
-    if workspace == "shared" and launcher_session_id is None:
+    if workspace == "shared" and not isinstance(authority, SessionAuthority):
         raise ValidationError(
             "workspace='shared' requires a launcher session",
             detail={"field": "workspace", "value": "shared"},
@@ -328,19 +344,15 @@ async def create_run(
             "version / expected_version are not valid for an inline run "
             "(an inline run has no workflow version history)",
         )
-    # Preserve the caller's three-way selection: None inherits a session launcher's
-    # current bindings, while [] is deliberate attenuation. Operator launches have
-    # no authority source to inherit from, so omitted remains none there.
+    if inline is not None and isinstance(authority, RunAuthority):
+        # ``invoke_workflow`` names a registered workflow; an inline script has no
+        # sub-run path, and its surface check resolves names against an agent.
+        raise ValidationError("an inline script can't be launched as a sub-run")
+    # Preserve the caller's three-way selection: None inherits the authority's
+    # current bindings, while [] is deliberate attenuation. An operator launch has
+    # nothing to inherit from, so omitted remains none there.
     requested = list(vault_ids) if vault_ids is not None else []
     effective_run_id = run_id or make_id(WORKFLOW_RUN)
-    # #794 top edge: an agent-launched run cannot exceed the launcher's own surface.
-    # #835: the launcher's effective surface is read INSIDE the run transaction (below),
-    # threading `conn` into load_for_session — the same consistency point as the vault
-    # check and the snapshot write, so a concurrent agent edit can't land a stale-broad
-    # snapshot. The operator/HTTP path (no launcher) is the lattice top — the run
-    # snapshots the workflow verbatim. Threading `conn` (vs a second pool.acquire())
-    # keeps the whole path single-connection, so it is safe on a size-1 pool.
-    launcher_surface: Surface | None = None
     run_default_child_model = default_child_model or get_settings().workflow_default_child_model
     async with pool.acquire() as conn, conn.transaction():
         # Idempotent re-attach (#1129): a deterministic ``run_id`` is the
@@ -356,27 +368,71 @@ async def create_run(
             if existing is not None and existing.account_id == account_id:
                 return existing
         await get_environment(conn, environment_id, account_id=account_id)  # 404s foreign/absent
-        # Read the launcher's surface ONCE up front (#835: inside the txn, threading
-        # ``conn``, the same consistency point as the snapshot write). Both arms need
-        # it: the registered arm to silently clamp the snapshotted surface, the inline
-        # arm to *enforce* attenuation (ForbiddenError on exceed).
+        # Resolve the authority ONCE up front, inside the txn (#835: the same
+        # consistency point as the vault check and the snapshot write, so a concurrent
+        # edit can't land a stale-broad snapshot; threading ``conn`` keeps the path
+        # single-connection, so it is safe on a size-1 pool). ``bound`` is the surface
+        # the snapshot is clamped to (None: the operator's lattice top); ``held`` the
+        # vaults the run may bind (None: unbounded); ``principal`` what the 0184 insert
+        # trigger must stamp.
         launcher_agent = None
-        if launcher_session_id is not None:
-            launcher_session = await get_session_bare(
-                conn, launcher_session_id, account_id=account_id
-            )
-            launcher_agent = await agents_service.load_for_session(
-                pool, launcher_session, account_id=account_id, conn=conn
-            )
-            launcher_surface = surface_of(launcher_agent)
-            run_default_child_model = launcher_agent.model
-            workspace_path = (
-                await get_session_workspace_path(conn, launcher_session_id, account_id=account_id)
-                if workspace == "shared"
-                else None
-            )
-        else:
-            workspace_path = None
+        launcher_session_id: str | None = None
+        parent_run_id: str | None = None
+        bound: Surface | None = None
+        held: list[str] | None = None
+        workspace_path: str | None = None
+        principal: RunPrincipal
+        match authority:
+            case OperatorAuthority():
+                principal = "operator"
+            case SessionAuthority():
+                launcher_session_id = authority.session_id
+                parent_run_id = authority.parent_run_id
+                launcher_session = await get_session_bare(
+                    conn, launcher_session_id, account_id=account_id
+                )
+                launcher_agent = await agents_service.load_for_session(
+                    pool, launcher_session, account_id=account_id, conn=conn
+                )
+                bound = surface_of(launcher_agent)
+                held = await get_session_vault_ids(conn, launcher_session_id, account_id=account_id)
+                run_default_child_model = launcher_agent.model
+                principal = "session"
+                if workspace == "shared":
+                    workspace_path = await get_session_workspace_path(
+                        conn, launcher_session_id, account_id=account_id
+                    )
+            case RunAuthority():
+                # A sub-run acts within its parent's FROZEN surface and vaults, not its
+                # launching session's current ones: that session may since have widened
+                # or been deleted, and an operator chain has none (#2472).
+                parent_run = await wf_queries.get_wf_run(
+                    conn, authority.run_id, account_id=account_id
+                )
+                bound = surface_of(parent_run)
+                if authority.as_agent is not None:
+                    if parent_run.principal != "operator":
+                        raise ForbiddenError(
+                            "as_agent is only available to runs an operator launched",
+                            detail={"parent_run_id": parent_run.id},
+                        )
+                    agent_version = await queries.get_agent_version(
+                        conn,
+                        authority.as_agent.agent_id,
+                        authority.as_agent.version,
+                        account_id=account_id,
+                    )
+                    # The parent is the meet's second argument, so its MCP headers,
+                    # vault pins and HTTP routes and gates are the ones kept.
+                    bound = attenuation_service.clamp(surface_of(agent_version), bound)
+                held = await wf_queries.get_run_vault_ids(
+                    conn, parent_run.id, account_id=account_id
+                )
+                if parent_run.default_child_model is not None:
+                    run_default_child_model = parent_run.default_child_model
+                launcher_session_id = parent_run.launcher_session_id
+                parent_run_id = parent_run.id
+                principal = parent_run.principal
         if workspace == "fresh":
             workspace_path = str(run_workspace_dir(account_id, effective_run_id))
         source_version: int | None
@@ -443,11 +499,11 @@ async def create_run(
                 source_script = source.script
                 source_surface = surface_of(source)
                 source_version = source.version
-            # Clamp the snapshot to the launcher's surface (sub-runs compose for free: a
-            # child launcher's load_for_session already returns its frozen clamp).
+            # Clamp the snapshot to the authority's bound. A session that is itself a
+            # workflow child already reads its frozen clamp through load_for_session.
             effective = (
-                attenuation_service.clamp(source_surface, launcher_surface)
-                if launcher_surface is not None
+                attenuation_service.clamp(source_surface, bound)
+                if bound is not None
                 else source_surface
             )
         script_sha = hashlib.sha256(source_script.encode("utf-8")).hexdigest()
@@ -459,46 +515,33 @@ async def create_run(
         if parent_run_id is None:
             child_depth = INVOKE_MAX_DEPTH
         else:
-            # ``parent_run_id`` is trusted same-account. Two callers set it: the
-            # ``call_workflow`` builtin, threading the launcher session's own
-            # ``parent_run_id`` (set by the run-spawn machinery to a same-account
-            # run), and the trigger fire path (#819), threading either the
+            # ``parent_run_id`` is trusted same-account: a sub-run's parent came from
+            # the account-scoped read above, and a session authority's lineage parent
+            # is either the session's own ``parent_run_id`` (set by the run-spawn
+            # machinery to a same-account run) or, for a trigger fire (#819), the
             # completing run's id (same-account by the completion matcher's
-            # account-equality conjunct) or the owner session's own
-            # ``parent_run_id`` — the same provenance as the builtin. The
-            # account-scoped read relies on that — a foreign/missing parent
-            # raises NotFoundError. If a future path ever lets ``parent_run_id``
-            # be caller-supplied, this same-account read is the gate (like
-            # ``environment_id`` above).
-            parent = await wf_queries.get_run_lineage(conn, parent_run_id, account_id=account_id)
-            # #2467: a run whose launching session was deleted still acts for that
-            # session, but the launcher clamp above has no surface left to read.
-            # Launching unclamped would hand the sub-workflow its whole declared surface.
-            if parent.principal != "operator" and launcher_session_id is None:
-                raise ForbiddenError(
-                    "the session that launched this run no longer exists, so the run "
-                    "can't launch sub-runs",
-                    detail={"parent_run_id": parent_run_id},
-                )
+            # account-equality conjunct). This account-scoped read is still the gate:
+            # a foreign/missing parent raises NotFoundError.
+            parent_depth = await wf_queries.get_run_depth(
+                conn, parent_run_id, account_id=account_id
+            )
             # Refuse-before-write: a parent with one (or zero) hop left cannot open
             # another trusted edge — the child would be born at depth 0 with no way
             # to bottom the chain out at the budget. The decrement IS the cycle
             # bound; this is the only depth refusal, no wait-for-graph.
-            if parent.depth <= 1:
+            if parent_depth <= 1:
                 raise WorkflowRunDepthExceededError(
                     f"trusted invoke-edge would exceed depth budget {INVOKE_MAX_DEPTH}",
                     detail={"max_depth": INVOKE_MAX_DEPTH, "parent_run_id": parent_run_id},
                 )
-            child_depth = parent.depth - 1
-        if launcher_session_id is not None:
-            held_ids = await get_session_vault_ids(conn, launcher_session_id, account_id=account_id)
-            held = set(held_ids)
+            child_depth = parent_depth - 1
+        if held is not None:
             if vault_ids is None:
-                requested = list(held_ids)
+                requested = list(held)
             ungranted = [v for v in requested if v not in held]
             if ungranted:
                 raise ForbiddenError(
-                    "run requested vaults the launching agent does not hold",
+                    "run requested vaults its launcher does not hold",
                     detail={"ungranted_vault_ids": ungranted},
                 )
         # Fan-out caps, last (after all other validation, so a doomed launch never
@@ -584,6 +627,10 @@ async def create_run(
             default_child_model=run_default_child_model,
             depth=child_depth,
             trigger_id=trigger_id,
+            as_agent=authority.as_agent if isinstance(authority, RunAuthority) else None,
+        )
+        assert run.principal == principal, (
+            f"insert trigger stamped principal {run.principal!r}, authority implies {principal!r}"
         )
         if requested:
             await wf_queries.set_run_vaults(conn, run.id, requested, account_id=account_id)

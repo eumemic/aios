@@ -15,6 +15,7 @@ from ..models.wf_run_workspace import WfRunWorkspace
 from ..types import UNSET, Unset
 
 if TYPE_CHECKING:
+    from ..models.as_agent import AsAgent
     from ..models.http_server_spec import HttpServerSpec
     from ..models.mcp_server_spec import McpServerSpec
     from ..models.ssh_server_spec import SshServerSpec
@@ -71,6 +72,9 @@ class WfRun:
             workspace_path (None | str | Unset):
             parent_run_id (None | str | Unset):
             launcher_session_id (None | str | Unset):
+            as_agent (AsAgent | None | Unset): Set when an operator run invoked this run with `as_agent`: the agent version
+                whose surface it was clamped to, within the parent run's. Only the surface changes; the model and vaults still
+                come from the parent run.
             depth (int | Unset):  Default: 0.
             request_id (None | str | Unset):
             caller (None | Unset | WfRunCallerType0):
@@ -110,6 +114,7 @@ class WfRun:
     workspace_path: None | str | Unset = UNSET
     parent_run_id: None | str | Unset = UNSET
     launcher_session_id: None | str | Unset = UNSET
+    as_agent: AsAgent | None | Unset = UNSET
     depth: int | Unset = 0
     request_id: None | str | Unset = UNSET
     caller: None | Unset | WfRunCallerType0 = UNSET
@@ -133,6 +138,7 @@ class WfRun:
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
+        from ..models.as_agent import AsAgent
         from ..models.usage_node_ref import UsageNodeRef
         from ..models.wf_run_caller_type_0 import WfRunCallerType0
         from ..models.wf_run_request_output_schema_type_0 import (
@@ -192,6 +198,14 @@ class WfRun:
             launcher_session_id = UNSET
         else:
             launcher_session_id = self.launcher_session_id
+
+        as_agent: dict[str, Any] | None | Unset
+        if isinstance(self.as_agent, Unset):
+            as_agent = UNSET
+        elif isinstance(self.as_agent, AsAgent):
+            as_agent = self.as_agent.to_dict()
+        else:
+            as_agent = self.as_agent
 
         depth = self.depth
 
@@ -339,6 +353,8 @@ class WfRun:
             field_dict["parent_run_id"] = parent_run_id
         if launcher_session_id is not UNSET:
             field_dict["launcher_session_id"] = launcher_session_id
+        if as_agent is not UNSET:
+            field_dict["as_agent"] = as_agent
         if depth is not UNSET:
             field_dict["depth"] = depth
         if request_id is not UNSET:
@@ -384,6 +400,7 @@ class WfRun:
 
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
+        from ..models.as_agent import AsAgent
         from ..models.http_server_spec import HttpServerSpec
         from ..models.mcp_server_spec import McpServerSpec
         from ..models.ssh_server_spec import SshServerSpec
@@ -465,6 +482,23 @@ class WfRun:
         launcher_session_id = _parse_launcher_session_id(
             d.pop("launcher_session_id", UNSET)
         )
+
+        def _parse_as_agent(data: object) -> AsAgent | None | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            try:
+                if not isinstance(data, dict):
+                    raise TypeError()
+                as_agent_type_0 = AsAgent.from_dict(data)
+
+                return as_agent_type_0
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            return cast(AsAgent | None | Unset, data)
+
+        as_agent = _parse_as_agent(d.pop("as_agent", UNSET))
 
         depth = d.pop("depth", UNSET)
 
@@ -695,6 +729,7 @@ class WfRun:
             workspace_path=workspace_path,
             parent_run_id=parent_run_id,
             launcher_session_id=launcher_session_id,
+            as_agent=as_agent,
             depth=depth,
             request_id=request_id,
             caller=caller,
