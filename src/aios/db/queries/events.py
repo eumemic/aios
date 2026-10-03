@@ -2603,18 +2603,18 @@ async def read_windowed_context_events(
     session_id: str,
     *,
     account_id: str,
-    drop: int | None = None,
+    after_seq: int | None = None,
 ) -> list[Event]:
     """Events the context builder needs, in seq order: message events plus
     the model-visible FS-loss notices (``kind='lifecycle'`` whose ``event``
     is in :data:`MODEL_VISIBLE_LIFECYCLE_EVENTS`).
 
-    ``drop=None`` loads the full log. ``drop=N`` keeps messages with
-    ``cumulative_tokens > N`` plus notices past the dropped-message prefix
-    (``seq`` greater than the max seq among dropped messages). The notices
-    carry NULL ``cumulative_tokens``, so they window out by *seq* alongside
-    their surrounding messages, not by the token boundary — a notice scrolls
-    out of context exactly when the messages around its reset point do.
+    ``after_seq=None`` loads the full log. ``after_seq=N`` keeps the slate past a
+    window boundary: messages (with a ``cumulative_tokens``) and notices whose
+    ``seq`` is greater than ``N``, the seq of the last dropped message (0 when the
+    drop excludes no message). One boundary for both kinds, so a notice scrolls
+    out of context exactly when the messages around its reset point do, and a
+    request rebuild (#2471) can re-read the same slate from the recorded bound.
 
     ``read_message_events`` stays message-only (its other callers — e.g.
     ``confirm_tool_deny`` — must not see lifecycle rows); this is the
@@ -2622,11 +2622,11 @@ async def read_windowed_context_events(
     """
     allowlist = list(MODEL_VISIBLE_LIFECYCLE_EVENTS)
     # UNION ALL (not an OR across kinds) so each arm keeps its own index plan:
-    # the message arm stays a clean ``cumulative_tokens`` partial-index range
-    # scan. An ``OR`` spanning both kinds would defeat that index on every
-    # windowed wake, even for the common session with no FS-loss notices. The
-    # arms are disjoint by ``kind``, so ALL (no dedup) is correct and cheaper.
-    if drop is None:
+    # the message arm stays a clean range scan on the message-seq partial index.
+    # An ``OR`` spanning both kinds would defeat that index on every windowed
+    # wake, even for the common session with no FS-loss notices. The arms are
+    # disjoint by ``kind``, so ALL (no dedup) is correct and cheaper.
+    if after_seq is None:
         rows = await conn.fetch(
             "SELECT * FROM events "
             "WHERE session_id = $1 AND account_id = $2 AND kind = 'message' "
@@ -2640,24 +2640,18 @@ async def read_windowed_context_events(
             allowlist,
         )
     else:
-        # Notices are seq-bounded, not token-bounded: include those past the
-        # last dropped message (COALESCE handles "nothing dropped" → seq > 0).
         rows = await conn.fetch(
             "SELECT * FROM events "
-            "WHERE session_id = $1 AND account_id = $3 "
-            "AND kind = 'message' AND cumulative_tokens > $2 "
+            "WHERE session_id = $1 AND account_id = $2 "
+            "AND kind = 'message' AND seq > $3 AND cumulative_tokens IS NOT NULL "
             "UNION ALL "
             "SELECT * FROM events "
-            "WHERE session_id = $1 AND account_id = $3 "
-            "AND kind = 'lifecycle' AND data->>'event' = ANY($4) "
-            "AND seq > COALESCE("
-            "    (SELECT max(seq) FROM events "
-            "     WHERE session_id = $1 AND account_id = $3 "
-            "     AND kind = 'message' AND cumulative_tokens <= $2), 0) "
+            "WHERE session_id = $1 AND account_id = $2 "
+            "AND kind = 'lifecycle' AND data->>'event' = ANY($4) AND seq > $3 "
             "ORDER BY seq ASC",
             session_id,
-            drop,
             account_id,
+            after_seq,
             allowlist,
         )
     return [_row_to_event(r) for r in rows]
@@ -2940,37 +2934,37 @@ async def read_windowed_events(
     stimulus_cum = await _latest_cumulative_tokens(conn, session_id, stimulus_only=True)
     drop = min(drop, (stimulus_cum if stimulus_cum is not None else total) - 1)
 
-    # Bounded range scan: messages past the boundary, plus the FS-loss
-    # notices past the dropped-message prefix. Bare call (not via ``queries``)
-    # so the fallback stub on the package attribute does not intercept the
-    # retained-window read — keeping the unit FakeConn path exercised.
-    events = await read_windowed_context_events(conn, session_id, account_id=account_id, drop=drop)
-
-    # The omitted complement: same boundary expression as the retained
-    # scan (``<=`` vs ``>``), a seq-prefix of the log. Its ``omitted_messages``
-    # (user+assistant only) is now the boundary row's ``cumulative_messages``
-    # running count -- O(1), the escape hatch the in-code comment named
-    # (issue #1657): the boundary row is the message with the greatest
-    # ``cumulative_tokens <= drop`` (one index seek on the same
-    # ``events_session_cumtokens_idx``), and its running count IS the count of
-    # user/assistant messages through it = the omitted count. ``began_at`` is
-    # the conversation start = the FIRST message's ``created_at`` (a seq-ASC
-    # LIMIT 1 index seek, not a ``min()`` aggregate scan). NULL boundary row
-    # means the drop excludes no message (oversized first event straddling it)
-    # -> no omission.
+    # The boundary row: the last dropped message, i.e. the greatest
+    # ``cumulative_tokens <= drop`` (one index seek on
+    # ``events_session_cumtokens_idx``; ``seq`` breaks a tie between equal running
+    # sums). ``cumulative_tokens`` is a running sum, so the dropped messages are a
+    # seq-prefix of the log and the boundary row's ``seq`` IS the slate's lower
+    # bound: the retained slate is everything after it. Its ``cumulative_messages``
+    # running count is the omitted user+assistant count -- O(1) (issue #1657).
+    # NULL boundary row means the drop excludes no message (oversized first event
+    # straddling it) -> no omission, and the slate starts after seq 0.
     boundary_row = await conn.fetchrow(
-        "SELECT cumulative_messages, created_at "
+        "SELECT seq, cumulative_messages "
         "FROM events "
         "WHERE session_id = $1 AND account_id = $3 AND kind = 'message' "
         "AND cumulative_tokens <= $2 "
-        "ORDER BY cumulative_tokens DESC LIMIT 1",
+        "ORDER BY cumulative_tokens DESC, seq DESC LIMIT 1",
         session_id,
         drop,
         account_id,
     )
+    after_seq = boundary_row["seq"] if boundary_row is not None else 0
+
+    # Bounded range scan: messages and FS-loss notices past the boundary. Bare
+    # call (not via ``queries``) so the fallback stub on the package attribute
+    # does not intercept the retained-window read — keeping the unit FakeConn
+    # path exercised.
+    events = await read_windowed_context_events(
+        conn, session_id, account_id=account_id, after_seq=after_seq
+    )
     if boundary_row is None:
         # Nothing omitted.
-        return WindowedEvents(events=events, omission=None, floor=floor)
+        return WindowedEvents(events=events, omission=None, floor=floor, after_seq=after_seq)
 
     omitted_messages = boundary_row["cumulative_messages"]
     if omitted_messages is None:
@@ -3002,7 +2996,7 @@ async def read_windowed_events(
         account_id,
     )
     omission = WindowOmission(began_at=began_at, omitted_messages=omitted_messages)
-    return WindowedEvents(events=events, omission=omission, floor=floor)
+    return WindowedEvents(events=events, omission=omission, floor=floor, after_seq=after_seq)
 
 
 async def find_latest_model_workflow_park(

@@ -459,6 +459,12 @@ def _drop() -> int:
     return _WINDOW_STATE["window_tokens"]
 
 
+def _after_seq() -> int:
+    """The slate's lower bound for ``_drop()``: the last dropped message's seq.
+    Message ``g`` sits at seq ``g`` with running sum ``g * _DELTA`` here."""
+    return _drop() // _DELTA
+
+
 # The exact SQL each hot read issues (mirrors db/queries/events.py post-#1657).
 _SQL_LATEST_CUMULATIVE = (
     "SELECT cumulative_tokens FROM events "
@@ -480,15 +486,15 @@ _SQL_RETAINED_WINDOW = (
     "SELECT id, session_id, seq, kind, data, created_at, role "
     "FROM events "
     "WHERE session_id = $1 AND account_id = $2 AND kind = 'message' "
-    "AND cumulative_tokens > $3 "
+    "AND seq > $3 AND cumulative_tokens IS NOT NULL "
     "ORDER BY seq ASC"
 )
 
 _SQL_OMISSION_BOUNDARY = (
-    "SELECT cumulative_messages, created_at FROM events "
+    "SELECT seq, cumulative_messages FROM events "
     "WHERE session_id = $1 AND account_id = $2 AND kind = 'message' "
     "AND cumulative_tokens <= $3 "
-    "ORDER BY cumulative_tokens DESC LIMIT 1"
+    "ORDER BY cumulative_tokens DESC, seq DESC LIMIT 1"
 )
 
 _SQL_BEGAN_AT = (
@@ -578,7 +584,7 @@ HOT_PATH_READS: list[HotRead] = [
         name="read_windowed_context_events",
         declared_complexity="O(W)",
         sql=_SQL_RETAINED_WINDOW,
-        args=lambda: (_SESSION_ID, _ACCOUNT_ID, _drop()),
+        args=lambda: (_SESSION_ID, _ACCOUNT_ID, _after_seq()),
         max_rows=_OW_ROW_CEIL,
     ),
     HotRead(
@@ -984,7 +990,8 @@ class TestLifecycleArmPlanShapeGate:
                 f"EXPLAIN (FORMAT JSON) {_SQL_RETAINED_WINDOW}",
                 _SESSION_ID_LIFECYCLE,
                 _ACCOUNT_ID,
-                _N_LARGE * _DELTA // 2,
+                # Interleaved lifecycle rows put message ``g`` at seq ``2g - 1``.
+                2 * (_N_LARGE // 2) - 1,
             )
         if isinstance(result, str):
             result = json.loads(result)
@@ -1313,8 +1320,8 @@ class TestAdvisoryScalingBackstop:
         # The windowed retained-slate read against a fixed-fraction drop: an
         # O(W) read whose window grows with N here (drop == half), so this is
         # the most demanding advisory case. It must still stay well under 2.5x.
-        small_args = (_SESSION_ID_SMALL, _ACCOUNT_ID, _N_SMALL * _DELTA // 2)
-        large_args = (_SESSION_ID, _ACCOUNT_ID, _N_LARGE * _DELTA // 2)
+        small_args = (_SESSION_ID_SMALL, _ACCOUNT_ID, _N_SMALL // 2)
+        large_args = (_SESSION_ID, _ACCOUNT_ID, _N_LARGE // 2)
         t1 = await _time_read(two_scale_pool, _SQL_RETAINED_WINDOW, small_args, repeats=_M_REPEATS)
         t2 = await _time_read(two_scale_pool, _SQL_RETAINED_WINDOW, large_args, repeats=_M_REPEATS)
         ratio = t2 / t1 if t1 > 0 else float("inf")
