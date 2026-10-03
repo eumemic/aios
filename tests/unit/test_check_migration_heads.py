@@ -176,3 +176,44 @@ def test_known_good_repository_has_expected_revision_count_and_one_head() -> Non
     # deletions becomes the thing that fails CI.
     assert len(revisions) == 169
     assert check_history(revisions) in revisions
+
+
+@pytest.mark.parametrize(
+    "branch_only",
+    [
+        {"0160": "0160"},
+        {"0160": "0161", "0161": "0160"},
+        {"0160": "0159", "0161": "0162", "0162": "0161"},
+    ],
+)
+def test_rejects_cyclic_or_disconnected_branch_migrations(branch_only: dict[str, str]) -> None:
+    base: dict[str, str | None] = {"0158": None, "0159": "0158"}
+
+    with pytest.raises(MigrationHistoryError):
+        check_against_base({**base, **branch_only}, base)
+
+
+def test_rejects_cycle_in_plain_history() -> None:
+    with pytest.raises(MigrationHistoryError):
+        check_history({"0158": None, "0159": "0158", "0160": "0161", "0161": "0160"})
+
+
+def test_cli_rejects_self_parented_branch_migration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from scripts import check_migration_heads
+
+    base_dir = tmp_path / "base"
+    branch_dir = tmp_path / "branch"
+    base_dir.mkdir()
+    branch_dir.mkdir()
+    for directory in (base_dir, branch_dir):
+        _migration(directory / "0158.py", "0158", None)
+        _migration(directory / "0159.py", "0159", "0158")
+    _migration(branch_dir / "0160.py", "0160", "0160")
+    monkeypatch.setattr(
+        "sys.argv",
+        ["check_migration_heads", str(branch_dir), "--base-versions-dir", str(base_dir)],
+    )
+
+    assert check_migration_heads.main() == 1

@@ -52,6 +52,27 @@ def _heads(revisions: dict[str, str | None]) -> list[str]:
     return sorted(set(revisions) - {parent for parent in revisions.values() if parent is not None})
 
 
+def _require_reachable(revisions: dict[str, str | None], head: str) -> None:
+    """Every revision must lie on the down_revision walk from ``head`` to ``None``.
+
+    ``_heads`` treats a self-parented revision, or any member of a cycle, as a
+    non-head, so a single head does not by itself prove a connected history.
+    """
+    visited: set[str] = set()
+    node: str | None = head
+    while node is not None:
+        if node in visited:
+            raise MigrationHistoryError(f"cyclic alembic history: {node} is reached twice")
+        visited.add(node)
+        node = revisions[node]
+    unreachable = sorted(set(revisions) - visited)
+    if unreachable:
+        raise MigrationHistoryError(
+            f"disconnected alembic history: {', '.join(unreachable)} not reachable from "
+            f"head {head} via down_revision (self-parented or cyclic revisions?)"
+        )
+
+
 def check_against_base(
     branch_revisions: dict[str, str | None], base_revisions: dict[str, str | None]
 ) -> str:
@@ -125,6 +146,7 @@ def check_history(revisions: dict[str, str | None], *, current_tip: str | None =
     collisions = [(parent, sorted(nodes)) for parent, nodes in children.items() if len(nodes) > 1]
     heads = _heads(revisions)
     if len(heads) == 1 and not collisions:
+        _require_reachable(revisions, heads[0])
         return heads[0]
 
     if collisions:
