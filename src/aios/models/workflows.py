@@ -328,7 +328,7 @@ WORKFLOW_SCRIPT_CONTRACT = """Workflow script contract:
   `main`.
 - Injected capability API, available without imports:
   - `agent(input, *, agent_id=None, output_schema=None, model=None, label=None)`: invoke a generic or named agent and await its result.
-  - `invoke_workflow(workflow_id, input, *, output_schema=None, label=None)`: invoke another workflow as a sub-run and await its result (the run dual of `agent`). The sub-run runs under this run's surface intersected with the target's; a failed or gone sub-run raises like a failed `agent`.
+  - `invoke_workflow(workflow_id, input, *, version=None, output_schema=None, label=None)`: invoke another workflow as a sub-run and await its result (the run dual of `agent`). `version` pins a registered version; omitted, the version current at launch runs. The sub-run runs under this run's surface intersected with the target's; a failed or gone sub-run raises like a failed `agent`.
   - `tool(name, input)`: invoke a declared tool; tool errors are returned, not raised.
   - `call_llm(request)`: run one raw inference turn and await the assistant turn. `request` carries `model` (omit to use the run's default child model; a `workflow:` target is rejected), `messages` (required), optional `tools` (schemas OFFERED — the model may request a call, but call_llm never runs it), and optional `params` (provider knobs). The result is `{"content", "tool_calls", "finish_reason", "usage", "cost", "message"}`, or `{"error": ...}` — a model error is returned, not raised. Its cost is metered against this run's `budget_usd` ceiling, so a budget-exhausted run refuses further `call_llm`. Use it to route/judge/fact-check around inference; use `agent(...)` when you want the tool calls executed.
   - `gate()`: suspend until an external resume delivers a value.
@@ -533,6 +533,7 @@ class WfRunCreate(BaseModel):
     version: int | None = Field(
         default=None,
         ge=1,
+        lt=2**31,  # workflow_versions.version is int4: a larger value is a 422, not a 500
         description=(
             "Optional historical workflow version to run. `None` (default) launches the "
             "workflow's CURRENT version. An integer re-runs that specific version: the run "

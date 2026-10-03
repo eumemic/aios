@@ -1420,6 +1420,16 @@ async def _open_invoke_workflow_capability(
             "bad_invoke_workflow",
             f"invoke_workflow() requires workflow_id to be a string, got {workflow_id!r}",
         )
+    version = spec.get("version")
+    # Upper bound: ``workflow_versions.version`` is int4, and an out-of-range value
+    # would raise a DataError at the query instead of a catchable rejection.
+    if version is not None and (
+        isinstance(version, bool) or not isinstance(version, int) or not 1 <= version < 2**31
+    ):
+        return await _reject(
+            "bad_invoke_workflow",
+            f"invoke_workflow() requires version to be a positive integer, got {version!r}",
+        )
     # output_schema rides the wire as a canonical JSON *string* (mirror agent());
     # reconstruct the dict and apply the SAME author-facing validity gates.
     output_schema_raw = spec.get("output_schema")
@@ -1455,6 +1465,7 @@ async def _open_invoke_workflow_capability(
             input=spec.get("input"),
             vault_ids=run_vaults,
             run_id=sub_run_id,
+            version=version,
             parent_run_id=run.id,
             # #1653: propagate the originating launcher down the ``parent_run_id``
             # lineage, so ``create_run`` clamps the sub-run to that session's surface
@@ -1466,7 +1477,11 @@ async def _open_invoke_workflow_capability(
             caller={"kind": "run", "id": run.id, "awaited": True},
             request_output_schema=output_schema,
         )
-    except NotFoundError:
+    except NotFoundError as exc:
+        # Exactly the shape ``get_workflow_version`` raises: a launcher's missing
+        # agent version also carries a ``version`` key, under ``agent_id``.
+        if exc.detail == {"workflow_id": workflow_id, "version": version}:
+            return await _reject("workflow_version_not_found", str(exc))
         return await _reject("workflow_not_found", f"workflow {workflow_id!r} not found")
     except ConflictError as exc:
         return await _reject("bad_invoke_workflow", str(exc))
