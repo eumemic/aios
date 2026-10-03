@@ -13,6 +13,7 @@ from aios.harness.loop import (
     _StepResult,
 )
 from aios.harness.window import WindowedEvents
+from aios.models.agents import AgentBinding
 
 
 @pytest.fixture(autouse=True)
@@ -56,6 +57,7 @@ async def test_spend_gate_trips_before_context_build() -> None:
         skills=[],
         system="sys",
         litellm_extra={},
+        binding=AgentBinding(agent_id="agt_test", version=1),
         window_min=1000,
         window_max=10000,
         preempt_policy="wait",
@@ -71,7 +73,10 @@ async def test_spend_gate_trips_before_context_build() -> None:
         patch("aios.harness.loop.agents_service.load_for_session", AsyncMock(return_value=agent)),
         patch("aios.services.channels.list_session_channels", AsyncMock(return_value=[])),
         patch("aios.harness.loop.refresh_session_mount_state", AsyncMock(return_value=[])),
-        patch("aios.harness.loop.compute_step_prelude", AsyncMock(return_value=SimpleNamespace())),
+        patch(
+            "aios.harness.loop.compute_step_prelude",
+            AsyncMock(return_value=SimpleNamespace(system_prompt="")),
+        ),
         patch("aios.harness.loop.prelude_overhead_local", return_value=0),
         patch(
             "aios.harness.loop.sessions_service.read_windowed_events",
@@ -135,6 +140,7 @@ async def test_preflight_gate_trips_on_subtree_rollup() -> None:
         skills=[],
         system="sys",
         litellm_extra={},
+        binding=AgentBinding(agent_id="agt_test", version=1),
         window_min=1000,
         window_max=10000,
         preempt_policy="wait",
@@ -153,7 +159,10 @@ async def test_preflight_gate_trips_on_subtree_rollup() -> None:
         patch("aios.harness.loop.agents_service.load_for_session", AsyncMock(return_value=agent)),
         patch("aios.services.channels.list_session_channels", AsyncMock(return_value=[])),
         patch("aios.harness.loop.refresh_session_mount_state", AsyncMock(return_value=[])),
-        patch("aios.harness.loop.compute_step_prelude", AsyncMock(return_value=SimpleNamespace())),
+        patch(
+            "aios.harness.loop.compute_step_prelude",
+            AsyncMock(return_value=SimpleNamespace(system_prompt="")),
+        ),
         patch("aios.harness.loop.prelude_overhead_local", return_value=0),
         patch(
             "aios.harness.loop.sessions_service.read_windowed_events",
@@ -216,6 +225,7 @@ async def test_preflight_gate_admits_when_subtree_under_limit() -> None:
         skills=[],
         system="sys",
         litellm_extra={},
+        binding=AgentBinding(agent_id="agt_test", version=1),
         window_min=1000,
         window_max=10000,
         preempt_policy="wait",
@@ -231,7 +241,10 @@ async def test_preflight_gate_admits_when_subtree_under_limit() -> None:
         patch("aios.harness.loop.agents_service.load_for_session", AsyncMock(return_value=agent)),
         patch("aios.services.channels.list_session_channels", AsyncMock(return_value=[])),
         patch("aios.harness.loop.refresh_session_mount_state", AsyncMock(return_value=[])),
-        patch("aios.harness.loop.compute_step_prelude", AsyncMock(return_value=SimpleNamespace())),
+        patch(
+            "aios.harness.loop.compute_step_prelude",
+            AsyncMock(return_value=SimpleNamespace(system_prompt="")),
+        ),
         patch("aios.harness.loop.prelude_overhead_local", return_value=0),
         patch(
             "aios.harness.loop.sessions_service.read_windowed_events",
@@ -285,6 +298,7 @@ async def test_usage_charged_only_after_assistant_persists() -> None:
         skills=[],
         system="sys",
         litellm_extra={},
+        binding=AgentBinding(agent_id="agt_test", version=1),
         window_min=1000,
         window_max=10000,
         preempt_policy="wait",
@@ -296,6 +310,9 @@ async def test_usage_charged_only_after_assistant_persists() -> None:
         reacting_to=0,
         reminders_written=(),
         reminders_skipped=0,
+        tz_name="UTC",
+        reminder_seqs=(),
+        workspace_path=None,
     )
     increment = AsyncMock(return_value=5)
     # The persist fails — models the soft path (DB error caught upstream → retry).
@@ -310,7 +327,10 @@ async def test_usage_charged_only_after_assistant_persists() -> None:
         patch("aios.harness.loop.agents_service.load_for_session", AsyncMock(return_value=agent)),
         patch("aios.services.channels.list_session_channels", AsyncMock(return_value=[])),
         patch("aios.harness.loop.refresh_session_mount_state", AsyncMock(return_value=[])),
-        patch("aios.harness.loop.compute_step_prelude", AsyncMock(return_value=SimpleNamespace())),
+        patch(
+            "aios.harness.loop.compute_step_prelude",
+            AsyncMock(return_value=SimpleNamespace(system_prompt="")),
+        ),
         patch("aios.harness.loop.prelude_overhead_local", return_value=0),
         patch(
             "aios.harness.loop.sessions_service.read_windowed_events",
