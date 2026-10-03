@@ -18,12 +18,13 @@ on ``events.account_id`` directly; runs key via a join to ``wf_runs``.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Literal
 
 import asyncpg
 
 from aios.db.queries import open_request_anti_join
+from aios.db.queries.workflows import call_started_labels
 
 NodeKind = Literal["run", "session"]
 
@@ -62,7 +63,8 @@ async def children_of(
     ``api`` edges store ``caller.id = account_id`` (so an id-only key would fan
     a whole tenant's sessions under one api node). Dedups by ``(kind, id)`` so a
     node visible via *both* the edge and its FK column is returned once (the edge
-    half is preferred — it carries the ``label`` + ``request_id``).
+    half is preferred — it carries the ``request_id``). A run caller's children
+    carry the ``label`` its ``call_started`` gave them.
     """
     children: dict[tuple[str, str], ChildNode] = {}
 
@@ -163,10 +165,15 @@ async def children_of(
                 ChildNode(kind="run", id=r["id"], spawn_at=r["spawn_at"]),
             )
 
+    nodes = list(children.values())
+    if caller_kind == "run":
+        # A run's agent()/invoke_workflow() children carry the label its call gave them.
+        labels = await call_started_labels(conn, [caller_id], account_id=account_id)
+        nodes = [replace(c, label=labels.get(c.id)) for c in nodes]
     # Deterministic sibling order: spawn time, then id (a stable tiebreak when
     # two siblings share a transaction_timestamp). ``None`` spawn_at sorts last.
     return sorted(
-        children.values(),
+        nodes,
         key=lambda c: (c.spawn_at is None, c.spawn_at, c.id),
     )
 

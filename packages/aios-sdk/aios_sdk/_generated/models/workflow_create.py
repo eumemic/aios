@@ -49,6 +49,9 @@ class WorkflowCreate:
             inference; use `agent(...)` when you want the tool calls executed.
               - `gate()`: suspend until an external resume delivers a value.
               - `budget()`: read this run's shared child-spend budget, or None when unset.
+              - `sub_runs()`: read facts about every session and run this run created, directly or through descendants:
+            `{"nodes": [...], "truncated": bool}`, each node with its kind, label, workflow or agent and the version that
+            ran, status, timings, and usage per model. Metadata only.
               - `parallel(thunks)`: run zero-argument callables concurrently (for example,
                 `lambda: agent(...)`). A failed agent branch yields `None` at the barrier instead
                 of raising. Fan-out width is capped by `MAX_PARALLEL_FANOUT` (currently 1000).

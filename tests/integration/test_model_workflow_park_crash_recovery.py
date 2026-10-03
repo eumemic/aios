@@ -258,7 +258,7 @@ async def _resolve_inner_run(pool: asyncpg.Pool[Any], run_id: str) -> Any:
         assert run is not None
         assert run.status == "completed", f"inner run not completed: {run.status}"
         await wf_queries.add_run_call_llm_cost_microusd(
-            conn, run_id, _INNER_COST_MICROUSD, account_id=_ACCOUNT
+            conn, run_id, _INNER_COST_MICROUSD, account_id=_ACCOUNT, model="test/model"
         )
     return run.output
 

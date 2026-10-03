@@ -22,6 +22,7 @@ import pytest
 
 from aios.db import queries as db_queries
 from aios.db.pool import create_pool
+from aios.db.queries import trace as trace_q
 from aios.db.queries import workflows as wf_queries
 from aios.harness import runtime
 from aios.models.agents import ToolSpec
@@ -647,3 +648,118 @@ async def test_a_bad_or_unknown_version_is_a_catchable_rejection(
         events = await _invoke_once(pool, target, version)
         kinds = [e.payload["error"]["kind"] for e in events if e.type == "call_result"]
         assert kinds == [kind], (target, version, kinds)
+
+
+# ── #2472 D3: sub_runs() reads facts about the run's creation subtree ─────────
+
+_READS_FACTS = (
+    "async def main(input):\n"
+    "    await invoke_workflow(input['wf'], {}, version=1, label='arm')\n"
+    "    return await sub_runs()\n"
+)
+
+
+async def test_sub_runs_reports_each_sub_run_with_its_version_label_and_usage(
+    wf_runtime: asyncpg.Pool[Any],
+) -> None:
+    pool = wf_runtime
+    wf_id = await _two_versions(pool)
+    parent_wf = await _insert_workflow(pool, "reads-facts", _READS_FACTS)
+    parent = await _make_run(pool, parent_wf, input={"wf": wf_id})
+
+    await run_workflow_step(parent)
+    async with pool.acquire() as conn:
+        started = next(
+            e for e in await wf_queries.list_run_events(conn, parent) if e.type == "call_started"
+        )
+    sub_id = started.payload["child_run_id"]
+    await run_workflow_step(sub_id)
+    async with pool.acquire() as conn:
+        await wf_queries.add_run_call_llm_cost_microusd(
+            conn,
+            sub_id,
+            1234,
+            account_id="acc_wf",
+            input_tokens=100,
+            output_tokens=20,
+            model="openrouter/arm-model",
+        )
+    # Harvest the sub-run (sub_runs() resolves and journals inline), then the step
+    # that fast-forwards through it and completes.
+    await run_workflow_step(parent)
+    await run_workflow_step(parent)
+
+    facts = (await _run(pool, parent)).output
+    assert facts["truncated"] is False
+    [node] = facts["nodes"]
+    assert (node["kind"], node["id"], node["label"]) == ("run", sub_id, "arm")
+    assert (node["workflow_id"], node["workflow_version"]) == (wf_id, 1)
+    assert node["status"] == "completed" and node["duration_ms"] is not None
+    assert node["parent"] == {"kind": "run", "id": parent}
+    assert node["usage"] == [
+        {
+            "model": "openrouter/arm-model",
+            "input_tokens": 100,
+            "output_tokens": 20,
+            "cache_read_input_tokens": 0,
+            "cache_creation_input_tokens": 0,
+            "cost_microusd": 1234,
+        }
+    ]
+
+
+_FANS_OUT = (
+    "async def main(input):\n"
+    "    return await parallel([\n"
+    "        lambda: invoke_workflow(input['wf'], {}, label='arm'),\n"
+    "        lambda: agent('hi', agent_id=input['agent'], label='judge'),\n"
+    "    ])\n"
+)
+
+
+async def test_sub_run_facts_reports_live_session_and_run_children_and_truncates(
+    wf_runtime: asyncpg.Pool[Any],
+) -> None:
+    """Both node kinds, mid-flight: an agent() session and a still-running sub-run, in
+    spawn order, each with the label its call gave it; ``max_nodes`` truncates. The
+    trace's children-of walk carries the same labels."""
+    pool = wf_runtime
+    wf_id = await _two_versions(pool)
+    agent = await agents_service.create_agent(
+        pool,
+        account_id="acc_wf",
+        name="judge-agent",
+        model="test/judge",
+        system="judge",
+        tools=[],
+        description=None,
+        metadata={},
+        window_min=1000,
+        window_max=100000,
+    )
+    parent_wf = await _insert_workflow(pool, "fans-out", _FANS_OUT)
+    parent = await _make_run(pool, parent_wf, input={"wf": wf_id, "agent": agent.id})
+    await run_workflow_step(parent)
+
+    async with pool.acquire() as conn:
+        facts = await wf_queries.sub_run_facts(conn, parent, account_id="acc_wf", max_nodes=10)
+        cut = await wf_queries.sub_run_facts(conn, parent, account_id="acc_wf", max_nodes=1)
+        kids = await trace_q.children_of(
+            conn, caller_kind="run", caller_id=parent, account_id="acc_wf"
+        )
+
+    assert facts["truncated"] is False
+    by_label = {n["label"]: n for n in facts["nodes"]}
+    assert set(by_label) == {"arm", "judge"}
+    started = [n["started_at"] for n in facts["nodes"]]
+    assert started == sorted(started)
+    arm, judge = by_label["arm"], by_label["judge"]
+    assert arm["kind"] == "run" and arm["duration_ms"] is None
+    assert arm["status"] not in {"completed", "errored", "cancelled"}
+    assert judge["kind"] == "session"
+    assert (judge["agent_id"], judge["agent_version"]) == (agent.id, agent.version)
+    assert judge["parent"] == {"kind": "run", "id": parent}
+    assert judge["archived"] is False and judge["usage"] == []
+
+    assert cut["truncated"] is True and len(cut["nodes"]) == 1
+    assert {k.id: k.label for k in kids} == {arm["id"]: "arm", judge["id"]: "judge"}

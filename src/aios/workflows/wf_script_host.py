@@ -258,6 +258,15 @@ def budget() -> _Capability:
     return _Capability("budget", None)
 
 
+def sub_runs() -> _Capability:
+    """Read facts about every session and run this run created, directly or through
+    its descendants: kind, label, workflow or agent and the version that ran, status,
+    timings, and usage per model. Metadata only, never their inputs or outputs.
+    Returns ``{"nodes": [...], "truncated": bool}``; each call reads the facts as of
+    that point in the run."""
+    return _Capability("sub_runs", None)
+
+
 def tool(name: str, input: Any) -> _Capability:
     """Invoke one of the workflow's declared tools and await its result.
 
@@ -643,6 +652,7 @@ def author_namespace() -> dict[str, Any]:
         "tool": tool,
         "call_llm": call_llm,
         "budget": budget,
+        "sub_runs": sub_runs,
         "parallel": parallel,
         "pipeline": pipeline,
         "log": log,

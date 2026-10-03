@@ -1849,6 +1849,7 @@ async def _run_session_step_body(
             cache_creation_input_tokens=cache_c,
             cost_microusd=charge,
             account_id=account_id,
+            model=agent.model,
         )
 
     # A refusal bricks the turn: the assistant message is partial/empty and its
@@ -2760,6 +2761,7 @@ async def _handle_streaming_model_deadline(
         cache_creation_input_tokens=usage.get("cache_creation_input_tokens", 0),
         cost_microusd=cost_microusd,
         account_id=account_id,
+        model=model,
     )
     deadline_s = get_settings().model_call_deadline_s
     await _latch_errored_turn(
