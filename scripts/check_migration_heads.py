@@ -58,16 +58,30 @@ def check_against_base(
     """Check branch migrations individually against the live base history."""
     base_tip = check_history(base_revisions)
 
-    # A branch-only revision cannot legitimize another branch-only revision. Each
-    # new migration must have been authored directly against a parent that is
-    # independently present on the live base. Checking this before constructing
-    # the union prevents a copied/stacked parent from masking the violation.
-    for revision in sorted(set(branch_revisions) - set(base_revisions)):
+    # Branch-only revisions may stack on each other (expand/backfill/contract in
+    # one PR), but they must form ONE linear chain whose root is parented on the
+    # live tip. Every parent must exist somewhere (live base or this branch), no
+    # parent may gain two branch-only children (a fork), and the heads check
+    # below refuses a chain rooted below the live tip (a stale parent).
+    branch_only = sorted(set(branch_revisions) - set(base_revisions))
+    known = set(base_revisions) | set(branch_only)
+    branch_children: dict[str | None, list[str]] = defaultdict(list)
+    for revision in branch_only:
         parent = branch_revisions[revision]
-        if parent not in base_revisions:
+        if parent not in known:
             raise MigrationHistoryError(
                 f'revision {revision} declares down_revision="{parent}", but that parent '
-                "is not present on the live base"
+                "is not present on the live base or this branch"
+            )
+        branch_children[parent].append(revision)
+    for fork_parent, fork_children in sorted(
+        branch_children.items(), key=lambda item: str(item[0])
+    ):
+        if len(fork_children) > 1:
+            raise MigrationHistoryError(
+                f"branch migrations fork: {' and '.join(fork_children)} both declare "
+                f'down_revision="{fork_parent}"\n'
+                f"  -> chain them linearly, rooted on the current base head ({base_tip})"
             )
 
     combined = dict(base_revisions)
