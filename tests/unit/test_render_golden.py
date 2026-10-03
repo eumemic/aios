@@ -27,10 +27,9 @@ import pytest
 
 from aios.harness import vision
 from aios.harness.completion import model_descriptor
-from aios.harness.context import build_messages, merge_adjacent_user_messages, reminder_message
+from aios.harness.context import build_messages, finalize_messages
 from aios.harness.reminders import reminder_event_data
 from aios.harness.request_capture import RENDER_VERSION, sha256_hex
-from aios.harness.step_context import _stub_reasoning_content_for_thinking_target
 from aios.harness.window import WindowOmission
 from aios.models.events import Event, EventKind
 from tests.helpers.images import valid_png_bytes
@@ -163,9 +162,11 @@ def render(gate_model: str, workspace: Path) -> dict[str, Any]:
         tz_name="Asia/Kolkata",
         omission=WindowOmission(began_at=_T0 - timedelta(days=3), omitted_messages=12),
     )
-    ctx.messages.extend(reminder_message(c) for c in ("Channels: sig/a (focal), sig/b.",))
-    messages = merge_adjacent_user_messages(ctx.messages)
-    messages = _stub_reasoning_content_for_thinking_target(messages, gate_model)
+    messages = finalize_messages(
+        ctx.messages,
+        reminder_contents=("Channels: sig/a (focal), sig/b.",),
+        model=gate_model,
+    )
     return {"messages": messages, "tools": _TOOLS, "params": _PARAMS}
 
 
