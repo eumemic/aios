@@ -117,7 +117,7 @@ async def test_windowed_context_events_seq_bounds_notices(
     """Range-scan path: notices window out by seq with their surrounding
     messages. A notice in the dropped prefix is excluded; one in the
     retained window is kept. Driven by calling read_windowed_context_events
-    with an explicit drop so the bound is exact, not token-math-dependent."""
+    with an explicit boundary so it is exact, not token-math-dependent."""
     pool, account_id, session_id = pool_and_session
     async with pool.acquire() as conn:
         # Log order: m1, notice_a, m2, m3, notice_b, m4.
@@ -128,14 +128,10 @@ async def test_windowed_context_events_seq_bounds_notices(
         notice_b = await _notice(conn, account_id, session_id, "environment_image_changed")
         m4 = await _msg(conn, account_id, session_id, "four")
 
-        # Drop boundary at m2's cumulative_tokens: messages with
-        # cumulative_tokens <= drop (m1, m2) are dropped; m3, m4 retained.
-        # max dropped-message seq is m2.seq.
-        drop_row = await conn.fetchrow("SELECT cumulative_tokens FROM events WHERE id = $1", m2.id)
-        drop = drop_row["cumulative_tokens"]
-
+        # Boundary after m2, the last dropped message: m1 and m2 are dropped;
+        # m3 and m4 are retained.
         events = await queries.read_windowed_context_events(
-            conn, session_id, account_id=account_id, drop=drop
+            conn, session_id, account_id=account_id, after_seq=m2.seq
         )
 
     seqs = {e.seq for e in events}

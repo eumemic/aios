@@ -191,6 +191,21 @@ class TestInjectCacheBreakpoints:
     def test_empty_messages(self) -> None:
         inject_cache_breakpoints([], None, _ANTHROPIC_MODEL)  # no crash
 
+    def test_marked_dicts_are_copies_not_mutations(self) -> None:
+        """Tool definitions are shared with the worker's MCP discovery cache and
+        messages can alias event data: marking must replace list entries with
+        marked copies, never write into the shared dicts."""
+        system = _msg("system", "sys")
+        last = {"role": "user", "content": [{"type": "text", "text": "hi"}]}
+        shared_tool = _tool_def("read")
+        msgs = [system, last]
+        tools = [_tool_def("bash"), shared_tool]
+        inject_cache_breakpoints(msgs, tools, _ANTHROPIC_MODEL)
+        assert msgs[0] is not system and system["content"] == "sys"
+        assert msgs[1] is not last and "cache_control" not in last["content"][0]
+        assert tools[1] is not shared_tool and "cache_control" not in shared_tool
+        assert tools[1]["cache_control"] == _CACHE_CONTROL
+
     def test_system_only_no_double_annotate(self) -> None:
         """When the only message is the system message, it gets one
         annotation from the system-message rule.  The last-message rule

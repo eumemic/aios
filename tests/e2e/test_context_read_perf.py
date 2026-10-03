@@ -233,7 +233,7 @@ _FIXED_RETAINED_MASS_SQL = (
 )
 
 _FIXED_OMISSION_BOUNDARY_SQL = (
-    "SELECT cumulative_messages, created_at "
+    "SELECT seq, cumulative_messages "
     "FROM events "
     "WHERE session_id = $1 AND account_id = $2 AND kind = 'message' "
     "AND cumulative_tokens <= $3 "
