@@ -101,18 +101,63 @@ def test_live_base_mutation_rejects_stale_parent_then_accepts_current_tip() -> N
     assert check_against_base(current_branch, base) == "0161"
 
 
-def test_rejects_parent_available_only_on_branch_not_live_base() -> None:
-    base: dict[str, str | None] = {"0158": None}
-    single_migration = {"0158": None, "0160": "0158"}
-    stacked_migrations = {**single_migration, "0161": "0160"}
+def test_accepts_linear_stack_rooted_on_live_base_tip() -> None:
+    # Expand/backfill/contract in one PR: several new migrations chained on
+    # each other, the chain's root parented on the live tip. Nothing is stale.
+    base: dict[str, str | None] = {"0158": None, "0159": "0158"}
+    stacked = {**base, "0160": "0159", "0161": "0160", "0162": "0161"}
 
-    assert check_against_base(single_migration, base) == "0160"
+    assert check_against_base(stacked, base) == "0162"
+
+
+def test_rejects_linear_stack_rooted_below_live_base_tip() -> None:
+    base: dict[str, str | None] = {"0158": None, "0159": "0158"}
+    stale_stack = {"0158": None, "0160": "0158", "0161": "0160"}
+
     with pytest.raises(MigrationHistoryError) as exc_info:
-        check_against_base(stacked_migrations, base)
+        check_against_base(stale_stack, base)
 
     assert str(exc_info.value) == (
-        'revision 0161 declares down_revision="0160", but that parent '
-        "is not present on the live base"
+        "migration branch does not extend the current base head (0159): "
+        "combined heads are 0159 and 0161\n"
+        "  -> re-parent your migration onto the current base head (0159)"
+    )
+
+
+@pytest.mark.parametrize(
+    ("branch_only", "expected"),
+    [
+        # Two new revisions forking off a new revision.
+        (
+            {"0160": "0159", "0161": "0160", "0162": "0160"},
+            'branch migrations fork: 0161 and 0162 both declare down_revision="0160"',
+        ),
+        # Two independent new chains, both rooted on the live tip.
+        (
+            {"0160": "0159", "0161": "0159"},
+            'branch migrations fork: 0160 and 0161 both declare down_revision="0159"',
+        ),
+    ],
+)
+def test_rejects_forked_branch_migrations(branch_only: dict[str, str], expected: str) -> None:
+    base: dict[str, str | None] = {"0158": None, "0159": "0158"}
+
+    with pytest.raises(MigrationHistoryError) as exc_info:
+        check_against_base({**base, **branch_only}, base)
+
+    assert str(exc_info.value).startswith(expected)
+
+
+def test_rejects_branch_migration_whose_parent_exists_nowhere() -> None:
+    base: dict[str, str | None] = {"0158": None, "0159": "0158"}
+    branch = {**base, "0160": "0159", "0161": "DOES_NOT_EXIST"}
+
+    with pytest.raises(MigrationHistoryError) as exc_info:
+        check_against_base(branch, base)
+
+    assert str(exc_info.value) == (
+        'revision 0161 declares down_revision="DOES_NOT_EXIST", but that parent '
+        "is not present on the live base or this branch"
     )
 
 
@@ -131,3 +176,44 @@ def test_known_good_repository_has_expected_revision_count_and_one_head() -> Non
     # deletions becomes the thing that fails CI.
     assert len(revisions) == 169
     assert check_history(revisions) in revisions
+
+
+@pytest.mark.parametrize(
+    "branch_only",
+    [
+        {"0160": "0160"},
+        {"0160": "0161", "0161": "0160"},
+        {"0160": "0159", "0161": "0162", "0162": "0161"},
+    ],
+)
+def test_rejects_cyclic_or_disconnected_branch_migrations(branch_only: dict[str, str]) -> None:
+    base: dict[str, str | None] = {"0158": None, "0159": "0158"}
+
+    with pytest.raises(MigrationHistoryError):
+        check_against_base({**base, **branch_only}, base)
+
+
+def test_rejects_cycle_in_plain_history() -> None:
+    with pytest.raises(MigrationHistoryError):
+        check_history({"0158": None, "0159": "0158", "0160": "0161", "0161": "0160"})
+
+
+def test_cli_rejects_self_parented_branch_migration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from scripts import check_migration_heads
+
+    base_dir = tmp_path / "base"
+    branch_dir = tmp_path / "branch"
+    base_dir.mkdir()
+    branch_dir.mkdir()
+    for directory in (base_dir, branch_dir):
+        _migration(directory / "0158.py", "0158", None)
+        _migration(directory / "0159.py", "0159", "0158")
+    _migration(branch_dir / "0160.py", "0160", "0160")
+    monkeypatch.setattr(
+        "sys.argv",
+        ["check_migration_heads", str(branch_dir), "--base-versions-dir", str(base_dir)],
+    )
+
+    assert check_migration_heads.main() == 1
