@@ -1421,8 +1421,10 @@ async def _open_invoke_workflow_capability(
             f"invoke_workflow() requires workflow_id to be a string, got {workflow_id!r}",
         )
     version = spec.get("version")
+    # Upper bound: ``workflow_versions.version`` is int4, and an out-of-range value
+    # would raise a DataError at the query instead of a catchable rejection.
     if version is not None and (
-        isinstance(version, bool) or not isinstance(version, int) or version < 1
+        isinstance(version, bool) or not isinstance(version, int) or not 1 <= version < 2**31
     ):
         return await _reject(
             "bad_invoke_workflow",
@@ -1476,7 +1478,9 @@ async def _open_invoke_workflow_capability(
             request_output_schema=output_schema,
         )
     except NotFoundError as exc:
-        if version is not None and (exc.detail or {}).get("version") == version:
+        # Exactly the shape ``get_workflow_version`` raises: a launcher's missing
+        # agent version also carries a ``version`` key, under ``agent_id``.
+        if exc.detail == {"workflow_id": workflow_id, "version": version}:
             return await _reject("workflow_version_not_found", str(exc))
         return await _reject("workflow_not_found", f"workflow {workflow_id!r} not found")
     except ConflictError as exc:

@@ -533,6 +533,7 @@ class WfRunCreate(BaseModel):
     version: int | None = Field(
         default=None,
         ge=1,
+        lt=2**31,  # workflow_versions.version is int4: a larger value is a 422, not a 500
         description=(
             "Optional historical workflow version to run. `None` (default) launches the "
             "workflow's CURRENT version. An integer re-runs that specific version: the run "

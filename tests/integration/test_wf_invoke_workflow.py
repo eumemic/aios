@@ -635,7 +635,15 @@ async def test_a_bad_or_unknown_version_is_a_catchable_rejection(
 ) -> None:
     pool = wf_runtime
     wf_id = await _two_versions(pool)
-    for version, kind in ((0, "bad_invoke_workflow"), (7, "workflow_version_not_found")):
-        events = await _invoke_once(pool, wf_id, version)
+    cases = (
+        (wf_id, 0, "bad_invoke_workflow"),
+        # Past int4: a catchable rejection, not a DataError crashing the step.
+        (wf_id, 2**31, "bad_invoke_workflow"),
+        (wf_id, 7, "workflow_version_not_found"),
+        # A pin on a workflow that doesn't exist is still workflow_not_found.
+        ("wf_absent", 1, "workflow_not_found"),
+    )
+    for target, version, kind in cases:
+        events = await _invoke_once(pool, target, version)
         kinds = [e.payload["error"]["kind"] for e in events if e.type == "call_result"]
-        assert kinds == [kind], (version, kinds)
+        assert kinds == [kind], (target, version, kinds)
