@@ -136,6 +136,8 @@ async def _run_call_llm_task(
                     cache_creation_input_tokens=int(
                         usage.get("cache_creation_input_tokens", 0) or 0
                     ),
+                    # The model invoke_call_llm resolved; a rejected call charges nothing.
+                    model=spec.get("model") or run.default_child_model,
                 )
                 await wf_queries.insert_run_signal(
                     conn,

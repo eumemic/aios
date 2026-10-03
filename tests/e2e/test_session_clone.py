@@ -141,7 +141,12 @@ class TestCloneBasic:
         from aios.services import sessions as sessions_svc
 
         await sessions_svc.increment_usage(
-            pool, parent_session_id, input_tokens=42, output_tokens=7, account_id=account_id
+            pool,
+            parent_session_id,
+            input_tokens=42,
+            output_tokens=7,
+            account_id=account_id,
+            model="test/model",
         )
         r = await http_client.post(f"/v1/sessions/{parent_session_id}/clone", json={})
         clone = r.json()

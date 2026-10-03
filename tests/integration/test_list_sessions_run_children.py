@@ -85,6 +85,7 @@ class TestListSessionsRunChildren:
                     account_id="acc_lsrc",
                     input_tokens=12_010,
                     output_tokens=5_133,
+                    model="test/model",
                 )
 
             # While alive, the child lists by run_id (status active/idle).
