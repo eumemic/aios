@@ -43,6 +43,7 @@ _DB_HELPER_SYMBOLS = frozenset(
     {
         "_queries.list_session_memory_store_echoes",
         "append_event",
+        "call_started_labels",
         "runs_budget_spent_microusd",
         "accounting_queries.ranked_consumers",
         "accounting_queries.usage_for_node",
