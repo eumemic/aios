@@ -30,9 +30,13 @@ import hashlib
 import json
 from collections import OrderedDict
 from dataclasses import dataclass
+from functools import cache
+from importlib.metadata import version
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     import asyncpg
 
     from aios.harness.completion import LlmRequest
@@ -54,9 +58,34 @@ def sha256_hex(value: Any) -> str:
     return hashlib.sha256(encode(value)).hexdigest()
 
 
+def captured_params(params: dict[str, Any] | None) -> dict[str, Any] | None:
+    """The request's params as captured: everything but an inline ``api_key``.
+
+    A credential in an agent's ``litellm_extra`` would otherwise outlive any
+    rotation in ``request_blobs``, which nothing but account deletion clears. The
+    send path drops it too unless the deployment runs the legacy env credential
+    policy, and a replay authenticates with its own account's providers.
+    """
+    if params is None:
+        return None
+    return {key: value for key, value in params.items() if key != "api_key"}
+
+
 def payload(request: LlmRequest) -> dict[str, Any]:
-    """The part of a request ``payload_sha`` covers: what the session composed."""
-    return {"messages": request.messages, "tools": request.tools, "params": request.params}
+    """The part of a request ``payload_sha`` covers: what the session composed,
+    with :func:`captured_params`."""
+    return {
+        "messages": request.messages,
+        "tools": request.tools,
+        "params": captured_params(request.params),
+    }
+
+
+@cache
+def _litellm_version() -> str:
+    """The installed litellm version: read from package metadata once per process,
+    not on every send."""
+    return version("litellm")
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,25 +114,25 @@ def capture_request(
     reminder_seqs: tuple[int, ...],
     in_flight_tool_call_ids: frozenset[str],
     tz_name: str,
+    workspace_path: Path | None,
 ) -> RequestCapture:
     """Record a composed request, before anything on the send path touches it.
 
     Pure CPU (it encodes the whole payload, images included), so callers run it
     off the event loop. ``params`` is the agent's ``litellm_extra`` as composed,
-    before provider auth resolves: a key resolved from an ancestor account's
-    model provider never reaches a blob.
+    before provider auth resolves, so a key resolved from an ancestor account's
+    model provider never reaches a blob; an inline ``api_key`` is dropped too
+    (:func:`captured_params`).
     """
-    from importlib.metadata import version
-
     bodies = {
         "system": encode(system_prompt),
         "tools": encode(request.tools or []),
-        "params": encode(request.params),
+        "params": encode(captured_params(request.params)),
     }
     shas = {part: hashlib.sha256(body).hexdigest() for part, body in bodies.items()}
     record: dict[str, Any] = {
         "render_version": RENDER_VERSION,
-        "litellm_version": version("litellm"),
+        "litellm_version": _litellm_version(),
         "model": model,
         "capability_model": capability_model,
         "binding": binding.model_dump(mode="json"),
@@ -122,6 +151,7 @@ def capture_request(
         "reminder_seqs": list(reminder_seqs),
         "inflight_tool_call_ids": sorted(in_flight_tool_call_ids),
         "tz": tz_name,
+        "workspace_path": None if workspace_path is None else str(workspace_path),
         "payload_sha": sha256_hex(payload(request)),
     }
     return RequestCapture(record=record, blobs={shas[part]: body for part, body in bodies.items()})

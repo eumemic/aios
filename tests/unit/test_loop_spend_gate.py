@@ -312,6 +312,7 @@ async def test_usage_charged_only_after_assistant_persists() -> None:
         reminders_skipped=0,
         tz_name="UTC",
         reminder_seqs=(),
+        workspace_path=None,
     )
     increment = AsyncMock(return_value=5)
     # The persist fails — models the soft path (DB error caught upstream → retry).

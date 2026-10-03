@@ -1347,6 +1347,7 @@ async def _run_session_step_body(
             reminder_seqs=step_ctx.reminder_seqs,
             in_flight_tool_call_ids=in_flight_tool_call_ids,
             tz_name=step_ctx.tz_name,
+            workspace_path=step_ctx.workspace_path,
         )
         await store_capture(pool, capture, account_id=account_id)
         return capture.record

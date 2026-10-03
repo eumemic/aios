@@ -2604,6 +2604,7 @@ async def read_windowed_context_events(
     *,
     account_id: str,
     after_seq: int | None = None,
+    through_seq: int | None = None,
 ) -> list[Event]:
     """Events the context builder needs, in seq order: message events plus
     the model-visible FS-loss notices (``kind='lifecycle'`` whose ``event``
@@ -2615,11 +2616,15 @@ async def read_windowed_context_events(
     drop excludes no message). One boundary for both kinds, so a notice scrolls
     out of context exactly when the messages around its reset point do, and a
     request rebuild (#2471) can re-read the slate from the recorded bound (the
-    bound is exclusive below and open above).
+    bound is exclusive).
 
     ``read_message_events`` stays message-only (its other callers — e.g.
     ``confirm_tool_deny`` — must not see lifecycle rows); this is the
     windowing-specific read that feeds :func:`build_messages`.
+
+    ``through_seq`` caps the slate from above (inclusive). The step reads the
+    open-ended slate; a request rebuild passes the captured slate's last seq so
+    it doesn't load the session's later history only to discard it.
     """
     allowlist = list(MODEL_VISIBLE_LIFECYCLE_EVENTS)
     # UNION ALL (not an OR across kinds) so each arm keeps its own index plan:
@@ -2628,32 +2633,36 @@ async def read_windowed_context_events(
     # wake, even for the common session with no FS-loss notices. The arms are
     # disjoint by ``kind``, so ALL (no dedup) is correct and cheaper.
     if after_seq is None:
+        upper = "" if through_seq is None else " AND seq <= $4"
         rows = await conn.fetch(
             "SELECT * FROM events "
-            "WHERE session_id = $1 AND account_id = $2 AND kind = 'message' "
+            f"WHERE session_id = $1 AND account_id = $2 AND kind = 'message'{upper} "
             "UNION ALL "
             "SELECT * FROM events "
             "WHERE session_id = $1 AND account_id = $2 "
-            "AND kind = 'lifecycle' AND data->>'event' = ANY($3) "
+            f"AND kind = 'lifecycle' AND data->>'event' = ANY($3){upper} "
             "ORDER BY seq ASC",
             session_id,
             account_id,
             allowlist,
+            *([] if through_seq is None else [through_seq]),
         )
     else:
+        upper = "" if through_seq is None else " AND seq <= $5"
         rows = await conn.fetch(
             "SELECT * FROM events "
             "WHERE session_id = $1 AND account_id = $2 "
-            "AND kind = 'message' AND seq > $3 AND cumulative_tokens IS NOT NULL "
+            f"AND kind = 'message' AND seq > $3 AND cumulative_tokens IS NOT NULL{upper} "
             "UNION ALL "
             "SELECT * FROM events "
             "WHERE session_id = $1 AND account_id = $2 "
-            "AND kind = 'lifecycle' AND data->>'event' = ANY($4) AND seq > $3 "
+            f"AND kind = 'lifecycle' AND data->>'event' = ANY($4) AND seq > $3{upper} "
             "ORDER BY seq ASC",
             session_id,
             account_id,
             after_seq,
             allowlist,
+            *([] if through_seq is None else [through_seq]),
         )
     return [_row_to_event(r) for r in rows]
 

@@ -262,6 +262,7 @@ def mock_step_dependencies() -> Any:
                     reminders_skipped=0,
                     tz_name="UTC",
                     reminder_seqs=(),
+                    workspace_path=None,
                 )
             ),
         ),
