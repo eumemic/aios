@@ -152,14 +152,16 @@ async def launch_model_workflow_park(
     request: LlmRequest,
     reacting_to: int,
     account_id: str,
+    request_record: dict[str, Any],
     run_id: str | None = None,
 ) -> str:
     """Open an awaited run of the bound workflow and park owing an assistant message.
 
-    Journals the ``model_workflow_park`` event (run id + sealed ``reacting_to``)
-    BEFORE launching the run under that pre-assigned id (#2469), then spawns the
-    fire-and-forget harvest task. Returns the bound run id. The caller ends the step
-    after this — the inner deliberation resolves async and a later wake harvests it.
+    Journals the ``model_workflow_park`` event (run id + sealed ``reacting_to`` +
+    the captured ``request_record``, #2471) BEFORE launching the run under that
+    pre-assigned id (#2469), then spawns the fire-and-forget harvest task. Returns
+    the bound run id. The caller ends the step after this — the inner deliberation
+    resolves async and a later wake harvests it.
 
     Record-then-launch is what makes a crash between the two writes safe: the next
     wake always finds the park, and either waits on its run or, if the run was never
@@ -179,6 +181,7 @@ async def launch_model_workflow_park(
             "event": PARK_EVENT,
             "run_id": run_id,
             "reacting_to": reacting_to,
+            "request": request_record,
         },
         account_id=account_id,
     )

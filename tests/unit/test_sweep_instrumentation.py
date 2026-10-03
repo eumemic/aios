@@ -297,6 +297,8 @@ class TestEntrySweepSpan:
                         skill_versions=[],
                         reminders_written=(),
                         reminders_skipped=0,
+                        tz_name="UTC",
+                        reminder_seqs=(),
                     )
                 ),
             ),
