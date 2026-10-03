@@ -6,6 +6,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 import types
@@ -263,6 +264,144 @@ def test_agent_env_drops_the_install_token_and_unrouted_keys(
     } & set(env)
     assert env[kept] == broker.token
     assert "oai-or-ant" not in env.values()
+
+
+@pytest.mark.parametrize("model", ["gpt-5.6-sol", "claude-opus-5", "grok-4.6"])
+def test_agent_cannot_reach_the_actions_control_files(
+    monkeypatch: Any, clean_env: None, tmp_path: Path, model: str
+) -> None:
+    """The agent must not inherit the Actions control-file paths by NAME.
+
+    This is defence in depth, not containment: the file-command directory is a
+    constant, so an agent with an empty environment can still glob it. The
+    missing-review alarm therefore also rides on an `::error::` annotation
+    (see the defusing tests below). The value strip is asserted over an
+    EXPLICIT runner env, because a real runner's ambient env carries its own
+    control paths regardless of what this function does.
+    """
+    runner_env = {
+        "OAI_PROXY_API_KEY": "oai",
+        "ANT_PROXY_API_KEY": "ant",
+        "XAI_PROXY_API_KEY": "xai",
+        "GITHUB_OUTPUT": "/runner/_temp/_runner_file_commands/set_output_abc",
+        "GITHUB_ENV": "/runner/_temp/_runner_file_commands/set_env_abc",
+        "GITHUB_PATH": "/runner/_temp/_runner_file_commands/add_path_abc",
+        "GITHUB_STEP_SUMMARY": "/runner/_temp/_runner_file_commands/step_summary_abc",
+        "GITHUB_STATE": "/runner/_temp/_runner_file_commands/save_state_abc",
+        # A control path under a key outside the documented GITHUB_* set.
+        "RUNNER_TEMP_SUMMARY": "/runner/_temp/_runner_file_commands/artifacts_abc",
+        # An ordinary variable, to pin the filter's blast radius.
+        "PATH": "/usr/local/bin:/usr/bin",
+    }
+    monkeypatch.setattr(reviewer.os, "environ", runner_env)
+    with _running_broker(reviewer.OAI_PROXY_URL) as broker:
+        _, env = reviewer._agent_command(model, tmp_path / "review.md", broker)
+    assert not {
+        "GITHUB_OUTPUT",
+        "GITHUB_ENV",
+        "GITHUB_PATH",
+        "GITHUB_STEP_SUMMARY",
+        "GITHUB_STATE",
+    } & set(env)
+    assert not [v for v in env.values() if "file_commands" in v]
+    assert env["PATH"] == "/usr/local/bin:/usr/bin"
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["GITHUB_OUTPUT", "GITHUB_ENV", "GITHUB_PATH", "GITHUB_STEP_SUMMARY", "GITHUB_STATE"],
+)
+def test_control_variables_are_stripped_by_name_not_only_by_path(
+    monkeypatch: Any, clean_env: None, tmp_path: Path, name: str
+) -> None:
+    """Each control variable is covered by the NAME list on its own."""
+    monkeypatch.setattr(
+        reviewer.os,
+        "environ",
+        {"OAI_PROXY_API_KEY": "oai", name: "/runner/_temp/control-plane-abc"},
+    )
+    with _running_broker(reviewer.OAI_PROXY_URL) as broker:
+        _, env = reviewer._agent_command("gpt-5.6-sol", tmp_path / "review.md", broker)
+    assert name not in env
+
+
+def _runner_command_lines(log: str) -> list[str]:
+    """Lines the Actions runner would parse as workflow commands.
+
+    Mirrors actions/runner ActionCommandManager: a line is a command if, after
+    TrimStart, it starts with `::` (v2 syntax), or if it contains `##[`
+    anywhere (legacy v1 syntax). Lines are split the way .NET ReadLine does.
+    """
+    lines = log.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    return [line for line in lines if line.lstrip().startswith("::") or "##[" in line]
+
+
+_FORGERIES = [
+    "::notice title=eumemic-bot review posted::verified",
+    "::error::forged",
+    "   ::stop-commands::deadbeef",
+    "\t::add-mask::x",
+    "chatter ##[error]legacy forged",
+    "##[warning]legacy at line start",
+    "a\r::error::carriage-return split",
+]
+
+
+@pytest.mark.parametrize("forgery", _FORGERIES)
+def test_defusing_leaves_no_line_the_runner_parses_as_a_command(forgery: str) -> None:
+    raw = f"tool output\n{forgery}\nmore\n"
+    assert _runner_command_lines(raw), "the forgery must be live before defusing"
+    defused = reviewer.defuse_workflow_commands(raw)
+    assert _runner_command_lines(defused) == []
+    # Still legible: the operator can read what the agent printed.
+    assert forgery.strip().split("::")[-1].split("]")[-1] in defused
+
+
+def test_harness_output_cannot_forge_or_stop_the_annotation_channel(
+    monkeypatch: Any, clean_env: None, capsys: Any, passthrough_drop: None
+) -> None:
+    """The step log is the annotation channel; the agent's echoed text is in it.
+
+    A forged `::notice::review posted`, or `::stop-commands::` that turns the
+    launcher's own NO-EVIDENCE `::error::` into plain text, would relocate the
+    summary-file forgery rather than close it. Discrimination: the launcher's
+    OWN annotation must still be live after the agent's output is echoed.
+    """
+    monkeypatch.setenv("OAI_PROXY_API_KEY", "secret")
+    hostile = (
+        "::stop-commands::deadbeef\n"
+        "::notice title=eumemic-bot review posted::verified\n"
+        "### Code review\n\nLGTM.\n"
+    )
+    monkeypatch.setattr(reviewer.subprocess, "run", _agent_returning(hostile, 0))
+    with pytest.raises(SystemExit) as exc:
+        reviewer.run_agent("gpt-5.6-sol", "prompt", 10, _DIFF_EVIDENCE)
+    assert exc.value.code == reviewer.NO_EVIDENCE_EXIT_CODE
+    captured = capsys.readouterr()
+    commands = _runner_command_lines(captured.out) + _runner_command_lines(captured.err)
+    # Exactly one live command survives: the launcher's own NO-EVIDENCE error.
+    assert len(commands) == 1
+    assert commands[0].startswith(f"::error title={reviewer.NO_EVIDENCE_BANNER}::")
+    assert "stop-commands" in captured.out  # echoed, but inert
+
+
+def test_harness_output_is_defused_on_the_timeout_path_too(
+    monkeypatch: Any, clean_env: None, capsys: Any, passthrough_drop: None
+) -> None:
+    monkeypatch.setenv("ANT_PROXY_API_KEY", "secret")
+
+    def run(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        raise subprocess.TimeoutExpired(
+            "claude", 10, output=b"::notice::posted\n", stderr=b"::error::x\n"
+        )
+
+    monkeypatch.setattr(reviewer.subprocess, "run", run)
+    with pytest.raises(SystemExit):
+        reviewer.run_agent("claude-opus-5", "prompt", 10, _DIFF_EVIDENCE)
+    captured = capsys.readouterr()
+    assert "posted" in captured.out
+    assert _runner_command_lines(captured.out) == []
+    assert _runner_command_lines(captured.err) == []
 
 
 def test_prompt_pins_the_reviewed_range_to_base_and_head() -> None:
@@ -1149,3 +1288,83 @@ def test_workflow_installs_the_harness_for_every_routed_prefix() -> None:
     # Routed, not all three: switching model must change what gets installed.
     for prefix in ("gpt-*)", "claude-*)", "grok-*)"):
         assert prefix in install
+
+
+def _net_step() -> dict[str, Any]:
+    steps = yaml.safe_load(_WORKFLOW.read_text())["jobs"]["publish"]["steps"]
+    return next(step for step in steps if "GITHUB_STEP_SUMMARY" in step.get("run", ""))
+
+
+def _net_fires(outcomes: dict[str, str]) -> bool:
+    """Evaluate the net step's `if:` for the given result/outcome values."""
+    expr = _net_step()["if"]
+    expr = expr.replace("always()", "True").replace("&&", " and ").replace("||", " or ")
+    expr = re.sub(
+        r"(needs\.agent\.result|steps\.\w+\.outcome)", lambda m: repr(outcomes[m.group(1)]), expr
+    )
+    return bool(eval(expr, {"__builtins__": {}}, {}))  # test-only: evaluates workflow text
+
+
+_SUCCESS = {
+    "needs.agent.result": "success",
+    "steps.artifact.outcome": "success",
+    "steps.app.outcome": "success",
+    "steps.publish.outcome": "success",
+}
+
+
+def _run_net(tmp_path: Path, summary: Path) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["bash", "-e", "-c", _net_step()["run"]],
+        env={"PATH": os.environ["PATH"], "GITHUB_STEP_SUMMARY": str(summary)},
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=tmp_path,
+    )
+
+
+@pytest.mark.parametrize("missed", sorted(_SUCCESS))
+def test_unpublished_review_raises_an_annotation_from_the_nets_own_stdout(
+    tmp_path: Path, missed: str
+) -> None:
+    """The miss is reported on a substrate the reviewed agent cannot append to.
+
+    The run summary lives in the runner's `_runner_file_commands/` directory, a
+    constant path: an agent with an EMPTY environment can still glob it, forge a
+    banner, or flood it past the 1 MiB upload limit so the warning silently
+    vanishes. The `::error::` annotation is parsed from this step's own stdout.
+    """
+    assert _net_fires({**_SUCCESS, missed: "failure"})
+    summary = tmp_path / "step_summary"
+    result = _run_net(tmp_path, summary)
+    assert result.returncode == 0, result.stderr
+    errors = [line for line in result.stdout.splitlines() if line.startswith("::error")]
+    assert len(errors) == 1
+    assert "did not post" in errors[0]
+    assert "did not post" in summary.read_text()
+
+
+def test_net_stays_silent_on_a_genuine_review() -> None:
+    assert not _net_fires(_SUCCESS)
+
+
+def test_a_flooded_or_unwritable_summary_cannot_suppress_the_annotation(tmp_path: Path) -> None:
+    """Burying the alarm must not work: the annotation never touches the file."""
+    flooded = tmp_path / "step_summary"
+    flooded.write_text("x" * (1200 * 1024))
+    assert "::error" in _run_net(tmp_path, flooded).stdout
+    # Even a summary path that cannot be written at all leaves the annotation.
+    unwritable = tmp_path / "no-such-dir" / "step_summary"
+    assert "::error" in _run_net(tmp_path, unwritable).stdout
+
+
+def test_agent_job_reaps_processes_the_agent_left_behind() -> None:
+    """An unsandboxed agent can setsid past its step into later steps' files."""
+    steps = yaml.safe_load(_WORKFLOW.read_text())["jobs"]["agent"]["steps"]
+    ids = [step.get("id") for step in steps]
+    reap_index = next(i for i, step in enumerate(steps) if "pkill" in step.get("run", ""))
+    reap = steps[reap_index]
+    assert reap["if"] == "always()"
+    assert f"-u {reviewer.AGENT_USER}" in reap["run"]
+    assert reap_index == ids.index("agent") + 1

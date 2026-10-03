@@ -111,6 +111,19 @@ XAI_PROXY_URL = "https://xai-proxy.eumemic.ai/v1"
 # in a different job and stages the proxy key through a file rather than the
 # agent step's env, so even this process's /proc never holds GH_TOKEN. File
 # credentials are handled by _drop_persisted_git_credentials and _proxy_key.
+#
+# The Actions control-file variables are on the list for the same reason and
+# with the same caveat, stated plainly so nobody reads it as containment:
+# REMOVING THE NAME OF A RESOURCE IS NOT REMOVING ACCESS TO IT. The runner's
+# file-command directory (`_temp/_runner_file_commands/`) is a documented
+# constant; an agent with an EMPTY environment can glob `step_summary_*` there,
+# and an agent that outlives its step can write into a LATER step's file —
+# forging a "review posted" banner, or flooding the file past the runner's
+# 1 MiB summary limit so the real warning is silently not uploaded. That is why
+# the missing-review alarm does not depend on any file: the workflow's net also
+# raises an `::error::` annotation parsed from its own step's stdout, and the
+# harness output echoed here is defused (defuse_workflow_commands) so the
+# reviewed agent cannot forge or `stop-commands` that channel.
 _STRIPPED_ENV = (
     "GH_TOKEN",
     "GITHUB_TOKEN",
@@ -124,7 +137,18 @@ _STRIPPED_ENV = (
     "OPENAI_BASE_URL",
     "ANTHROPIC_API_KEY",
     "XAI_API_KEY",
+    "GITHUB_OUTPUT",
+    "GITHUB_ENV",
+    "GITHUB_PATH",
+    "GITHUB_STEP_SUMMARY",
+    "GITHUB_STATE",
 )
+
+# The runner also hands out ``_runner_file_commands/*`` paths under keys outside
+# the documented GITHUB_* set, so drop any inherited variable whose VALUE points
+# into that directory too. Same caveat as above: the directory is a constant, so
+# this hides a name, not the resource.
+_CONTROL_PATH_MARKER = "file_commands"
 
 PROXY_KEY_FILE_ENV = "REVIEW_PROXY_KEY_FILE"
 
@@ -209,6 +233,47 @@ def _env(name: str) -> str:
 def _emit(text: str | None, stream: IO[str]) -> None:
     if text:
         print(text, file=stream, end="" if text.endswith("\n") else "\n")
+
+
+# Prefix put on every line of harness output before it reaches the step log.
+# Not whitespace, so the runner's TrimStart cannot strip it back off.
+_HARNESS_LINE_PREFIX = "| "
+# The runner's legacy (v1) command syntax matches ``##[`` ANYWHERE in a line,
+# not only at its start, so a prefix alone does not defuse it.
+_V1_COMMAND_OPENER = "##["
+_V1_COMMAND_DEFUSED = "## ["
+
+
+def defuse_workflow_commands(text: str) -> str:
+    """Make agent-authored output inert to the Actions runner's command parser.
+
+    The runner treats any stdout/stderr line that starts (after leading
+    whitespace) with ``::`` as a workflow command — ``::error::``,
+    ``::add-mask::``, ``::stop-commands::<token>`` — and any line containing
+    ``##[`` as a legacy one. The harness's output is echoed into this step's
+    log and is written by the party under review, so unfiltered it could forge
+    an annotation, or ``stop-commands`` this step so that the launcher's own
+    ``::error::`` below is printed as plain text.
+
+    EVERY line is prefixed, not just the ones that look like commands: which
+    characters count as leading whitespace differs between Python and .NET, and
+    an unconditional non-whitespace prefix makes that question irrelevant.
+    ``splitlines`` splits on a superset of the separators .NET's ``ReadLine``
+    honours (``\r``, ``\n``, ``\r\n``), so no segment the runner would see as
+    a line escapes the prefix.
+    """
+    return "".join(
+        f"{_HARNESS_LINE_PREFIX}{line.replace(_V1_COMMAND_OPENER, _V1_COMMAND_DEFUSED)}\n"
+        for line in text.splitlines()
+    )
+
+
+def _emit_harness(text: str | bytes | None, stream: IO[str]) -> None:
+    """Echo harness output to the step log with workflow commands defused."""
+    if isinstance(text, bytes):
+        text = text.decode(errors="replace")
+    if text:
+        _emit(defuse_workflow_commands(text), stream)
 
 
 def _git(*args: str) -> subprocess.CompletedProcess[str]:
@@ -811,7 +876,11 @@ def _agent_command(
     process. The routed proxy key never appears here.
     """
     kind = model_kind(model)
-    env = {k: v for k, v in os.environ.items() if k not in _STRIPPED_ENV}
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if k not in _STRIPPED_ENV and _CONTROL_PATH_MARKER not in v.lower()
+    }
     if kind == "codex":
         env["OPENAI_API_KEY"] = broker.token
         # Codex ignores OPENAI_BASE_URL: the built-in `openai` provider pins
@@ -1003,11 +1072,13 @@ def _run_harness(
             except subprocess.TimeoutExpired as exc:
                 # capture_output buffers everything until the process ends, so a
                 # timeout is exactly the run whose log would otherwise be empty.
-                _emit(exc.stdout if isinstance(exc.stdout, str) else None, sys.stdout)
-                _emit(exc.stderr if isinstance(exc.stderr, str) else None, sys.stderr)
+                _emit_harness(exc.stdout, sys.stdout)
+                _emit_harness(exc.stderr, sys.stderr)
                 _die(f"{model} review exceeded {timeout} seconds")
-            _emit(result.stdout, sys.stdout)
-            _emit(result.stderr, sys.stderr)
+            # Defused: this is the reviewed party's text, landing in a log the
+            # runner parses for commands (see defuse_workflow_commands).
+            _emit_harness(result.stdout, sys.stdout)
+            _emit_harness(result.stderr, sys.stderr)
             if result.returncode:
                 _die(f"{harness} exited with status {result.returncode}")
             # last-message.md is owned by AGENT_USER after a real drop; make it

@@ -114,6 +114,14 @@ jobs:
           REVIEW_ARTIFACT_PATH: ${{ github.workspace }}/.eumemic-bot-review.md
         run: python3 scripts/eumemic_bot_review.py agent
 
+      # The harness runs unsandboxed and can `setsid` a process that outlives
+      # its step and writes into a LATER step's file-command files (their
+      # directory is a constant, so env-stripping does not hide it). Nothing
+      # the agent user started may survive past here.
+      - name: Reap any process the agent left behind
+        if: always()
+        run: sudo -n pkill -KILL -u eumemic-review || true
+
       # The launcher unlinks the staged key itself; this is the path where it
       # never got that far — a harness that failed to install, a FATAL before
       # the read, a cancelled step.
@@ -198,9 +206,21 @@ jobs:
       # silently green run is exactly how missing `### Code review` comments went
       # unnoticed, so a run that published nothing says so where a reader sees it
       # without opening logs.
+      #
+      # TWO channels with different write-authority, not one hardened channel.
+      # The run summary is a file in the runner's `_runner_file_commands/`
+      # directory, a documented constant: whoever can write there can append a
+      # forged "review posted" banner, or flood the file past the runner's
+      # 1 MiB summary limit so that the upload is silently skipped and the
+      # warning vanishes. The `::error::` annotation is parsed from THIS step's
+      # own stdout, which nothing else can write to. The launcher defuses `::`
+      # in the agent's echoed output, so the agent cannot forge it either.
+      # The annotation is printed first so that it does not depend on the file
+      # write succeeding.
       - name: Note an unpublished review in the run summary
         if: always() && (needs.agent.result != 'success' || steps.artifact.outcome != 'success' || steps.app.outcome != 'success' || steps.publish.outcome != 'success')
         run: |
+          echo "::error title=eumemic-bot review did not post::No \`### Code review\` comment was published for this run. See the step log."
           echo "### eumemic-bot review did not post" >> "$GITHUB_STEP_SUMMARY"
           echo "No \`### Code review\` comment was published for this run. See the step log." \
             >> "$GITHUB_STEP_SUMMARY"

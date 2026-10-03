@@ -8,17 +8,19 @@
 #   1. the unit suite;
 #   2. THE mutant: put GITHUB_OUTPUT back in the agent env and confirm a test
 #      DIES (a guard nobody has seen fail has not been shown to guard anything);
-#   3. the live attack: a fake agent that forges published=true and emits no
-#      evidence, driven through the REAL launcher, must leave the safety net
-#      firing;
-#   4. the permit half: an honest agent must still publish AND still produce
-#      published=true, which is what proves the strip costs nothing.
+#   2a. mutants for the second miss-report channel (#2424): the `::` defusing
+#      of harness output, and the net's own `::error::` annotation;
+#   3. the live attack: an EMPTY-environment agent forges and floods the run
+#      summary via its constant path; the net's annotation must still fire.
 #
 # Usage: scripts/verify_eumemic_bot_review_gate.sh
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 FAIL=0
+# The project venv has pytest + pyyaml; a bare system python3 usually does not,
+# which made every mutant below report WRONG FAILURE (collection died).
+PY="python3"; [ -x "$ROOT/.venv/bin/python" ] && PY="$ROOT/.venv/bin/python"
 step() { printf '\n=== %s ===\n' "$1"; }
 
 step "1. unit suite"
@@ -26,15 +28,16 @@ step "1. unit suite"
 # does. In a bare checkout without the project installed, run them in isolation
 # rather than reporting a collection error as a test failure.
 if python3 -c "import aios" 2>/dev/null; then
-  python3 -m pytest tests/unit/test_eumemic_bot_review.py -q -p no:cacheprovider || FAIL=1
+  "$PY" -m pytest tests/unit/test_eumemic_bot_review.py -q -p no:cacheprovider || FAIL=1
 else
   echo "note: \`aios\` is not importable here; running these tests without the package conftest."
   ISO="$(mktemp -d)"
   mkdir -p "$ISO/tests/unit"
   ln -s "$ROOT/scripts" "$ISO/scripts"
   ln -s "$ROOT/.github" "$ISO/.github"
+  ln -s "$ROOT/docs" "$ISO/docs"
   cp tests/unit/test_eumemic_bot_review.py "$ISO/tests/unit/"
-  (cd "$ISO" && python3 -m pytest tests/unit/test_eumemic_bot_review.py -q -p no:cacheprovider) || FAIL=1
+  (cd "$ISO" && "$PY" -m pytest tests/unit/test_eumemic_bot_review.py -q -p no:cacheprovider) || FAIL=1
   rm -rf "$ISO"
 fi
 
@@ -49,7 +52,7 @@ fi
 # (which fails the run) rather than a pass.
 assert_killed() {  # $1 = tree, $2 = expected failing test, $3 = label
   local out rc
-  out="$(cd "$1" && python3 -m pytest tests/unit/test_eumemic_bot_review.py \
+  out="$(cd "$1" && "$PY" -m pytest tests/unit/test_eumemic_bot_review.py \
         -q -p no:cacheprovider 2>&1)"; rc=$?
   if [ "$rc" = 0 ]; then
     echo "MUTANT SURVIVED ($3) — the suite is green with the fix reverted"; FAIL=1; return
@@ -70,8 +73,9 @@ assert_killed() {  # $1 = tree, $2 = expected failing test, $3 = label
 
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 mk_tree() {  # $1 = dest
-  mkdir -p "$1/scripts" "$1/tests/unit" "$1/.github/workflows"
+  mkdir -p "$1/scripts" "$1/tests/unit" "$1/.github/workflows" "$1/docs"
   cp scripts/eumemic_bot_review.py "$1/scripts/"
+  cp docs/eumemic-bot-review.md "$1/docs/"
   cp tests/unit/test_eumemic_bot_review.py "$1/tests/unit/"
   cp .github/workflows/eumemic-bot-review.yml "$1/.github/workflows/"
 }
@@ -118,6 +122,35 @@ PY
 assert_killed "$D" "test_evidence_regex_will_not_even_match_a_short_digest" \
   "evidence regex widened to admit a short digest"
 
+step "2a. mutants: the miss-report's second channel (must KILL a named test)"
+# Issue #2424: env-stripping cannot hide a constant path, so the miss is also
+# reported as an ::error:: annotation from the net's own stdout. Both halves of
+# that need a mutant: the defusing that stops the agent forging it, and the
+# annotation itself.
+D="$TMP/no-defuse"; mk_tree "$D"
+python3 - "$D/scripts/eumemic_bot_review.py" <<'PY'
+import sys
+p = sys.argv[1]
+text = open(p).read()
+needle = "        _emit(defuse_workflow_commands(text), stream)"
+assert needle in text, "harness output is no longer defused"
+open(p, "w").write(text.replace(needle, "        _emit(text, stream)", 1))
+PY
+assert_killed "$D" "test_harness_output_cannot_forge_or_stop_the_annotation_channel" \
+  "harness output echoed without :: defusing"
+
+D="$TMP/no-annotation"; mk_tree "$D"
+python3 - "$D/.github/workflows/eumemic-bot-review.yml" <<'PY'
+import sys
+p = sys.argv[1]
+lines = open(p).read().splitlines(keepends=True)
+kept = [l for l in lines if 'echo "::error title=eumemic-bot review did not post' not in l]
+assert len(kept) == len(lines) - 1, "the net's ::error:: annotation is gone"
+open(p, "w").write("".join(kept))
+PY
+assert_killed "$D" "test_a_flooded_or_unwritable_summary_cannot_suppress_the_annotation" \
+  "net's ::error:: annotation removed"
+
 step "2b. self-check: a collection error must NOT be counted as a kill"
 D="$TMP/broken-collect"; mk_tree "$D"
 printf '\nimport nonexistent_module_xyz\n' >> "$D/tests/unit/test_eumemic_bot_review.py"
@@ -128,89 +161,32 @@ else
   echo "BROKEN — the kill-check still fails open on a collection error: $SELF"; FAIL=1
 fi
 
-step "3+4. forged-\$GITHUB_OUTPUT attack, then the honest agent, through the REAL launcher"
+step "3+4. the net's two channels, attacked through the REAL workflow step"
+# The previous live attack drove the single-phase launcher (#2404), which no
+# longer exists: the agent phase now needs sudo + setpriv, and publication moved
+# to a separate job. What #2424 adds is that a miss is reported on a channel the
+# agent cannot write to, so attack THAT: an agent with an EMPTY environment that
+# globs the constant control-file directory, forges a banner into the summary
+# and floods it past 1 MiB, followed by the net step itself.
 ATK="$(mktemp -d)"; trap 'rm -rf "$TMP" "$ATK"' EXIT
-mkdir -p "$ATK/bin"
-# Attacker: forge the net's own input, emit NO evidence.
-cat >"$ATK/bin/codex" <<'EOF'
-#!/usr/bin/env bash
-[ -n "${GITHUB_OUTPUT:-}" ] && { echo "published=true" >> "$GITHUB_OUTPUT"; echo "AGENT-SAW-GITHUB_OUTPUT" >&2; }
-# Round 3: the net's OUTPUT channel, not just its input. The "did not post"
-# warning is written to $GITHUB_STEP_SUMMARY, so a writable handle there lets
-# the agent forge a "review posted" banner over the operator's own account of
-# what happened. $GITHUB_STATE survives into the job's post-steps.
-[ -n "${GITHUB_STEP_SUMMARY:-}" ] && { echo "### eumemic-bot review posted :white_check_mark:" >> "$GITHUB_STEP_SUMMARY"; echo "AGENT-SAW-GITHUB_STEP_SUMMARY" >&2; }
-[ -n "${GITHUB_STATE:-}" ] && { echo "forged=1" >> "$GITHUB_STATE"; echo "AGENT-SAW-GITHUB_STATE" >&2; }
-out=""; while [ $# -gt 0 ]; do [ "$1" = "--output-last-message" ] && out="$2"; shift; done
-cat >/dev/null
-printf '### Code review\n\nNo actionable findings. LGTM.\n' > "$out"
-EOF
-# Honest agent: actually runs the mandated commands.
-cat >"$ATK/bin/codex-honest" <<'EOF'
-#!/usr/bin/env bash
-out=""; while [ $# -gt 0 ]; do [ "$1" = "--output-last-message" ] && out="$2"; shift; done
-cat >/dev/null
-L=$(git --no-pager diff "$BASE_SHA...$HEAD_SHA" | wc -l)
-S=$(git --no-pager diff "$BASE_SHA...$HEAD_SHA" | sha256sum | cut -d' ' -f1)
-printf '### Code review\n\nBLOCKING: a real finding.\n\n<!-- inspected: lines=%s sha256=%s -->\n' "$L" "$S" > "$out"
-EOF
-chmod +x "$ATK/bin/codex" "$ATK/bin/codex-honest"
-cat >"$ATK/server.py" <<'EOF'
-import http.server, json, sys
-class H(http.server.BaseHTTPRequestHandler):
-    def do_POST(self):
-        b = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-        open(sys.argv[2], "a").write("POSTED\n")
-        self.send_response(201); self.send_header("Content-Type", "application/json"); self.end_headers()
-        self.wfile.write(json.dumps({"html_url": "https://example/c/1", "body": b["body"]}).encode())
-    def log_message(self, *a): pass
-http.server.HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
-EOF
-PORT=8759
-POSTED="$ATK/posted.log"; : >"$POSTED"
-python3 "$ATK/server.py" "$PORT" "$POSTED" & SRV=$!
-sleep 1
-sed "s#https://api.github.com#http://127.0.0.1:$PORT#" scripts/eumemic_bot_review.py >"$ATK/launcher.py"
-H_SHA="$(git rev-parse HEAD)"; B_SHA="$(git rev-parse HEAD~1)"
-run_case() {  # $1 = agent binary name
-  GHO="$ATK/gho.$1"; : >"$GHO"; : >"$POSTED"
-  SUMMARY="$ATK/summary.$1"; : >"$SUMMARY"
-  cp "$ATK/bin/$1" "$ATK/bin/codex_run"; mv "$ATK/bin/codex_run" "$ATK/bin/codex"
-  PATH="$ATK/bin:$PATH" GITHUB_OUTPUT="$GHO" GITHUB_ENV="$ATK/env" GITHUB_PATH="$ATK/path" \
-  GITHUB_STEP_SUMMARY="$SUMMARY" GITHUB_STATE="$ATK/state" \
-  GH_TOKEN=tok OAI_PROXY_API_KEY=key REPO=eumemic/aios PR_NUMBER=0 \
-  HEAD_SHA="$H_SHA" BASE_SHA="$B_SHA" REVIEW_MODEL=gpt-5.6-sol \
-  REVIEW_SANDBOX_MODE=danger-full-access \
-  python3 "$ATK/launcher.py" >"$ATK/out.$1" 2>"$ATK/err.$1"
-  echo $?
-}
-RC="$(run_case codex)"
-echo "attack: launcher exit=$RC posted=$([ -s "$POSTED" ] && echo YES || echo NO) GITHUB_OUTPUT='$(tr -d '\n' <"$ATK/gho.codex")'"
-if grep -q AGENT-SAW-GITHUB_OUTPUT "$ATK/err.codex" || grep -q published=true "$ATK/gho.codex"; then
-  echo "  VULNERABLE (input) — the agent forged the safety net's input"; FAIL=1
+CTRL="$ATK/_temp/_runner_file_commands"; mkdir -p "$CTRL"
+SUMMARY="$CTRL/step_summary_net"; : >"$SUMMARY"
+env -i /bin/bash -c "for f in $CTRL/step_summary_*; do
+  echo '### eumemic-bot review posted :white_check_mark:' >> \"\$f\"
+  head -c 1258291 /dev/zero | tr '\\0' x >> \"\$f\"
+done"
+NET="$("$PY" -c 'import sys, yaml
+steps = yaml.safe_load(open(sys.argv[1]))["jobs"]["publish"]["steps"]
+print(next(s for s in steps if "GITHUB_STEP_SUMMARY" in s.get("run", ""))["run"])' \
+  .github/workflows/eumemic-bot-review.yml)"
+OUT="$(GITHUB_STEP_SUMMARY="$SUMMARY" bash -e -c "$NET")"
+SIZE="$(wc -c <"$SUMMARY")"
+echo "summary after attack: ${SIZE} bytes (runner skips upload above 1048576)"
+if grep -q '^::error title=eumemic-bot review did not post::' <<<"$OUT"; then
+  echo "  SAFE — the ::error:: annotation fires from the net's own stdout"
 else
-  echo "  SAFE (input) — agent blind to GITHUB_OUTPUT, net still fires"
+  echo "  VULNERABLE — the flooded/forged summary was the only report"; FAIL=1
 fi
-# The net's OUTPUT channel: the warning a human actually reads.
-if grep -q AGENT-SAW-GITHUB_STEP_SUMMARY "$ATK/err.codex" || \
-   grep -q "review posted" "$ATK/summary.codex"; then
-  echo "  VULNERABLE (output) — the agent forged the 'did not post' warning's own channel"; FAIL=1
-else
-  echo "  SAFE (output) — agent blind to GITHUB_STEP_SUMMARY, the warning cannot be overwritten"
-fi
-if grep -q AGENT-SAW-GITHUB_STATE "$ATK/err.codex" || [ -s "$ATK/state" ]; then
-  echo "  VULNERABLE (state) — the agent reached GITHUB_STATE, which survives into post-steps"; FAIL=1
-else
-  echo "  SAFE (state) — agent blind to GITHUB_STATE"
-fi
-RC="$(run_case codex-honest)"
-echo "honest: launcher exit=$RC posted=$([ -s "$POSTED" ] && echo YES || echo NO) GITHUB_OUTPUT='$(tr -d '\n' <"$ATK/gho.codex-honest")'"
-if [ "$RC" = 0 ] && [ -s "$POSTED" ] && grep -q published=true "$ATK/gho.codex-honest"; then
-  echo "  PERMITS — a genuine review still publishes and still signals"
-else
-  echo "  BROKEN — the strip suppressed a legitimate review"; FAIL=1
-fi
-kill $SRV 2>/dev/null
 
 if [ "$FAIL" = 0 ]; then echo; echo "ALL CHECKS PASSED"; else echo; echo "CHECKS FAILED"; fi
 exit "$FAIL"
