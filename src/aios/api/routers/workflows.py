@@ -29,6 +29,7 @@ from aios.models.pagination import (
 from aios.models.trace import TraceResponse
 from aios.models.workflows import (
     GateResume,
+    OperatorAuthority,
     WfRun,
     WfRunCreate,
     WfRunEvent,
@@ -215,6 +216,7 @@ async def create_run(body: WfRunCreate, pool: PoolDep, account_id: AccountIdDep)
     return await service.create_run(
         pool,
         account_id=account_id,
+        authority=OperatorAuthority(),
         workflow_id=body.workflow_id,
         inline=inline,
         environment_id=body.environment_id,

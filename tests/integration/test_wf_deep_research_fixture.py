@@ -20,7 +20,7 @@ from aios.db import queries as db_queries
 from aios.db.pool import create_pool
 from aios.db.queries import workflows as wf_queries
 from aios.harness import runtime
-from aios.models.workflows import WfRunEvent
+from aios.models.workflows import OperatorAuthority, WfRunEvent
 from aios.services import agents as agents_service
 from aios.tools import workflow_completion
 from aios.workflows import run_tools, service
@@ -67,7 +67,12 @@ async def _make_run(pool: asyncpg.Pool[Any], script: str, *, input: Any = None) 
     async with pool.acquire() as conn:
         wf = await wf_queries.insert_workflow(conn, account_id="acc_wf", name="w", script=script)
     run = await service.create_run(
-        pool, account_id="acc_wf", workflow_id=wf.id, environment_id="env_wf", input=input
+        pool,
+        account_id="acc_wf",
+        authority=OperatorAuthority(),
+        workflow_id=wf.id,
+        environment_id="env_wf",
+        input=input,
     )
     return run.id
 

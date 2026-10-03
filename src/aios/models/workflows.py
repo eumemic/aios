@@ -14,6 +14,7 @@ reuse the read views directly, the way ``Agent``/``Session`` do.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Literal, NamedTuple
 
@@ -38,6 +39,50 @@ WorkspaceMode = Literal["shared", "fresh"]
 
 RunPrincipal = Literal["operator", "session"]  # see ``WfRun.principal``
 RunVisibility = Literal["account", "session"]  # see ``WfRun.visibility``
+
+
+class AsAgent(BaseModel):
+    """An agent version whose surface an operator re-rooted a sub-run to
+    (``invoke_workflow``'s ``as_agent``), so an eval arm runs with the authority that
+    agent would give it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    agent_id: str
+    version: int = Field(ge=1, lt=2**31)
+
+
+@dataclass(frozen=True, slots=True)
+class OperatorAuthority:
+    """A run launched through the operator API. Its workflow's surface binds as-is."""
+
+
+@dataclass(frozen=True, slots=True)
+class SessionAuthority:
+    """A run an agent session launched: ``call_workflow``, a workflow-as-model turn, or
+    a trigger fire. The session's current surface and vaults bound it.
+    ``parent_run_id`` is lineage only: it sets the depth budget, never the authority."""
+
+    session_id: str
+    parent_run_id: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class RunAuthority:
+    """A sub-run a run launched with ``invoke_workflow``. The parent run's frozen surface
+    and vaults bound it, and the parent is also its lineage parent.
+
+    ``as_agent`` (operator runs only) re-roots the surface bound at that agent version:
+    the bound becomes ``clamp(surface_of(agent_version), parent surface)``. The model
+    and vaults still come from the parent."""
+
+    run_id: str
+    as_agent: AsAgent | None = None
+
+
+# Who a new run acts under (``create_run``). It decides the run's principal, the
+# surface its snapshot is clamped to, the vaults it may bind and its lineage.
+type RunAuthoritySource = OperatorAuthority | SessionAuthority | RunAuthority
 
 WfRunStatus = Literal["pending", "running", "suspended", "completed", "errored", "cancelled"]
 WfRunEventType = Literal[
@@ -196,6 +241,14 @@ class WfRun(BaseModel):
             "session doesn't change it."
         )
     )
+    as_agent: AsAgent | None = Field(
+        default=None,
+        description=(
+            "Set when an operator run invoked this run with `as_agent`: the agent "
+            "version whose surface it was clamped to, within the parent run's. Only the "
+            "surface changes; the model and vaults still come from the parent run."
+        ),
+    )
     visibility: RunVisibility = Field(
         description=(
             "Who may read the run through agent tools: `account` (any session in the "
@@ -328,7 +381,7 @@ WORKFLOW_SCRIPT_CONTRACT = """Workflow script contract:
   `main`.
 - Injected capability API, available without imports:
   - `agent(input, *, agent_id=None, output_schema=None, model=None, label=None)`: invoke a generic or named agent and await its result.
-  - `invoke_workflow(workflow_id, input, *, version=None, output_schema=None, label=None)`: invoke another workflow as a sub-run and await its result (the run dual of `agent`). `version` pins a registered version; omitted, the version current at launch runs. The sub-run runs under this run's surface intersected with the target's; a failed or gone sub-run raises like a failed `agent`.
+  - `invoke_workflow(workflow_id, input, *, version=None, output_schema=None, label=None, as_agent=None)`: invoke another workflow as a sub-run and await its result (the run dual of `agent`). `version` pins a registered version; omitted, the version current at launch runs. The sub-run runs under this run's surface intersected with the target's, and binds this run's vaults; a failed or gone sub-run raises like a failed `agent`. `as_agent={"agent_id": ..., "version": N}` also intersects the sub-run's surface with that agent version's; only a run an operator launched may pass it.
   - `tool(name, input)`: invoke a declared tool; tool errors are returned, not raised.
   - `call_llm(request)`: run one raw inference turn and await the assistant turn. `request` carries `model` (omit to use the run's default child model; a `workflow:` target is rejected), `messages` (required), optional `tools` (schemas OFFERED — the model may request a call, but call_llm never runs it), and optional `params` (provider knobs). The result is `{"content", "tool_calls", "finish_reason", "usage", "cost", "message"}`, or `{"error": ...}` — a model error is returned, not raised. Its cost is metered against this run's `budget_usd` ceiling, so a budget-exhausted run refuses further `call_llm`. Use it to route/judge/fact-check around inference; use `agent(...)` when you want the tool calls executed.
   - `gate()`: suspend until an external resume delivers a value.

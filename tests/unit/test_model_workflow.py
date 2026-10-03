@@ -188,5 +188,5 @@ async def test_model_workflow_launch_inherits_session_vaults(
     )
 
     assert launch.await_args is not None
-    assert launch.await_args.kwargs["launcher_session_id"] == "ses_1"
+    assert launch.await_args.kwargs["authority"].session_id == "ses_1"
     assert launch.await_args.kwargs.get("vault_ids") is None

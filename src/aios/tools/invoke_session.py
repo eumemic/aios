@@ -59,7 +59,7 @@ from aios.harness import runtime
 from aios.models.memory_stores import MemoryStoreResource
 from aios.models.sessions import OutboundSuppression, SessionResource
 from aios.models.tasks import AwaitResponse
-from aios.models.workflows import InlineScriptBody
+from aios.models.workflows import InlineScriptBody, SessionAuthority
 from aios.services import sessions as sessions_service
 from aios.services import tasks as tasks_service
 from aios.services import workflows as wf_service
@@ -439,8 +439,7 @@ async def call_workflow_handler(
         input=args.input,
         caller=_caller(session_id),
         output_schema=args.output_schema,
-        launcher_session_id=session_id,
-        parent_run_id=session.parent_run_id,
+        authority=SessionAuthority(session_id, session.parent_run_id),
         vault_ids=args.vault_ids,
         budget_usd=args.budget_usd,
         workspace=args.workspace,
