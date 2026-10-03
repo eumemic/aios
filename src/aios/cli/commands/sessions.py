@@ -6,6 +6,7 @@ import json
 import sys
 from pathlib import Path
 from typing import Annotated, Any
+from urllib.parse import quote
 
 import typer
 
@@ -67,6 +68,25 @@ def list_(
 def get(ctx: typer.Context, session_id: str) -> None:
     def _run() -> None:
         raw_single(ctx, "GET", f"/v1/sessions/{session_id}")
+
+    run_or_die(_run)
+
+
+@app.command("request", help="Rebuild a request the session sent, from its capture.")
+@covers("get_session_request")
+def request(
+    ctx: typer.Context,
+    session_id: str,
+    request_id: Annotated[
+        str, typer.Argument(help="The model_request_start (or model_workflow_park) event id.")
+    ],
+    model: Annotated[
+        str | None, typer.Option("--model", help="Render for this model's gates instead.")
+    ] = None,
+) -> None:
+    def _run() -> None:
+        query = f"?model={quote(model, safe='')}" if model is not None else ""
+        raw_single(ctx, "GET", f"/v1/sessions/{session_id}/requests/{request_id}{query}")
 
     run_or_die(_run)
 

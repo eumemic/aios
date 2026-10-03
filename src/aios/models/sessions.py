@@ -573,6 +573,39 @@ class ContextResponse(BaseModel):
     tools: list[dict[str, Any]]
 
 
+class RebuiltRequest(BaseModel):
+    """A captured request, recomposed (#2471).
+
+    ``fidelity`` is ``exact`` when the rebuild hashes to the captured
+    ``payload_sha``: it is the request the session composed. ``inexact`` means
+    the renderer changed since (compare ``record.render_version``) or an image the
+    request inlined changed on disk. ``rerendered`` means it was rendered for
+    another model (``?model=``), so there's no hash to compare. ``request`` is
+    ``{messages, tools, params}``; ``params`` never includes an ``api_key``.
+    """
+
+    kind: Literal["rebuilt"] = "rebuilt"
+    session_id: str
+    request_id: str
+    fidelity: Literal["exact", "inexact", "rerendered"]
+    request: dict[str, Any]
+    record: dict[str, Any]
+
+
+class MissingRequest(BaseModel):
+    """A captured request that can't be rebuilt: ``blob`` (a captured part is gone)
+    or ``attachment`` (an image file the request inlined is unreadable here)."""
+
+    kind: Literal["missing"] = "missing"
+    session_id: str
+    request_id: str
+    missing: Literal["blob", "attachment"]
+    record: dict[str, Any]
+
+
+SessionRequest = Annotated[RebuiltRequest | MissingRequest, Field(discriminator="kind")]
+
+
 class ToolConfirmationRequest(BaseModel):
     """Request body for ``POST /v1/sessions/{id}/tool-confirmations``.
 
