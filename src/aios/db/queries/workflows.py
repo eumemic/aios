@@ -1987,6 +1987,24 @@ SELECT kind, id, parent_kind, parent_id FROM tree WHERE depth > 0 LIMIT $3
 """
 
 
+async def call_started_labels(
+    conn: asyncpg.Connection[Any], run_ids: list[str], *, account_id: str
+) -> dict[str, str]:
+    """Child id → the ``label`` its parent's ``agent()``/``invoke_workflow()`` call gave
+    it, read from the ``call_started`` events of ``run_ids``. A pruned journal has no
+    labels. ``wf_run_events`` carries no ``account_id``, so the runs are scoped by join.
+    """
+    rows = await conn.fetch(
+        "SELECT COALESCE(e.payload->>'child_session_id', e.payload->>'child_run_id') AS child, "
+        "e.payload->>'label' AS label FROM wf_run_events e "
+        "JOIN wf_runs r ON r.id = e.run_id AND r.account_id = $2 "
+        "WHERE e.run_id = ANY($1) AND e.type = 'call_started' AND e.payload ? 'label'",
+        run_ids,
+        account_id,
+    )
+    return {r["child"]: r["label"] for r in rows if r["child"] is not None}
+
+
 def _iso(value: Any) -> str | None:
     return None if value is None else value.isoformat()
 
@@ -1997,75 +2015,71 @@ async def sub_run_facts(
     """Facts about every session and run ``run_id`` created, directly or through its
     descendants: what each was, how it ended, when, and what it spent per model.
 
-    Metadata only, never inputs, outputs or journals. ``nodes`` is capped at
-    ``max_nodes``; ``truncated`` says the subtree had more. Each node's ``label`` is
-    the one its parent run's ``agent()``/``invoke_workflow()`` call gave it (absent
-    once the parent's journal is pruned). ``usage`` comes from the inference ledger,
-    one entry per model; ``model`` is ``None`` for charges recorded before the ledger
-    carried it.
+    Metadata only, never inputs, outputs or journals. ``nodes`` is in spawn order and
+    capped at ``max_nodes``; ``truncated`` says the subtree had more. Each node's
+    ``label`` is the one its parent run's ``agent()``/``invoke_workflow()`` call gave it
+    (absent once the parent's journal is pruned). A run's ``duration_ms`` comes from its
+    terminal summary (``None`` until it ends). ``usage`` is the node's own inference
+    charges, one entry per model; ``model`` is ``None`` for charges recorded before the
+    ledger carried it. All reads share one snapshot.
     """
-    rows = await conn.fetch(_SUB_RUN_TREE_SQL, run_id, account_id, max_nodes + 1)
-    truncated = len(rows) > max_nodes
-    rows = rows[:max_nodes]
-    run_ids = [r["id"] for r in rows if r["kind"] == "run"]
-    session_ids = [r["id"] for r in rows if r["kind"] == "session"]
-
-    runs = {
-        r["id"]: r
+    async with conn.transaction(isolation="repeatable_read", readonly=True):
+        rows = await conn.fetch(_SUB_RUN_TREE_SQL, run_id, account_id, max_nodes + 1)
+        truncated = len(rows) > max_nodes
+        rows = rows[:max_nodes]
+        run_ids = [r["id"] for r in rows if r["kind"] == "run"]
+        session_ids = [r["id"] for r in rows if r["kind"] == "session"]
+        runs = {
+            r["id"]: r
+            for r in await conn.fetch(
+                "SELECT id, workflow_id, source_version, status, terminal_summary, created_at "
+                "FROM wf_runs WHERE account_id = $1 AND id = ANY($2)",
+                account_id,
+                run_ids,
+            )
+        }
+        sessions = {
+            r["id"]: r
+            for r in await conn.fetch(
+                "SELECT id, agent_id, agent_version, model, stop_reason, archived_at, "
+                "created_at, updated_at FROM sessions WHERE account_id = $1 AND id = ANY($2)",
+                account_id,
+                session_ids,
+            )
+        }
+        labels = await call_started_labels(conn, [run_id, *run_ids], account_id=account_id)
+        usage: dict[str, list[dict[str, Any]]] = {}
         for r in await conn.fetch(
-            "SELECT id, workflow_id, source_version, status, created_at, updated_at "
-            "FROM wf_runs WHERE account_id = $1 AND id = ANY($2)",
-            account_id,
-            run_ids,
-        )
-    }
-    sessions = {
-        r["id"]: r
-        for r in await conn.fetch(
-            "SELECT id, agent_id, agent_version, model, stop_reason, archived_at, "
-            "created_at, updated_at FROM sessions WHERE account_id = $1 AND id = ANY($2)",
+            "SELECT COALESCE(session_id, run_id) AS node, model, "
+            "SUM(input_tokens)::bigint AS input_tokens, "
+            "SUM(output_tokens)::bigint AS output_tokens, "
+            "SUM(cache_read_input_tokens)::bigint AS cache_read_input_tokens, "
+            "SUM(cache_creation_input_tokens)::bigint AS cache_creation_input_tokens, "
+            "SUM(cost_microusd)::bigint AS cost_microusd "
+            "FROM inference_usage_ledger "
+            "WHERE account_id = $1 AND (session_id = ANY($2) OR run_id = ANY($3)) "
+            "GROUP BY 1, 2 ORDER BY 1, 2",
             account_id,
             session_ids,
-        )
-    }
-    # The parents' journals; the run ids were read account-scoped above.
-    labels: dict[str, str] = {}
-    for r in await conn.fetch(
-        "SELECT COALESCE(payload->>'child_session_id', payload->>'child_run_id') AS child, "
-        "payload->>'label' AS label FROM wf_run_events "
-        "WHERE run_id = ANY($1) AND type = 'call_started' AND payload ? 'label'",
-        [run_id, *run_ids],
-    ):
-        if r["child"] is not None:
-            labels[r["child"]] = r["label"]
-    usage: dict[str, list[dict[str, Any]]] = {}
-    for r in await conn.fetch(
-        "SELECT COALESCE(session_id, run_id) AS node, model, "
-        "SUM(input_tokens)::bigint AS input_tokens, "
-        "SUM(output_tokens)::bigint AS output_tokens, "
-        "SUM(cache_read_input_tokens)::bigint AS cache_read_input_tokens, "
-        "SUM(cache_creation_input_tokens)::bigint AS cache_creation_input_tokens, "
-        "SUM(cost_microusd)::bigint AS cost_microusd "
-        "FROM inference_usage_ledger "
-        "WHERE account_id = $1 AND (session_id = ANY($2) OR run_id = ANY($3)) "
-        "GROUP BY 1, 2 ORDER BY 1, 2",
-        account_id,
-        session_ids,
-        run_ids,
-    ):
-        usage.setdefault(r["node"], []).append(
-            {
-                "model": r["model"],
-                "input_tokens": r["input_tokens"],
-                "output_tokens": r["output_tokens"],
-                "cache_read_input_tokens": r["cache_read_input_tokens"],
-                "cache_creation_input_tokens": r["cache_creation_input_tokens"],
-                "cost_microusd": r["cost_microusd"],
-            }
-        )
+            run_ids,
+        ):
+            usage.setdefault(r["node"], []).append(
+                {
+                    "model": r["model"],
+                    "input_tokens": r["input_tokens"],
+                    "output_tokens": r["output_tokens"],
+                    "cache_read_input_tokens": r["cache_read_input_tokens"],
+                    "cache_creation_input_tokens": r["cache_creation_input_tokens"],
+                    "cost_microusd": r["cost_microusd"],
+                }
+            )
+
+    def spawned(r: asyncpg.Record) -> tuple[Any, str]:
+        meta = runs[r["id"]] if r["kind"] == "run" else sessions[r["id"]]
+        return meta["created_at"], r["id"]
 
     nodes: list[dict[str, Any]] = []
-    for r in rows:
+    for r in sorted(rows, key=spawned):
         node: dict[str, Any] = {
             "kind": r["kind"],
             "id": r["id"],
@@ -2075,14 +2089,13 @@ async def sub_run_facts(
         }
         if r["kind"] == "run":
             run = runs[r["id"]]
+            summary = run["terminal_summary"]
             node |= {
                 "workflow_id": run["workflow_id"],
                 "workflow_version": run["source_version"],
                 "status": run["status"],
                 "started_at": _iso(run["created_at"]),
-                "ended_at": (
-                    _iso(run["updated_at"]) if run["status"] in TERMINAL_RUN_STATUSES else None
-                ),
+                "duration_ms": summary.get("duration_ms") if summary is not None else None,
             }
         else:
             session = sessions[r["id"]]
