@@ -243,7 +243,17 @@ async def get_agent_handler(session_id: str, arguments: dict[str, Any]) -> dict[
     account_id = await sessions_service.load_session_account_id(pool, session_id)
     args = tool_input(_GetAgentArgs, arguments)
     agent = await agents_service.get_agent(pool, args.agent_id, account_id=account_id)
-    return agent.model_dump(mode="json")  # FULL — incl. surface + version (the re-read loop)
+    echo = agent.model_dump(mode="json")  # FULL — incl. surface + version (the re-read loop)
+    # An inline credential is the operator's, never the model's: echo only that one
+    # is set (the model_providers convention). The model can't write litellm_extra,
+    # so the redacted echo can't round-trip into an edit.
+    extra = echo.get("litellm_extra")
+    if isinstance(extra, dict) and "api_key" in extra:
+        echo["litellm_extra"] = {
+            **{k: v for k, v in extra.items() if k != "api_key"},
+            "api_key_set": True,
+        }
+    return echo
 
 
 async def list_agents_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, Any]:

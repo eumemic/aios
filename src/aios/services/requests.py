@@ -54,7 +54,7 @@ class Rebuilt:
 
 @dataclass(frozen=True, slots=True)
 class Missing:
-    what: str
+    what: Literal["blob", "attachment"]
     record: dict[str, Any]
 
 

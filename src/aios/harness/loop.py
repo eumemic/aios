@@ -909,8 +909,7 @@ async def _run_session_step_body(
     # row-locked UPDATE+INSERT+NOTIFY apiece. The question they instrumented
     # (#1658/#1659) is now answered, so they default OFF; a live env read
     # (not ``get_settings()``, which is ``lru_cache``d) re-arms them for a
-    # single-session/short-window re-profile with no redeploy — same idiom as
-    # ``AIOS_DUMP_CONTEXT`` (see ``_dump_context_if_enabled`` below). Read
+    # single-session/short-window re-profile with no redeploy. Read
     # ONCE at guard entry so every call this step sees the same value (the
     # all-or-nothing bracket is automatic, not per-call). ``_span`` closes
     # over ``pool``/``session_id``/``account_id``/``debug`` and is a pure
@@ -1318,11 +1317,6 @@ async def _run_session_step_body(
         },
         account_id=account_id,
     )
-
-    # Dump the exact chat-completions payload we're about to send to LiteLLM
-    # when AIOS_DUMP_CONTEXT is set — useful for debugging prompt construction
-    # (header inlining, system-prompt augmentation, tool list shape).
-    await _dump_context_if_enabled(session_id, agent.model, messages, tools)
 
     llm_request = LlmRequest(
         messages=messages,
@@ -2187,43 +2181,6 @@ def _switch_channel_tool_spec() -> dict[str, Any]:
     from aios.tools.registry import registry as tool_registry
 
     return openai_tool_entry(tool_registry.get("switch_channel"))
-
-
-async def _dump_context_if_enabled(
-    session_id: str,
-    model: str,
-    messages: list[dict[str, Any]],
-    tools: list[dict[str, Any]] | None,
-) -> None:
-    """Write the chat-completions payload to disk when ``AIOS_DUMP_CONTEXT`` is set.
-
-    Debug aid: inspect exactly what reaches LiteLLM (post header-inlining,
-    post system-prompt augmentation, with the full tool list).
-    """
-    if not _os.environ.get("AIOS_DUMP_CONTEXT"):
-        return
-    import asyncio as _asyncio
-    import json as _json
-    import time as _time
-    from pathlib import Path as _Path
-
-    dump_dir = _Path(_os.environ.get("AIOS_DUMP_CONTEXT_DIR", "/tmp/aios-context-dumps"))
-    ts = int(_time.time() * 1000)
-    path = dump_dir / f"{ts}_{session_id}.json"
-    payload = {
-        "session_id": session_id,
-        "model": model,
-        "messages": messages,
-        "tools": tools,
-    }
-
-    def _write() -> None:
-        dump_dir.mkdir(parents=True, exist_ok=True)
-        with open(path, "w") as f:
-            _json.dump(payload, f, indent=2)
-
-    await _asyncio.to_thread(_write)
-    log.info("step.context_dumped", path=str(path))
 
 
 def _tc_name(tc: dict[str, Any]) -> str:

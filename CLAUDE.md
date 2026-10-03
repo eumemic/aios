@@ -229,6 +229,7 @@ The durable workflow runtime runs deterministic, replayable scripts as an **appe
 4. **Tool-always-appends-result** — every async tool task MUST append exactly one tool_result event and defer a wake (try/except/finally).
 5. **Procrastinate lock** — `lock="{session_id}"` for mutual exclusion, `queueing_lock="{session_id}"` for wake deduplication.
 6. **NOTIFY after commit** — `pg_notify` fires outside the transaction so subscribers don't see uncommitted rows.
+7. **Request recoverability** — every request a session composes for its own inference is recoverable from durable state: the log, plus the `request` record on the span that opened the send (`model_request_start`, or the `model_workflow_park` record), plus its per-account `request_blobs` (`harness/request_capture.py`). `services/requests.rebuild_request` recomposes it with the same `build_messages` → `finalize_messages` the step uses. At the same `RENDER_VERSION` the rebuild is byte-for-byte, and `payload_sha` says whether it was. Any rendering change must bump `RENDER_VERSION` (the golden test `tests/unit/test_render_golden.py` enforces it). `payload_sha` covers the composed request (`{messages, tools, params}`, without an inline `api_key`). The wire bytes are different: cache breakpoints, provider kwargs and body-budget eviction come after capture. `context_admission_payload_digest` on `model_request_end` is the separate wire-level digest, and it includes auth.
 
 ## Environment variables
 
