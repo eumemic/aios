@@ -237,7 +237,7 @@ _FIXED_OMISSION_BOUNDARY_SQL = (
     "FROM events "
     "WHERE session_id = $1 AND account_id = $2 AND kind = 'message' "
     "AND cumulative_tokens <= $3 "
-    "ORDER BY cumulative_tokens DESC, seq DESC LIMIT 1"
+    "ORDER BY cumulative_tokens DESC LIMIT 1"
 )
 
 _LATEST_CUMULATIVE_SQL = (

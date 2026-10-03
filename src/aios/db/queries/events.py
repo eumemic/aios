@@ -2614,7 +2614,8 @@ async def read_windowed_context_events(
     ``seq`` is greater than ``N``, the seq of the last dropped message (0 when the
     drop excludes no message). One boundary for both kinds, so a notice scrolls
     out of context exactly when the messages around its reset point do, and a
-    request rebuild (#2471) can re-read the same slate from the recorded bound.
+    request rebuild (#2471) can re-read the slate from the recorded bound (the
+    bound is exclusive below and open above).
 
     ``read_message_events`` stays message-only (its other callers — e.g.
     ``confirm_tool_deny`` — must not see lifecycle rows); this is the
@@ -2803,7 +2804,7 @@ async def read_windowed_events(
 
     When the boundary excludes message events, the result carries a
     :class:`~aios.harness.window.WindowOmission` (issue #738), computed
-    against the same ``cumulative_tokens`` boundary as the retained scan
+    from the same boundary row whose ``seq`` bounds the retained scan
     — exact complements.  Cache-stability rationale lives on the class.
     """
     # Index seek: total cumulative tokens from the latest message event.
@@ -2921,8 +2922,9 @@ async def read_windowed_events(
     # by itself prove ``drop < total``: a caller-supplied ``window_min == 0``
     # (the adaptive context-overflow retry) leaves a full-budget chunk, and the
     # asymmetric ceil back-conversion can round ``drop`` up to ``total``. The
-    # retained scan (``cumulative_tokens > drop``) would then match zero rows
-    # while the omission complement still matches every row. That pairing
+    # boundary row would then be the newest message, the retained scan (past
+    # its seq) would hold no message, and the omission complement would hold
+    # every one. That pairing
     # (empty events + a non-None omission) crashes ``build_messages``, which
     # reads ``events[0].created_at`` to anchor the omission marker and relies
     # on the inverse invariant. Clamp so the most recent STIMULUS always
@@ -2936,8 +2938,8 @@ async def read_windowed_events(
 
     # The boundary row: the last dropped message, i.e. the greatest
     # ``cumulative_tokens <= drop`` (one index seek on
-    # ``events_session_cumtokens_idx``; ``seq`` breaks a tie between equal running
-    # sums). ``cumulative_tokens`` is a running sum, so the dropped messages are a
+    # ``events_session_cumtokens_idx``). ``cumulative_tokens`` is a strictly increasing
+    # running sum (every message adds at least one token), so the dropped messages are a
     # seq-prefix of the log and the boundary row's ``seq`` IS the slate's lower
     # bound: the retained slate is everything after it. Its ``cumulative_messages``
     # running count is the omitted user+assistant count -- O(1) (issue #1657).
@@ -2948,7 +2950,7 @@ async def read_windowed_events(
         "FROM events "
         "WHERE session_id = $1 AND account_id = $3 AND kind = 'message' "
         "AND cumulative_tokens <= $2 "
-        "ORDER BY cumulative_tokens DESC, seq DESC LIMIT 1",
+        "ORDER BY cumulative_tokens DESC LIMIT 1",
         session_id,
         drop,
         account_id,

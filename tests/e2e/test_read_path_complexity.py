@@ -494,7 +494,7 @@ _SQL_OMISSION_BOUNDARY = (
     "SELECT seq, cumulative_messages FROM events "
     "WHERE session_id = $1 AND account_id = $2 AND kind = 'message' "
     "AND cumulative_tokens <= $3 "
-    "ORDER BY cumulative_tokens DESC, seq DESC LIMIT 1"
+    "ORDER BY cumulative_tokens DESC LIMIT 1"
 )
 
 _SQL_BEGAN_AT = (
@@ -878,7 +878,7 @@ class TestRowsReturnedGate:
 # lifecycle UNION arm of ``read_windowed_context_events`` (#1741): before
 # migration 0135 that arm had no supporting partial index and fell back to a
 # whole-session heap filter on ``kind = 'lifecycle'``. This EXPLAINs the real
-# ``drop=None`` lifecycle arm (verbatim from ``events.py``) against a slate
+# ``after_seq=None`` lifecycle arm (verbatim from ``events.py``) against a slate
 # seeded with lifecycle rows and asserts the ``events`` scan carries no
 # residual ``kind`` filter — i.e. ``events_session_lifecycle_seq_idx``
 # absorbed the predicate.
@@ -911,7 +911,7 @@ _LIFECYCLE_ARM_SERVING_INDEXES = frozenset(
 
 @needs_docker
 class TestLifecycleArmPlanShapeGate:
-    """The lifecycle arm of ``read_windowed_context_events`` (``drop=None``
+    """The lifecycle arm of ``read_windowed_context_events`` (``after_seq=None``
     variant) must plan as an index scan on a lifecycle-serving partial index
     (0135's ``events_session_lifecycle_seq_idx`` or, once 0145 lands, the
     strictly-narrower ``events_session_model_visible_lifecycle_seq_idx`` the
