@@ -1222,6 +1222,28 @@ async def _run_session_step_body(
         )
         return _model_error_step_result(None, archive_when_idle=session.archive_when_idle)
 
+    # A workflow-model turn (#1634) parks on a run and is harvested on a later
+    # step. Take the disposition BEFORE composing: a step whose park is still
+    # pending sends nothing, so it must neither compose nor persist reminder rows
+    # (a row persisted between a park and its harvested assistant turn would
+    # replay ahead of that turn — a monotonicity break). A harvest step sent its
+    # request at park time; it composes only for the token stamp below, without
+    # persisting reminders.
+    workflow_ref = parse_workflow_model(agent.model)
+    disposition: HarvestedInference | UnlaunchedPark | ParkState | None = None
+    if workflow_ref is not None:
+        disposition = await take_pending_harvest(pool, session_id, account_id=account_id)
+        if disposition is ParkState.PARK_PENDING:
+            # A park is OPEN and its run has not resolved yet. The park wrote a
+            # ``span`` event, which does not advance ``last_stimulus_seq`` /
+            # ``last_reacted_seq`` — so the unreacted-stimulus inequality that caused
+            # the park still holds and the sweep keeps re-waking this session every
+            # tick while the inner run deliberates. End the step WITHOUT launching a
+            # second run (re-parking on nothing): exactly ONE inner awaited run runs
+            # per turn regardless of how many sweep ticks elapse. The harvest task's
+            # ``defer_wake`` (or a later sweep re-wake) re-enters and harvests.
+            return _StepResult()
+
     # Span the remainder of the prologue so "why is the step slow?"
     # can separate context-build cost from model-call cost (issue #78).
     # Bracketing starts AFTER the dispatch early-return so every start
@@ -1251,7 +1273,7 @@ async def _run_session_step_body(
             omission=windowed.omission,
             capability_model=capability_model,
             persist_image_rewrites=True,
-            persist_reminders=True,
+            persist_reminders=not isinstance(disposition, HarvestedInference),
         )
     except Exception:
         await sessions_service.append_event(
@@ -1322,7 +1344,6 @@ async def _run_session_step_body(
     #   * PARK (step N): no harvest pending → open an awaited run, journal the park (sealing
     #     ``reacting_to``), and end the step owing an assistant message. The run resolves
     #     async; its completion wakes the session, which lands on the harvest branch above.
-    workflow_ref = parse_workflow_model(agent.model)
     # ``no_recharge`` / ``reacting_to_override`` are the two ways the harvest path
     # differs from the inline-model tail it shares: the inner inference already
     # charged at its own ``call_llm`` site (record a span, do NOT re-charge), and
@@ -1332,17 +1353,6 @@ async def _run_session_step_body(
     reacting_to_override: int | None = None
     harvested: HarvestedInference | None = None
     if workflow_ref is not None:
-        disposition = await take_pending_harvest(pool, session_id, account_id=account_id)
-        if disposition is ParkState.PARK_PENDING:
-            # A park is OPEN and its run has not resolved yet. The park wrote a
-            # ``span`` event, which does not advance ``last_stimulus_seq`` /
-            # ``last_reacted_seq`` — so the unreacted-stimulus inequality that caused
-            # the park still holds and the sweep keeps re-waking this session every
-            # tick while the inner run deliberates. End the step WITHOUT launching a
-            # second run (re-parking on nothing): exactly ONE inner awaited run runs
-            # per turn regardless of how many sweep ticks elapse. The harvest task's
-            # ``defer_wake`` (or a later sweep re-wake) re-enters and harvests.
-            return _StepResult()
         if disposition is ParkState.NO_PARK or isinstance(disposition, UnlaunchedPark):
             # Mint the id here (not inside the launch) so a refusal knows which park
             # record to consume. A crash left a park record whose run was never created:
@@ -1448,6 +1458,7 @@ async def _run_session_step_body(
             # async resolution wakes the session for the harvest; no inference ran here, so
             # no model_request span, no charge, no assistant turn.
             return _StepResult()
+        assert isinstance(disposition, HarvestedInference)  # PARK_PENDING returned above
         harvested = disposition
 
     # The shared post-inference tail records truncation telemetry for both inline

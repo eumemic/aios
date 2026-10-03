@@ -298,18 +298,23 @@ def _normalize_message(msg: dict[str, Any]) -> dict[str, Any]:
 _CACHE_CONTROL = {"type": "ephemeral"}
 
 
-def _set_content_block_cache(msg: dict[str, Any]) -> None:
-    """Place ``cache_control`` on the last content block of a message.
+def _with_content_block_cache(msg: dict[str, Any]) -> dict[str, Any]:
+    """A copy of ``msg`` with ``cache_control`` on its last content block.
 
     Anthropic requires ``cache_control`` on content blocks, not on the
     message dict itself.  If ``content`` is a plain string, it is converted
-    to content-block format so the marker has somewhere to live.
+    to content-block format so the marker has somewhere to live. ``msg`` is not
+    mutated: it can alias an event row's data or a cached tool definition.
     """
     content = msg.get("content")
     if isinstance(content, str):
-        msg["content"] = [{"type": "text", "text": content, "cache_control": _CACHE_CONTROL}]
-    elif isinstance(content, list) and content:
-        content[-1]["cache_control"] = _CACHE_CONTROL
+        return {
+            **msg,
+            "content": [{"type": "text", "text": content, "cache_control": _CACHE_CONTROL}],
+        }
+    if isinstance(content, list) and content:
+        return {**msg, "content": [*content[:-1], {**content[-1], "cache_control": _CACHE_CONTROL}]}
+    return msg
 
 
 # LiteLLM providers that proxy Anthropic models and forward ``cache_control``
@@ -698,6 +703,12 @@ def inject_cache_breakpoints(
     The breakpoint on the last message is what lets the conversation prefix
     cache across steps: the next step's conversation-through-last-event is
     byte-identical and hits.
+
+    Copy-on-write: the marked entries of ``messages`` and ``tools`` are replaced
+    with marked copies; the dicts themselves are never mutated. Tool definitions
+    are shared with the worker's MCP discovery cache, and messages can alias event
+    data, so an in-place marker leaked into later requests of other sessions
+    (an extra stale breakpoint) and changed what request capture (#2471) hashes.
     """
     if not messages:
         return
@@ -706,14 +717,14 @@ def inject_cache_breakpoints(
         return
 
     if messages[0].get("role") == "system":
-        _set_content_block_cache(messages[0])
+        messages[0] = _with_content_block_cache(messages[0])
 
     if tools:
-        tools[-1]["cache_control"] = _CACHE_CONTROL
+        tools[-1] = {**tools[-1], "cache_control": _CACHE_CONTROL}
 
     idx = _last_stable_message_index(messages)
     if idx is not None and messages[idx].get("role") != "system":
-        _set_content_block_cache(messages[idx])
+        messages[idx] = _with_content_block_cache(messages[idx])
 
 
 def _last_stable_message_index(messages: list[dict[str, Any]]) -> int | None:
