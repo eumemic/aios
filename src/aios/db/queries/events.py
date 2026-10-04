@@ -3081,6 +3081,12 @@ UNHARVESTED_MODEL_DISPATCH_PARKS_SQL = (
     "    AND h.data->>'run_id' = p.data->>'run_id'"
     ") "
     "AND p.data->>'run_id' IS NOT NULL "
+    # the run was launched: a park is recorded BEFORE its run is created (#2469), and a
+    # park whose run was never created is relaunched by the session step, not harvested
+    "AND EXISTS ("
+    "    SELECT 1 FROM wf_runs r "
+    "    WHERE r.id = p.data->>'run_id' AND r.account_id = p.account_id"
+    ") "
     "ORDER BY p.session_id, p.seq DESC"
 )
 
@@ -3097,7 +3103,11 @@ async def find_unharvested_model_dispatch_parks(
     * it is the session's latest **un-consumed** park — no ``model_workflow_harvest_end``
       span for its ``run_id`` (it has not been folded), AND
     * its run has **not been harvested** — no ``model_workflow_harvest`` span for its
-      ``run_id`` (the bound run's terminal state was never written back to the session).
+      ``run_id`` (the bound run's terminal state was never written back to the session), AND
+    * its run **exists**. The park is recorded before the run is created (#2469); a park
+      whose run was never created has nothing to harvest — the next session step finds it
+      (:class:`aios.harness.model_workflow.UnlaunchedPark`) and launches the recorded run.
+      Re-parking it here would spawn a harvest task that 404s on every sweep tick.
 
     Such a park owes a harvest task that this worker (or its predecessor) must run. On a
     normal park the live in-process task writes the harvest; after a worker crash that

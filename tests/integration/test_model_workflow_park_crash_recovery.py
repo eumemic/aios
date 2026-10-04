@@ -47,13 +47,16 @@ from aios.db.pool import create_pool
 from aios.db.queries import workflows as wf_queries
 from aios.harness import model_workflow as mwf
 from aios.harness import runtime
+from aios.harness.completion import LlmRequest
 from aios.harness.inflight_tool_registry import InflightToolRegistry
 from aios.harness.loop import run_session_step
+from aios.harness.model_binding import WorkflowModelRef, parse_workflow_model
 from aios.harness.model_workflow import write_harvest_event
 from aios.harness.sweep import repark_stranded_model_dispatch
 from aios.services import agents as agents_service
 from aios.services import environments as environments_service
 from aios.services import sessions as sessions_service
+from aios.services import workflows as wf_service
 from aios.workflows import run_tools
 from aios.workflows.step import run_workflow_step
 
@@ -460,3 +463,105 @@ async def test_consumed_park_is_not_reparked(mwf_runtime: asyncpg.Pool[Any]) -> 
         stranded = await db_queries.find_unharvested_model_dispatch_parks(conn)
     assert session_id not in [s[0] for s in stranded], "a consumed park is never re-parked"
     assert await repark_stranded_model_dispatch(pool) == 0
+
+
+# ── #2469: a crash between the park record and the run launch ────────────────
+
+
+async def _bound_ref(pool: asyncpg.Pool[Any], session_id: str) -> WorkflowModelRef:
+    async with pool.acquire() as conn:
+        model = await conn.fetchval(
+            "SELECT a.model FROM sessions s JOIN agents a ON a.id = s.agent_id WHERE s.id = $1",
+            session_id,
+        )
+    ref = parse_workflow_model(model)
+    assert ref is not None
+    return ref
+
+
+def _request() -> LlmRequest:
+    return LlmRequest(messages=[{"role": "user", "content": "answer this"}])
+
+
+async def test_crash_after_launch_does_not_launch_a_second_run(
+    mwf_runtime: asyncpg.Pool[Any],
+) -> None:
+    """The park is recorded and its run created, but the step died before spawning the
+    harvest task. The next wake must find the park and wait on that run, not launch a
+    second paid one."""
+    pool = mwf_runtime
+    session_id = await _make_bound_session(pool)
+    real_launch = wf_service.launch_awaited_run
+
+    async def _launch_then_crash(*args: Any, **kwargs: Any) -> Any:
+        await real_launch(*args, **kwargs)
+        raise RuntimeError("worker died right after the run was created")
+
+    with (
+        mock.patch.object(wf_service, "launch_awaited_run", side_effect=_launch_then_crash),
+        pytest.raises(RuntimeError),
+    ):
+        await mwf.launch_model_workflow_park(
+            pool,
+            session_id,
+            ref=await _bound_ref(pool, session_id),
+            request=_request(),
+            reacting_to=1,
+            account_id=_ACCOUNT,
+        )
+    await run_session_step(session_id)
+
+    assert len(await _inner_run_ids(pool, session_id)) == 1
+
+
+async def test_crash_after_record_before_launch_launches_the_recorded_run(
+    mwf_runtime: asyncpg.Pool[Any],
+) -> None:
+    """The park record exists but its run was never created. The next wake launches
+    exactly the recorded run id, and the turn then completes normally."""
+    pool = mwf_runtime
+    session_id = await _make_bound_session(pool)
+
+    with (
+        mock.patch.object(
+            wf_service,
+            "launch_awaited_run",
+            side_effect=RuntimeError("worker died before the run was created"),
+        ),
+        pytest.raises(RuntimeError),
+    ):
+        await mwf.launch_model_workflow_park(
+            pool,
+            session_id,
+            ref=await _bound_ref(pool, session_id),
+            request=_request(),
+            reacting_to=1,
+            account_id=_ACCOUNT,
+        )
+    async with pool.acquire() as conn:
+        park = await db_queries.find_latest_model_workflow_park(
+            conn, session_id, account_id=_ACCOUNT
+        )
+    assert park is not None
+    assert await _inner_run_ids(pool, session_id) == []
+    # The sweep has no run to harvest: the unlaunched park is the step's to launch.
+    async with pool.acquire() as conn:
+        stranded = await db_queries.find_unharvested_model_dispatch_parks(conn)
+    assert session_id not in [s[0] for s in stranded]
+
+    await run_session_step(session_id)
+
+    assert await _inner_run_ids(pool, session_id) == [park["run_id"]]
+    run_output = await _resolve_inner_run(pool, park["run_id"])
+    await write_harvest_event(
+        pool,
+        session_id,
+        run_id=park["run_id"],
+        outcome="ok",
+        output=run_output,
+        error=None,
+        account_id=_ACCOUNT,
+    )
+    await run_session_step(session_id, cause="model_workflow_harvest")
+    assistants = await _assistant_messages(pool, session_id)
+    assert [a["content"] for a in assistants] == ["recovered answer"]

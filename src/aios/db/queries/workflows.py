@@ -554,6 +554,17 @@ async def get_wf_run(conn: asyncpg.Connection[Any], run_id: str, *, account_id: 
     )
 
 
+async def run_exists(conn: asyncpg.Connection[Any], run_id: str, *, account_id: str) -> bool:
+    """Whether ``run_id`` names a run in ``account_id``, without reading the row."""
+    return bool(
+        await conn.fetchval(
+            "SELECT EXISTS (SELECT 1 FROM wf_runs WHERE id = $1 AND account_id = $2)",
+            run_id,
+            account_id,
+        )
+    )
+
+
 async def get_visible_run(
     conn: asyncpg.Connection[Any], run_id: str, *, account_id: str, reader: RunReader | None
 ) -> WfRun:

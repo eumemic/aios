@@ -9,13 +9,14 @@ wakes, never block one step).
 
 **Async two-step.**
 
-* **Park (step N).** :func:`launch_model_workflow_park` opens an **awaited** run
-  of the bound workflow (reusing ``launch_awaited_run`` — the run side ships) and
-  journals a ``model_workflow_park`` event carrying the run id and the sealed
-  ``reacting_to`` watermark. It then spawns a fire-and-forget task that parks on
-  the run (exactly like the ``call_*`` builtins) and, on resolution, writes a
-  ``model_workflow_harvest`` event with the run's structured output + wakes the
-  session. The step ends **owing an assistant message** — it does NOT await.
+* **Park (step N).** :func:`launch_model_workflow_park` journals a
+  ``model_workflow_park`` event carrying a pre-assigned run id and the sealed
+  ``reacting_to`` watermark, then opens an **awaited** run of the bound workflow under
+  that id (reusing ``launch_awaited_run`` — the run side ships). Record-then-launch
+  means a crash between the two can't launch a second paid run (#2469). It then spawns
+  a fire-and-forget task that parks on the run (exactly like the ``call_*`` builtins)
+  and, on resolution, writes a ``model_workflow_harvest`` event with the run's
+  structured output + wakes the session. The step ends **owing an assistant message** — it does NOT await.
 
 * **Harvest (step N+1).** :func:`take_pending_harvest` reads the latest
   *un-consumed* park and its matching harvest (if the run has resolved). When
@@ -46,6 +47,7 @@ import asyncpg
 
 from aios.harness.completion import LlmRequest
 from aios.harness.model_binding import WorkflowModelRef
+from aios.ids import WORKFLOW_RUN, make_id
 from aios.logging import get_logger
 from aios.services import sessions as sessions_service
 from aios.services import tasks as tasks_service
@@ -114,6 +116,15 @@ class ParkState(enum.Enum):
 
 
 @dataclass(frozen=True, slots=True)
+class UnlaunchedPark:
+    """A park record whose run was never created (#2469): the worker died between
+    writing the record and launching the run. The caller launches it under the
+    recorded ``run_id``, which :func:`launch_model_workflow_park` makes idempotent."""
+
+    run_id: str
+
+
+@dataclass(frozen=True, slots=True)
 class HarvestedInference:
     """A resolved bound-workflow inference ready to fold into the dispatch tail.
 
@@ -141,14 +152,36 @@ async def launch_model_workflow_park(
     request: LlmRequest,
     reacting_to: int,
     account_id: str,
+    run_id: str | None = None,
 ) -> str:
     """Open an awaited run of the bound workflow and park owing an assistant message.
 
-    Journals the ``model_workflow_park`` event (run id + sealed ``reacting_to``),
-    then spawns the fire-and-forget harvest task. Returns the bound run id. The
-    caller ends the step after this — the inner deliberation resolves async and a
-    later wake harvests it.
+    Journals the ``model_workflow_park`` event (run id + sealed ``reacting_to``)
+    BEFORE launching the run under that pre-assigned id (#2469), then spawns the
+    fire-and-forget harvest task. Returns the bound run id. The caller ends the step
+    after this — the inner deliberation resolves async and a later wake harvests it.
+
+    Record-then-launch is what makes a crash between the two writes safe: the next
+    wake always finds the park, and either waits on its run or, if the run was never
+    created (:class:`UnlaunchedPark`), calls this again with the recorded ``run_id``.
+    ``create_run`` is idempotent on the id, so that repeat never launches a second
+    paid run. The repeat appends a fresh park record for the same run, re-sealing
+    ``reacting_to`` to the request actually sent.
     """
+    run_id = run_id or make_id(WORKFLOW_RUN)
+    # Seal ``reacting_to`` at park: the harvest re-applies this exact watermark, so a
+    # stimulus arriving mid-deliberation doesn't widen what the turn reacted to.
+    await sessions_service.append_event(
+        pool,
+        session_id,
+        "span",
+        {
+            "event": PARK_EVENT,
+            "run_id": run_id,
+            "reacting_to": reacting_to,
+        },
+        account_id=account_id,
+    )
     session = await sessions_service.get_session_basic(pool, session_id, account_id=account_id)
     # The inference payload is delivered as the run's ``input`` — a bound workflow
     # receives the same named ``LlmRequest`` shape ``call_llm`` consumes, so it can
@@ -181,21 +214,7 @@ async def launch_model_workflow_park(
         # that default is now ``fresh`` (sharing is opt-in), so the intent is stated here
         # rather than inherited by silence.
         workspace="shared",
-    )
-    # Seal ``reacting_to`` at park — the harvest re-applies this exact watermark to
-    # the assistant turn (it is NOT recomputed when the run resolves, so a stimulus
-    # that arrives mid-deliberation does not retroactively widen what the turn
-    # "reacted to").
-    await sessions_service.append_event(
-        pool,
-        session_id,
-        "span",
-        {
-            "event": PARK_EVENT,
-            "run_id": run.id,
-            "reacting_to": reacting_to,
-        },
-        account_id=account_id,
+        run_id=run_id,
     )
     _launch_harvest_task(pool, session_id, run_id=run.id, account_id=account_id)
     log.info(
@@ -216,9 +235,13 @@ def _launch_harvest_task(
     The ``(session_id, run_id)`` key is registered in ``_INFLIGHT_HARVESTS`` for the task's
     lifetime so the crash-recovery sweep (#1635) does not re-park a key already serviced in
     this worker — and cleared in the done-callback (it fires on success, error, AND cancel,
-    so a key is never leaked).
+    so a key is never leaked). A key already in-flight spawns nothing: the sweep can re-park
+    a run between its creation and the park step's own spawn, and a second task for the key
+    would have the first one's done-callback drop the key while the other still polls.
     """
     key = (session_id, run_id)
+    if key in _INFLIGHT_HARVESTS:
+        return
     _INFLIGHT_HARVESTS.add(key)
     task = asyncio.create_task(
         _park_and_signal(pool, session_id, run_id=run_id, account_id=account_id),
@@ -357,7 +380,7 @@ async def _harvest_exists(
 
 async def take_pending_harvest(
     pool: asyncpg.Pool[Any], session_id: str, *, account_id: str
-) -> HarvestedInference | ParkState:
+) -> HarvestedInference | UnlaunchedPark | ParkState:
     """Disposition the latest open park: harvest, still-pending, or none.
 
     Returns one of three values (the three-way distinction is the multi-dispatch
@@ -371,11 +394,14 @@ async def take_pending_harvest(
       ``defer_wake``, or a sweep re-wake) re-enters and harvests.
     * :class:`HarvestedInference` — the open park's run has resolved; folded into the
       dispatch tail with the park's sealed ``reacting_to``.
+    * :class:`UnlaunchedPark` — the open park's run was never created (a crash between
+      the park record and the launch, #2469). The caller launches it under that id.
 
     A malformed park (no usable run id) is treated as :data:`ParkState.NO_PARK` — it
     cannot be harvested and must not wedge the turn; the caller re-parks.
     """
     from aios.db import queries
+    from aios.db.queries import workflows as wf_queries
 
     async with pool.acquire() as conn:
         # The latest park that has NOT yet been consumed. A park is consumed once
@@ -395,6 +421,8 @@ async def take_pending_harvest(
         harvest = await queries.find_model_workflow_harvest(
             conn, session_id, run_id=run_id, account_id=account_id
         )
+        if harvest is None and not await wf_queries.run_exists(conn, run_id, account_id=account_id):
+            return UnlaunchedPark(run_id=run_id)
     if harvest is None:
         # Park open, run unresolved: do NOT re-park (no new run) — end the step owing
         # the message; the harvest's ``defer_wake`` (or a sweep re-wake) re-enters.
