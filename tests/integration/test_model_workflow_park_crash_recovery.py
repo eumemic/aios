@@ -678,3 +678,112 @@ async def test_the_launcher_cap_never_blocks_the_sessions_own_turn(
 
     assert await _span_events(pool, session_id, "model_workflow_launch_refused") == []
     assert len(await _inner_run_ids(pool, session_id)) == 1
+
+
+# ── #2470 follow-up: a refused park is consumed when the turn latches errored ──
+
+
+async def _park_run_ids(pool: asyncpg.Pool[Any], session_id: str) -> list[str]:
+    return [p["run_id"] for p in await _span_events(pool, session_id, "model_workflow_park")]
+
+
+async def test_permanent_refusal_consumes_the_park_so_recovery_opens_a_fresh_turn(
+    mwf_runtime: asyncpg.Pool[Any],
+) -> None:
+    """A permanent launch refusal latches the turn errored. The refused park must be
+    consumed with it: a recovering user message opens a FRESH turn under a NEW run id,
+    not a relaunch of the refused turn's stale id (which would answer the old request)."""
+    pool = mwf_runtime
+    session_id = await _make_bound_session(pool)
+    ref = await _bound_ref(pool, session_id)
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE workflows SET archived_at = now() WHERE id = $1", ref.workflow_id
+        )
+
+    await run_session_step(session_id)
+    [stale_run_id] = await _park_run_ids(pool, session_id)
+    session = await sessions_service.get_session(pool, session_id, account_id=_ACCOUNT)
+    assert session.stop_reason is not None and session.stop_reason["type"] == "error"
+    async with pool.acquire() as conn:
+        assert (
+            await db_queries.find_latest_model_workflow_park(conn, session_id, account_id=_ACCOUNT)
+            is None
+        ), "the refused park is consumed once the turn latches errored"
+    assert await mwf.take_pending_harvest(pool, session_id, account_id=_ACCOUNT) is (
+        mwf.ParkState.NO_PARK
+    )
+
+    # The operator fixes the cause and the user tries again.
+    async with pool.acquire() as conn:
+        await conn.execute("UPDATE workflows SET archived_at = NULL WHERE id = $1", ref.workflow_id)
+    await sessions_service.append_user_message(pool, session_id, "try again", account_id=_ACCOUNT)
+    await run_session_step(session_id)
+
+    run_ids = await _inner_run_ids(pool, session_id)
+    assert len(run_ids) == 1
+    assert stale_run_id not in run_ids, "the refused turn's stale run id was relaunched"
+    parks = await _park_run_ids(pool, session_id)
+    assert parks == [stale_run_id, run_ids[0]]
+
+
+async def test_capacity_exhaustion_consumes_the_park_so_recovery_opens_a_fresh_turn(
+    mwf_runtime: asyncpg.Pool[Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Exhausting the capacity backoff latches the turn errored. The park must be
+    consumed with it, so recovery launches a NEW run id, never the stale one."""
+    from aios.config import get_settings
+
+    pool = mwf_runtime
+    session_id = await _make_bound_session(pool)
+    full = get_settings().model_copy(update={"workflow_runs_per_account_max": 0})
+    monkeypatch.setattr("aios.workflows.service.get_settings", lambda: full)
+
+    for _ in range(5):
+        await run_session_step(session_id)
+    session = await sessions_service.get_session(pool, session_id, account_id=_ACCOUNT)
+    assert session.stop_reason is not None and session.stop_reason["type"] == "error"
+    stale = set(await _park_run_ids(pool, session_id))
+    assert len(stale) == 1, "the backoff relaunches one recorded id"
+    async with pool.acquire() as conn:
+        assert (
+            await db_queries.find_latest_model_workflow_park(conn, session_id, account_id=_ACCOUNT)
+            is None
+        ), "the exhausted park is consumed once the turn latches errored"
+
+    monkeypatch.undo()
+    await sessions_service.append_user_message(pool, session_id, "try again", account_id=_ACCOUNT)
+    await run_session_step(session_id)
+
+    run_ids = await _inner_run_ids(pool, session_id)
+    assert len(run_ids) == 1
+    assert run_ids[0] not in stale, "the exhausted turn's stale run id was relaunched"
+    assert (await _park_run_ids(pool, session_id))[-1] == run_ids[0]
+
+
+async def test_capacity_backoff_keeps_the_park_live_and_relaunches_the_same_id(
+    mwf_runtime: asyncpg.Pool[Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Positive control: while the backoff still has budget the park is NOT consumed.
+    Every retry and the eventual launch reuse the first recorded run id."""
+    from aios.config import get_settings
+
+    pool = mwf_runtime
+    session_id = await _make_bound_session(pool)
+    full = get_settings().model_copy(update={"workflow_runs_per_account_max": 0})
+    monkeypatch.setattr("aios.workflows.service.get_settings", lambda: full)
+
+    for _ in range(3):
+        await run_session_step(session_id)
+    session = await sessions_service.get_session(pool, session_id, account_id=_ACCOUNT)
+    assert session.stop_reason == {"type": "rescheduling"}
+    [first_id] = set(await _park_run_ids(pool, session_id))
+    assert await _span_events(pool, session_id, "model_workflow_harvest_end") == []
+    assert await _span_events(pool, session_id, "model_workflow_park_abandoned") == []
+    disposition = await mwf.take_pending_harvest(pool, session_id, account_id=_ACCOUNT)
+    assert disposition == mwf.UnlaunchedPark(run_id=first_id)
+
+    monkeypatch.undo()
+    await run_session_step(session_id)
+    assert await _inner_run_ids(pool, session_id) == [first_id]
+    assert set(await _park_run_ids(pool, session_id)) == {first_id}
