@@ -144,7 +144,13 @@ async def _seed_fake_fire(
     is exactly what the failure-counter tests need)."""
     async with pool.acquire() as conn, conn.transaction():
         return await queries.insert_run_completion_fires(
-            conn, account_id=ACC, workflow_id=workflow_id, run_id=run_id, status="completed"
+            conn,
+            account_id=ACC,
+            workflow_id=workflow_id,
+            run_id=run_id,
+            status="completed",
+            visibility="account",
+            launcher_session_id=None,
         )
 
 

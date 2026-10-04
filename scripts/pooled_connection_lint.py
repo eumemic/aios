@@ -390,6 +390,7 @@ _DB_HELPER_SYMBOLS = frozenset(
         "wf_queries.get_run_for_step",
         "wf_queries.get_run_vault_ids",
         "wf_queries.get_wf_run",
+        "wf_queries.get_visible_run",
         "wf_queries.get_workflow",
         "wf_queries.get_workflow_version",
         "wf_queries.insert_run_signal",

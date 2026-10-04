@@ -54,6 +54,7 @@ def _wf_run(**overrides: Any) -> WfRun:
         "script_sha": "x" * 64,
         "host_semantics_epoch": 1,
         "principal": "session",
+        "visibility": "account",
         "status": "completed",
         "output": {"rows": 3},
         "last_event_seq": 2,

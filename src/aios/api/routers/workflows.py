@@ -268,6 +268,7 @@ async def list_runs(
         workflow_id=workflow_id,
         status=status,
         parent_run_id=parent_run_id,
+        reader=None,
     )
     return ListResponse[WfRun].paginate(
         items,
@@ -280,7 +281,7 @@ async def list_runs(
 @runs_router.get("/{run_id}", operation_id="get_run")
 async def get_run(run_id: str, pool: PoolDep, account_id: AccountIdDep) -> WfRun:
     """Fetch one run by id (status, output, last_event_seq, …)."""
-    return await service.get_run(pool, run_id, account_id=account_id)
+    return await service.get_run(pool, run_id, account_id=account_id, reader=None)
 
 
 @runs_router.post("/{run_id}/archive", operation_id="archive_run")
@@ -290,7 +291,7 @@ async def archive_run(run_id: str, pool: PoolDep, account_id: AccountIdDep) -> W
     archive_workflow. A non-terminal run (pending/running/suspended) is refused with
     409 Conflict; an already-archived run is an idempotent 409. There is no
     unarchive — terminal+archived is a final state."""
-    return await service.archive_run(pool, run_id, account_id=account_id)
+    return await service.archive_run(pool, run_id, account_id=account_id, reader=None)
 
 
 @runs_router.get("/{run_id}/events", operation_id="list_run_events")
@@ -312,13 +313,17 @@ async def list_run_events(
     DIFFERENT shape from a child-*session* event (``{kind, data}`` on
     ``/v1/sessions/{id}/events``). See ``docs/reference/run-observability.md``.
     """
-    # Scope check: 404 a cross-tenant run id before reading its journal.
-    await service.get_run(pool, run_id, account_id=account_id)
     st = page_cursor(cursor, {"limit": limit})
     page_limit = resolve_page_limit(st, limit, default=200, maximum=MAX_EVENT_PAGE_LIMIT)
     after_seq = cursor_as_int(st.cursor) if st is not None else 0
+    # 404s a cross-tenant run id rather than returning an empty page.
     items = await service.list_run_events(
-        pool, run_id, account_id=account_id, after_seq=after_seq, limit=page_limit + 1
+        pool,
+        run_id,
+        account_id=account_id,
+        after_seq=after_seq,
+        limit=page_limit + 1,
+        reader=None,
     )
     # Forward (ascending seq) read — label the cursor accordingly (paginate defaults
     # to "backward", which is right only for the id-DESC list endpoints).
@@ -357,7 +362,7 @@ async def get_run_trace(
     run 404s.
     """
     # Scope check: 404 a cross-tenant run id before walking its tree.
-    await service.get_run(pool, run_id, account_id=account_id)
+    await service.get_run(pool, run_id, account_id=account_id, reader=None)
     return await trace_service.get_trace(
         pool, root_kind="run", root_id=run_id, account_id=account_id, verbose=verbose
     )
@@ -374,7 +379,7 @@ async def resume_gate(
     await service.resume_gate_by_nonce(
         pool, run_id=run_id, account_id=account_id, gate_nonce=body.gate_nonce, result=body.result
     )
-    return await service.get_run(pool, run_id, account_id=account_id)
+    return await service.get_run(pool, run_id, account_id=account_id, reader=None)
 
 
 @runs_router.get("/{run_id}/stream", openapi_extra={"x-codegen": {"targets": []}})
@@ -391,7 +396,7 @@ async def stream_run_events(
     Preflights the LISTEN before constructing the response (issue #376), so a
     transient connect failure is a clean 503 rather than a half-open stream.
     """
-    await service.get_run(pool, run_id, account_id=account_id)  # 404s cross-tenant
+    await service.get_run(pool, run_id, account_id=account_id, reader=None)  # 404s cross-tenant
     subscription = await preflight_subscription(
         open_listen_for_run_events(db_url, run_id),
         stream_name="wf_run_events",

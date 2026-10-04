@@ -10,6 +10,7 @@ from dateutil.parser import isoparse
 
 from ..models.wf_run_principal import WfRunPrincipal
 from ..models.wf_run_status import WfRunStatus
+from ..models.wf_run_visibility import WfRunVisibility
 from ..models.wf_run_workspace import WfRunWorkspace
 from ..types import UNSET, Unset
 
@@ -54,6 +55,9 @@ class WfRun:
             principal (WfRunPrincipal): Who the run acts for: `operator` (launched through the operator API, or a sub-run of
                 an operator run) or `session` (launched by an agent session, directly or through its runs). Fixed at creation;
                 deleting the launching session doesn't change it.
+            visibility (WfRunVisibility): Who may read the run through agent tools: `account` (any session in the account)
+                or `session` (only its launching session). A workflow-as-model run is `session`, and sub-runs inherit their
+                parent's. The operator API reads every run.
             script (str):
             script_sha (str):
             host_semantics_epoch (int):
@@ -93,6 +97,7 @@ class WfRun:
     account_id: str
     environment_id: str
     principal: WfRunPrincipal
+    visibility: WfRunVisibility
     script: str
     script_sha: str
     host_semantics_epoch: int
@@ -143,6 +148,8 @@ class WfRun:
         environment_id = self.environment_id
 
         principal = self.principal.value
+
+        visibility = self.visibility.value
 
         script = self.script
 
@@ -312,6 +319,7 @@ class WfRun:
                 "account_id": account_id,
                 "environment_id": environment_id,
                 "principal": principal,
+                "visibility": visibility,
                 "script": script,
                 "script_sha": script_sha,
                 "host_semantics_epoch": host_semantics_epoch,
@@ -396,6 +404,8 @@ class WfRun:
         environment_id = d.pop("environment_id")
 
         principal = WfRunPrincipal(d.pop("principal"))
+
+        visibility = WfRunVisibility(d.pop("visibility"))
 
         script = d.pop("script")
 
@@ -672,6 +682,7 @@ class WfRun:
             account_id=account_id,
             environment_id=environment_id,
             principal=principal,
+            visibility=visibility,
             script=script,
             script_sha=script_sha,
             host_semantics_epoch=host_semantics_epoch,
