@@ -33,6 +33,7 @@ from structlog.contextvars import bind_contextvars, clear_contextvars
 from aios.config import HARNESS_STEP_TIMEOUT_S as HARNESS_STEP_TIMEOUT_S
 from aios.config import get_settings
 from aios.db.sse_lock import has_subscriber
+from aios.errors import AiosError, RateLimitedError
 from aios.harness import runtime
 from aios.harness.auto_review import launch_auto_review
 from aios.harness.completion import (
@@ -72,6 +73,7 @@ from aios.harness.tool_dispatch import (
     resolve_confirmed_call_as_cancelled,
 )
 from aios.harness.tool_disposition import classify_tool_call
+from aios.ids import WORKFLOW_RUN, make_id
 from aios.jobs.app import defer_run_wake, defer_wake
 from aios.logging import get_logger
 from aios.models.agents import (
@@ -1342,17 +1344,106 @@ async def _run_session_step_body(
             # ``defer_wake`` (or a later sweep re-wake) re-enters and harvests.
             return _StepResult()
         if disposition is ParkState.NO_PARK or isinstance(disposition, UnlaunchedPark):
-            await launch_model_workflow_park(
-                pool,
-                session_id,
-                ref=workflow_ref,
-                request=llm_request,
-                reacting_to=step_ctx.reacting_to,
-                account_id=account_id,
-                # A crash left a park record whose run was never created: launch it
-                # under the recorded id, never a second one (#2469).
-                run_id=disposition.run_id if isinstance(disposition, UnlaunchedPark) else None,
+            # Mint the id here (not inside the launch) so a refusal knows which park
+            # record to consume. A crash left a park record whose run was never created:
+            # launch it under the recorded id, never a second one (#2469).
+            park_run_id = (
+                disposition.run_id
+                if isinstance(disposition, UnlaunchedPark)
+                else make_id(WORKFLOW_RUN)
             )
+            try:
+                await launch_model_workflow_park(
+                    pool,
+                    session_id,
+                    ref=workflow_ref,
+                    request=llm_request,
+                    reacting_to=step_ctx.reacting_to,
+                    account_id=account_id,
+                    run_id=park_run_id,
+                )
+            except RateLimitedError as exc:
+                # The account (or this session) is at its outstanding-run cap (#2470).
+                # That's capacity, not a harness crash: record it and take the model-error
+                # backoff. The park record is already written, so the backed-off wake sees
+                # an UnlaunchedPark and launches the same run id once capacity frees.
+                log.warning(
+                    "step.model_workflow_run_capacity", session_id=session_id, error=exc.message
+                )
+                await sessions_service.append_event(
+                    pool,
+                    session_id,
+                    "span",
+                    {
+                        "event": "model_workflow_launch_refused",
+                        "is_error": True,
+                        "error": {
+                            "kind": "run_capacity",
+                            "message": exc.message,
+                            "detail": exc.detail,
+                        },
+                    },
+                    account_id=account_id,
+                )
+                return _model_error_step_result(
+                    await _apply_retry_or_failure(
+                        pool,
+                        session_id,
+                        account_id=account_id,
+                        stop_message=f"the bound workflow's run was refused: {exc.message}",
+                        # Only if the backoff is spent and the turn latches errored: consume
+                        # the park so a recovering message opens a fresh turn instead of
+                        # relaunching this refused one under its stale id. While backing
+                        # off the park stays live and the retry relaunches the same id.
+                        consume_park=(park_run_id, agent.model),
+                    ),
+                    archive_when_idle=session.archive_when_idle,
+                )
+            except AiosError as exc:
+                if exc.status_code >= 500:
+                    raise
+                # Any other refusal (archived or missing workflow or version, the depth
+                # budget, a vault this session doesn't hold) repeats on every retry: end the
+                # turn now, naming the cause, instead of crash-looping via harness_error.
+                log.warning(
+                    "step.model_workflow_launch_refused", session_id=session_id, error=exc.message
+                )
+                await sessions_service.append_event(
+                    pool,
+                    session_id,
+                    "span",
+                    {
+                        "event": "model_workflow_launch_refused",
+                        "is_error": True,
+                        "error": {
+                            "kind": exc.error_type,
+                            "message": exc.message,
+                            "detail": exc.detail,
+                        },
+                    },
+                    account_id=account_id,
+                )
+                # Consume the park BEFORE the latch: the refused turn is over, so a
+                # recovering message must open a fresh turn (NO_PARK), not relaunch this
+                # one under its stale run id. Marker-first means a crash between the two
+                # writes leaves a live session with no open park (its next wake starts a
+                # fresh turn), never an errored session still holding the stale park.
+                await _append_harvest_consumed_marker(
+                    pool,
+                    session_id,
+                    run_id=park_run_id,
+                    model=agent.model,
+                    is_error=True,
+                    account_id=account_id,
+                )
+                await _latch_errored_turn(
+                    pool,
+                    session_id,
+                    error_kind="model_workflow_launch_refused",
+                    stop_message=f"the bound workflow can't be launched: {exc.message}",
+                    account_id=account_id,
+                )
+                return _model_error_step_result(None, archive_when_idle=session.archive_when_idle)
             # End the step owing an assistant message — a new step disposition. The run's
             # async resolution wakes the session for the harvest; no inference ran here, so
             # no model_request span, no charge, no assistant turn.
@@ -2783,7 +2874,14 @@ async def _apply_context_overflow_retry(
     return delay
 
 
-async def _apply_retry_or_failure(pool: Any, session_id: str, *, account_id: str) -> float | None:
+async def _apply_retry_or_failure(
+    pool: Any,
+    session_id: str,
+    *,
+    account_id: str,
+    stop_message: str | None = None,
+    consume_park: tuple[str, str] | None = None,
+) -> float | None:
     """Apply the rescheduling state when backoff budget allows; otherwise
     mark a terminal error.
 
@@ -2791,6 +2889,11 @@ async def _apply_retry_or_failure(pool: Any, session_id: str, *, account_id: str
     ``None`` when the budget is spent and the session ends in error
     state.  Both branches advance the session's lifecycle and status;
     the caller decides whether to also propagate an exception.
+    ``stop_message`` names the cause on the terminal ``error`` stop_reason.
+    ``consume_park`` is ``(run_id, model)`` of a model-dispatch park whose launch was
+    refused: on the terminal branch ONLY it is marked consumed before the latch, so a
+    recovering message opens a fresh turn; the rescheduling branch leaves it live so
+    the retry relaunches the same run id.
     """
     attempt = await _count_consecutive_rescheduling(pool, session_id, account_id=account_id)
     delay = _retry_delay_for_attempt(attempt)
@@ -2810,7 +2913,23 @@ async def _apply_retry_or_failure(pool: Any, session_id: str, *, account_id: str
     # Terminal landing pad (#353): the retry budget is spent, so land the
     # session in the errored state. See ``_latch_errored_turn`` for the
     # responses-before-latch ordering invariant this relies on.
-    await _latch_errored_turn(pool, session_id, error_kind="child_errored", account_id=account_id)
+    if consume_park is not None:
+        park_run_id, model = consume_park
+        await _append_harvest_consumed_marker(
+            pool,
+            session_id,
+            run_id=park_run_id,
+            model=model,
+            is_error=True,
+            account_id=account_id,
+        )
+    await _latch_errored_turn(
+        pool,
+        session_id,
+        error_kind="child_errored",
+        stop_message=stop_message,
+        account_id=account_id,
+    )
     return None
 
 
