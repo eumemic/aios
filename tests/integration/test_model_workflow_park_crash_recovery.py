@@ -52,11 +52,13 @@ from aios.harness.inflight_tool_registry import InflightToolRegistry
 from aios.harness.loop import run_session_step
 from aios.harness.model_binding import WorkflowModelRef, parse_workflow_model
 from aios.harness.model_workflow import write_harvest_event
+from aios.harness.request_capture import forget_stored_blobs
 from aios.harness.sweep import repark_stranded_model_dispatch
 from aios.services import agents as agents_service
 from aios.services import environments as environments_service
 from aios.services import sessions as sessions_service
 from aios.services import workflows as wf_service
+from aios.services.requests import Rebuilt, rebuild_request
 from aios.workflows import run_tools
 from aios.workflows.step import run_workflow_step
 
@@ -142,11 +144,17 @@ async def mwf_runtime(
         await pool.close()
 
 
-async def _make_bound_session(pool: asyncpg.Pool[Any], *, finish_reason: str = "stop") -> str:
+async def _make_bound_session(
+    pool: asyncpg.Pool[Any], *, finish_reason: str = "stop", output_model: str | None = None
+) -> str:
     script = _INNER_SCRIPT.replace("{finish_reason}", finish_reason)
     async with pool.acquire() as conn:
         wf = await wf_queries.insert_workflow(
-            conn, account_id=_ACCOUNT, name="inner-model", script=script
+            conn,
+            account_id=_ACCOUNT,
+            name="inner-model",
+            script=script,
+            output_model=output_model,
         )
     agent = await agents_service.create_agent(
         pool,
@@ -507,6 +515,7 @@ async def test_crash_after_launch_does_not_launch_a_second_run(
             ref=await _bound_ref(pool, session_id),
             request=_request(),
             reacting_to=1,
+            request_record={},
             account_id=_ACCOUNT,
         )
     await run_session_step(session_id)
@@ -536,6 +545,7 @@ async def test_crash_after_record_before_launch_launches_the_recorded_run(
             ref=await _bound_ref(pool, session_id),
             request=_request(),
             reacting_to=1,
+            request_record={},
             account_id=_ACCOUNT,
         )
     async with pool.acquire() as conn:
@@ -787,3 +797,43 @@ async def test_capacity_backoff_keeps_the_park_live_and_relaunches_the_same_id(
     await run_session_step(session_id)
     assert await _inner_run_ids(pool, session_id) == [first_id]
     assert set(await _park_run_ids(pool, session_id)) == {first_id}
+
+
+# ── #2471: the park record carries the captured request ───────────────────────
+
+
+async def test_a_parked_turn_rebuilds_exactly_for_its_capability_model(
+    mwf_runtime: asyncpg.Pool[Any],
+) -> None:
+    """The bound workflow declares an output model, so the turn's capability model
+    (which drives the window and the vision and thinking gates) differs from its
+    ``workflow:`` model. The park record's request rebuilds byte for byte; rendered
+    for another model it reports ``rerendered``."""
+    forget_stored_blobs()
+    pool = mwf_runtime
+    session_id = await _make_bound_session(pool, output_model="openrouter/declared-out")
+    await run_session_step(session_id)
+
+    async with pool.acquire() as conn:
+        park = await conn.fetchrow(
+            "SELECT id, data FROM events WHERE session_id = $1 AND kind = 'span' "
+            "AND data->>'event' = 'model_workflow_park'",
+            session_id,
+        )
+    assert park is not None
+    record = park["data"]["request"]
+    assert record["model"].startswith("workflow:")
+    assert record["capability_model"] == "openrouter/declared-out"
+
+    rebuilt = await rebuild_request(
+        pool, account_id=_ACCOUNT, session_id=session_id, request_event_id=park["id"]
+    )
+    assert isinstance(rebuilt, Rebuilt) and rebuilt.fidelity == "exact"
+    other = await rebuild_request(
+        pool,
+        account_id=_ACCOUNT,
+        session_id=session_id,
+        request_event_id=park["id"],
+        target_model="openrouter/other-model",
+    )
+    assert isinstance(other, Rebuilt) and other.fidelity == "rerendered"

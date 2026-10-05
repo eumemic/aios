@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 from aios.harness._text import join_blocks
@@ -252,6 +253,13 @@ class StepContext:
     # churning render, not a working gate.
     reminders_written: tuple[str, ...]
     reminders_skipped: int
+    # What request capture (#2471) records beyond the slate: the account
+    # timezone the envelopes rendered in, and the seqs of the reminder rows this
+    # compose persisted (empty when it persisted none).
+    tz_name: str
+    reminder_seqs: tuple[int, ...]
+    # The session's ``/workspace`` bind source the attachments resolved against.
+    workspace_path: Path | None
 
 
 async def _advance_open_request_scan_floor_best_effort(
@@ -746,8 +754,11 @@ async def compose_step_context(
         tail_origin=ctx.tail_origin,
         needs_trailing_notice=ctx.needs_trailing_notice,
     )
-    if persist_reminders:
+    reminder_seqs = (
         await persist_reminder_rows(pool, plan, session_id=session.id, account_id=account_id)
+        if persist_reminders
+        else ()
+    )
     messages = finalize_messages(
         ctx.messages,
         reminder_contents=tuple(item.content for item in plan.writes),
@@ -762,4 +773,7 @@ async def compose_step_context(
         skill_versions=prelude.skill_versions,
         reminders_written=tuple(item.section for item in plan.writes),
         reminders_skipped=plan.skipped,
+        tz_name=tz_name,
+        reminder_seqs=reminder_seqs,
+        workspace_path=workspace_path,
     )
