@@ -69,6 +69,8 @@ def sync_detailed(
 ) -> Response[HTTPValidationError | OperatorTriggerEcho]:
     """Get Operator Trigger
 
+     Get an operator trigger by name, with its last fire status and failure count.
+
     Args:
         name (str):
         authorization (None | str | Unset):
@@ -101,6 +103,8 @@ def sync(
 ) -> HTTPValidationError | OperatorTriggerEcho | None:
     """Get Operator Trigger
 
+     Get an operator trigger by name, with its last fire status and failure count.
+
     Args:
         name (str):
         authorization (None | str | Unset):
@@ -127,6 +131,8 @@ async def asyncio_detailed(
     authorization: None | str | Unset = UNSET,
 ) -> Response[HTTPValidationError | OperatorTriggerEcho]:
     """Get Operator Trigger
+
+     Get an operator trigger by name, with its last fire status and failure count.
 
     Args:
         name (str):
@@ -157,6 +163,8 @@ async def asyncio(
     authorization: None | str | Unset = UNSET,
 ) -> HTTPValidationError | OperatorTriggerEcho | None:
     """Get Operator Trigger
+
+     Get an operator trigger by name, with its last fire status and failure count.
 
     Args:
         name (str):

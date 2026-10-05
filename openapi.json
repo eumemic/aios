@@ -9398,6 +9398,7 @@
           "triggers"
         ],
         "summary": "Get Operator Trigger",
+        "description": "Get an operator trigger by name, with its last fire status and failure count.",
         "operationId": "get_operator_trigger",
         "parameters": [
           {
@@ -9521,6 +9522,7 @@
           "triggers"
         ],
         "summary": "Delete Operator Trigger",
+        "description": "Delete an operator trigger by name. Runs it already launched keep running, and\nits fire history stays readable at ``/{name}/runs``.",
         "operationId": "delete_operator_trigger",
         "parameters": [
           {

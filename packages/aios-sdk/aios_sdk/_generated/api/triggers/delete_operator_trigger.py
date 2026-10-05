@@ -67,6 +67,9 @@ def sync_detailed(
 ) -> Response[Any | HTTPValidationError]:
     """Delete Operator Trigger
 
+     Delete an operator trigger by name. Runs it already launched keep running, and
+    its fire history stays readable at ``/{name}/runs``.
+
     Args:
         name (str):
         authorization (None | str | Unset):
@@ -99,6 +102,9 @@ def sync(
 ) -> Any | HTTPValidationError | None:
     """Delete Operator Trigger
 
+     Delete an operator trigger by name. Runs it already launched keep running, and
+    its fire history stays readable at ``/{name}/runs``.
+
     Args:
         name (str):
         authorization (None | str | Unset):
@@ -125,6 +131,9 @@ async def asyncio_detailed(
     authorization: None | str | Unset = UNSET,
 ) -> Response[Any | HTTPValidationError]:
     """Delete Operator Trigger
+
+     Delete an operator trigger by name. Runs it already launched keep running, and
+    its fire history stays readable at ``/{name}/runs``.
 
     Args:
         name (str):
@@ -155,6 +164,9 @@ async def asyncio(
     authorization: None | str | Unset = UNSET,
 ) -> Any | HTTPValidationError | None:
     """Delete Operator Trigger
+
+     Delete an operator trigger by name. Runs it already launched keep running, and
+    its fire history stays readable at ``/{name}/runs``.
 
     Args:
         name (str):

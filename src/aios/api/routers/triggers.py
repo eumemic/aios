@@ -62,6 +62,7 @@ async def list_operator_triggers(
 async def get_operator_trigger(
     name: str, pool: PoolDep, account_id: AccountIdDep
 ) -> OperatorTriggerEcho:
+    """Get an operator trigger by name, with its last fire status and failure count."""
     return await triggers_service.get_operator_trigger(pool, name, account_id=account_id)
 
 
@@ -81,6 +82,8 @@ async def update_operator_trigger(
     openapi_extra={"x-codegen": {"mcp": {"destructiveHint": True}}},
 )
 async def delete_operator_trigger(name: str, pool: PoolDep, account_id: AccountIdDep) -> None:
+    """Delete an operator trigger by name. Runs it already launched keep running, and
+    its fire history stays readable at ``/{name}/runs``."""
     await triggers_service.remove_operator_trigger(pool, name, account_id=account_id)
 
 
