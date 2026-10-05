@@ -41,6 +41,7 @@ from aios.models.attenuation import Surface, surface_diff, surface_of
 from aios.models.workflows import (
     TERMINAL_RUN_STATUSES,
     OperatorAuthority,
+    RequestRef,
     RunReader,
     SessionAuthority,
     WfRun,
@@ -100,6 +101,7 @@ async def launch_awaited_run(
     workspace: str = "fresh",
     version: int | None = None,
     run_id: str | None = None,
+    request_ref: RequestRef | None = None,
 ) -> tuple[WfRun, str]:
     """Launch a run as an **awaited** servicer — the one place the run-as-Ask contract lives.
 
@@ -132,6 +134,7 @@ async def launch_awaited_run(
         workspace=workspace,
         version=version,
         run_id=run_id,
+        request_ref=request_ref,
     )
     return run, request_id
 
