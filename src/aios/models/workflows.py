@@ -52,6 +52,20 @@ class AsAgent(BaseModel):
     version: int = Field(ge=1, lt=2**31)
 
 
+class RequestRef(BaseModel):
+    """A reference to a request a session sent: the span that captured it (#2471),
+    named the way ``GET /v1/sessions/{session_id}/requests/{request_id}`` names it.
+
+    A ref means something only in a field typed as one. A run resolves only the ref
+    it was created with (``WfRun.request_ref``), never a ref-shaped value it finds
+    in its input or in a tool result."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    session_id: str
+    request_id: str
+
+
 @dataclass(frozen=True, slots=True)
 class OperatorAuthority:
     """A run launched through the operator API. Its workflow's surface binds as-is."""
@@ -247,6 +261,15 @@ class WfRun(BaseModel):
             "Set when an operator run invoked this run with `as_agent`: the agent "
             "version whose surface it was clamped to, within the parent run's. Only the "
             "surface changes; the model and vaults still come from the parent run."
+        ),
+    )
+    request_ref: RequestRef | None = Field(
+        default=None,
+        description=(
+            "The request this run works on, when it was created with one: a "
+            "workflow-as-model turn's own request, or one handed to a sub-run. The run "
+            "can resolve this request and no other. With no `input`, the run's first "
+            "step rebuilds the request and starts the script with it."
         ),
     )
     visibility: RunVisibility = Field(

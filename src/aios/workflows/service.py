@@ -41,6 +41,7 @@ from aios.models.agents import (
 from aios.models.attenuation import Surface, surface_diff, surface_of
 from aios.models.workflows import (
     OperatorAuthority,
+    RequestRef,
     RunAuthority,
     RunAuthoritySource,
     RunPrincipal,
@@ -234,6 +235,7 @@ async def create_run(
     workspace: str = "fresh",
     trigger_id: str | None = None,
     trigger_max_outstanding_runs: int | None = None,
+    request_ref: RequestRef | None = None,
 ) -> WfRun:
     """Create a run that snapshots a script, then wake it.
 
@@ -323,6 +325,11 @@ async def create_run(
     outstanding runs are counted under the SAME advisory lock, and a launch at the
     cap raises :class:`TriggerOutstandingRunsCapError` before any row is written —
     so two concurrent fires of one trigger can never both pass the check.
+
+    ``request_ref`` (#2474) is the request the run works on, and its grant: the run
+    can resolve that request and no other. The caller either already holds the
+    composed request and passes it as ``input`` too, or passes no ``input`` and the
+    run's first step rebuilds the request and starts the script with it.
     """
     # A shared workspace is inherited from a launcher session. Reject an impossible
     # pointer before minting an id, acquiring a connection, inserting a row, or waking.
@@ -628,6 +635,7 @@ async def create_run(
             depth=child_depth,
             trigger_id=trigger_id,
             as_agent=authority.as_agent if isinstance(authority, RunAuthority) else None,
+            request_ref=request_ref,
         )
         assert run.principal == principal, (
             f"insert trigger stamped principal {run.principal!r}, authority implies {principal!r}"

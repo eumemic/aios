@@ -53,6 +53,7 @@ from aios.models.sessions import Err, Outcome
 from aios.models.workflows import (
     TERMINAL_RUN_STATUSES,
     AsAgent,
+    RequestRef,
     RunAuthority,
     WfRun,
     WfRunEvent,
@@ -60,6 +61,7 @@ from aios.models.workflows import (
 )
 from aios.services import attenuation as attenuation_service
 from aios.services.model_binding_authz import is_workflow_binding
+from aios.services.requests import Missing, rebuild_request
 from aios.services.sessions import (
     AskNewSession,
     create_child_session,
@@ -363,6 +365,38 @@ async def _enrich_agent_result(
     }
 
 
+async def _materialize_request(
+    pool: asyncpg.Pool[Any], run: WfRun, ref: RequestRef
+) -> dict[str, Any] | str:
+    """Rebuild the request ``ref`` names as the input a workflow-as-model run gets:
+    ``{messages, tools, params, session_id, request_ref}``. Returns why it can't when
+    the request is gone (its session or span deleted, or a blob or attachment missing).
+
+    ``session_id`` is the prompt-cache key a recipe forwards to ``call_llm``. A run
+    that acts for a session shares that session's key; an operator run (an eval arm)
+    gets its own, so its calls never share a cache key with production or each other.
+    """
+    try:
+        rebuilt = await rebuild_request(
+            pool,
+            account_id=run.account_id,
+            session_id=ref.session_id,
+            request_event_id=ref.request_id,
+        )
+    except NotFoundError as exc:
+        return f"the request this run was created with is unavailable: {exc}"
+    if isinstance(rebuilt, Missing):
+        return (
+            "the request this run was created with is unavailable: "
+            f"a {rebuilt.what} it needs is gone"
+        )
+    return {
+        **rebuilt.request,
+        "session_id": ref.session_id if run.principal == "session" else run.id,
+        "request_ref": ref.model_dump(),
+    }
+
+
 async def run_workflow_step(run_id: str) -> None:
     pool = runtime.require_pool()
 
@@ -388,6 +422,13 @@ async def run_workflow_step(run_id: str) -> None:
 async def _run_workflow_step_body(
     pool: asyncpg.Pool[Any], run_id: str, run: WfRun, account_id: str
 ) -> None:
+    # A run created with a request ref and no input (#2474) starts the script with the
+    # rebuilt request. Rebuild it before taking the step's connection: the rebuild
+    # reads on its own connection and renders off the event loop. ``last_event_seq``
+    # is read under the run's lock, so 0 means this is the wake that starts the run.
+    materialized: dict[str, Any] | str | None = None
+    if run.request_ref is not None and run.input is None and run.last_event_seq == 0:
+        materialized = await _materialize_request(pool, run, run.request_ref)
     async with pool.acquire() as conn:
         # ``running`` is the step's LEASE (#780): flipped on EVERY wake before any
         # journal write — not just the first — so a crash anywhere mid-step
@@ -443,13 +484,32 @@ async def _run_workflow_step_body(
             if e.type == "call_started" and e.call_key is not None and e.call_key not in memo
         }
 
-        if not events:
+        # The script's input is what ``run_started`` recorded, never the row: a run
+        # created with a request ref and no input (#2474) has none on its row, and its
+        # request is rebuilt once, here, rather than on every wake.
+        if events:
+            assert events[0].type == "run_started", events[0].type
+            script_input = events[0].payload["input"]
+        else:
+            if materialized is not None:
+                if isinstance(materialized, str):
+                    await _complete_run(
+                        conn,
+                        run,
+                        output=materialized,
+                        is_error=True,
+                        error_kind="request_unavailable",
+                    )
+                    return
+                script_input = materialized
+            else:
+                script_input = run.input
             await wf_queries.append_run_event(
                 conn,
                 account_id=account_id,
                 run_id=run_id,
                 type="run_started",
-                payload={"input": run.input},
+                payload={"input": script_input},
             )
 
         # Pre-replay harvest: resolve any inflight capability that is now done — a
@@ -639,7 +699,7 @@ async def _run_workflow_step_body(
             return
 
     # Drive one wake in the credential-free subprocess (no DB conn held).
-    outcome = await run_script_host(source=run.script, input=run.input, memo=memo)
+    outcome = await run_script_host(source=run.script, input=script_input, memo=memo)
 
     # Post-replay step disposition (#1548). A same-wake call_result journaled this wake
     # (budget read or catchable agent error) owes one more drive so the replay throws the

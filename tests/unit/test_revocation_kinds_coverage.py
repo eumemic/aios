@@ -60,6 +60,9 @@ FULFILLED_KINDS: frozenset[str] = frozenset(
         "too_many_agents",
         "bad_tool_call",
         "not_implemented",
+        # the request a run was created with can't be rebuilt (#2474): the run's
+        # own terminal error
+        "request_unavailable",
     }
 )
 
