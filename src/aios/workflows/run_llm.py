@@ -217,6 +217,18 @@ async def invoke_call_llm(*, run: WfRun, spec: dict[str, Any]) -> tuple[dict[str
             )
         except NotFoundError as exc:
             return _request_unavailable(str(exc)), 0
+        except Exception as exc:
+            # The rebuild reads the DB and decodes stored blobs, so it can raise for
+            # reasons other than a missing request. This function never raises (an
+            # escape would leave no result signal and the sweep would re-dispatch it
+            # forever), so a failed rebuild is an error value, like a failed
+            # provider-auth resolution below.
+            log.warning(
+                "call_llm.rebuild_error", run_id=run.id, ref=ref.model_dump(), error=str(exc)
+            )
+            return {
+                "error": f"call_llm: rebuilding the request failed: {type(exc).__name__}: {exc}"
+            }, 0
         if isinstance(rebuilt, Missing):
             return _request_unavailable(f"a {rebuilt.what} it needs is gone"), 0
         messages = rebuilt.request["messages"]

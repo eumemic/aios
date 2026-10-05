@@ -1170,3 +1170,49 @@ async def test_a_run_cannot_hand_on_a_ref_it_was_not_given(
             "SELECT count(*) FROM wf_runs WHERE parent_run_id = $1", parent_id
         )
     assert subs == 0
+
+
+async def _only_sub_run(pool: asyncpg.Pool[Any], parent_id: str) -> str:
+    async with pool.acquire() as conn:
+        started = next(
+            e for e in await wf_queries.list_run_events(conn, parent_id) if e.type == "call_started"
+        )
+    return str(started.payload["child_run_id"])
+
+
+async def test_a_sub_run_hands_its_ref_on_to_its_own_sub_run(
+    mwf_runtime: asyncpg.Pool[Any],
+) -> None:
+    """A sub-run handed a ref holds it as its own grant, so it can hand it on again,
+    and its sub-run starts from the same request."""
+    pool = mwf_runtime
+    session_id, park_id, wam_input = await _parked_turn(pool)
+    ref = RequestRef(session_id=session_id, request_id=park_id)
+    leaf = await _echo_workflow(pool)
+    hand_on = (
+        "async def main(input):\n"
+        f"    return await invoke_workflow({leaf!r}, None, request_ref=input['request_ref'])\n"
+    )
+    middle = await _workflow(pool, "middle", hand_on)
+    root = await _workflow(
+        pool,
+        "root",
+        "async def main(input):\n"
+        "    return await invoke_workflow(input['wf'], None, request_ref=input['request_ref'])\n",
+    )
+    root_id = await _operator_run(
+        pool, root, input={"wf": middle, "request_ref": ref.model_dump()}, request_ref=ref
+    )
+
+    await run_workflow_step(root_id)
+    middle_id = await _only_sub_run(pool, root_id)
+    await run_workflow_step(middle_id)
+    leaf_id = await _only_sub_run(pool, middle_id)
+    await _drive(leaf_id, 2)
+
+    async with pool.acquire() as conn:
+        leaf_run = await wf_queries.get_run_for_step(conn, leaf_id)
+    assert leaf_run is not None and leaf_run.request_ref == ref
+    assert leaf_run.status == "completed"
+    assert leaf_run.output["messages"] == wam_input["messages"]
+    assert leaf_run.output["session_id"] == leaf_id

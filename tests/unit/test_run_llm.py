@@ -376,6 +376,35 @@ async def test_by_ref_an_unavailable_request_is_an_error_value() -> None:
     m.assert_not_awaited()
 
 
+async def test_by_ref_a_failing_rebuild_is_an_error_value_not_a_raise() -> None:
+    """``invoke_call_llm`` never raises: an escape would leave no result signal and the
+    sweep would re-dispatch the call forever."""
+    with (
+        patch(
+            "aios.workflows.run_llm.rebuild_request",
+            AsyncMock(side_effect=KeyError("slate")),
+        ),
+        patch("aios.workflows.run_llm.call_litellm", AsyncMock()) as m,
+    ):
+        result, cost = await invoke_call_llm(
+            run=_ref_run("operator"),
+            spec={"kind": "ref", "request_ref": _REF, "model": "openrouter/judge"},
+        )
+    assert "rebuilding the request failed" in result["error"]
+    assert cost == 0
+    m.assert_not_awaited()
+
+
+async def test_by_ref_rejects_a_workflow_model_before_rebuilding() -> None:
+    with patch("aios.workflows.run_llm.rebuild_request", AsyncMock()) as rb:
+        result, _ = await invoke_call_llm(
+            run=_ref_run("operator"),
+            spec={"kind": "ref", "request_ref": _REF, "model": "workflow:wf_x"},
+        )
+    assert "workflow:" in result["error"]
+    rb.assert_not_awaited()
+
+
 def test_call_llm_shim_by_ref() -> None:
     cap = call_llm(request_ref=dict(_REF), model="m")
     assert cap._spec == {"kind": "ref", "request_ref": _REF, "model": "m"}
