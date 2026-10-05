@@ -544,6 +544,93 @@ class AccountTriggerEcho(BaseModel):
     consecutive_failures: int
 
 
+# ─── operator-owned triggers (#2473) ─────────────────────────────────────────
+#
+# A trigger an operator owns through ``/v1/triggers``: no session, and its
+# workflow runs are operator runs. Only a timer source and a budgeted workflow
+# action are expressible: an event source would let whoever causes the event
+# start an operator run. The ``triggers_owner_kind_shape`` CHECK (migration
+# 0190) enforces the same shape on the row. Agents never see these models.
+
+OperatorTriggerSource = Annotated[CronSource | OneShotSource, Field(discriminator="kind")]
+OperatorTriggerSourceReplace = Annotated[
+    CronSourceReplace | OneShotSource, Field(discriminator="kind")
+]
+
+
+class OperatorWorkflowAction(WorkflowAction):
+    """The workflow action of an operator trigger: ``budget_usd`` is required,
+    so every operator run it launches is bounded."""
+
+    budget_usd: float = Field(gt=0)
+
+
+class OperatorWorkflowActionReplace(WorkflowActionReplace):
+    budget_usd: float = Field(gt=0)
+
+
+def _operator_trigger_name(name: str) -> str:
+    # ``POST /v1/triggers/ingest/{token}`` shares the operator routes' prefix.
+    if name == "ingest":
+        raise ValueError("the trigger name 'ingest' is reserved")
+    return name
+
+
+class OperatorTriggerCreate(BaseModel):
+    """Request body for ``POST /v1/triggers``. ``environment_id`` is the
+    environment the trigger's runs bind to, named by the operator as on
+    ``POST /v1/runs``; it can't be changed later."""
+
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(
+        min_length=1,
+        max_length=MAX_NAME_CHARS,
+        pattern=r"^[a-zA-Z0-9][a-zA-Z0-9_-]*$",
+        description="Stable identifier; unique among the account's operator triggers.",
+    )
+    source: OperatorTriggerSource
+    action: OperatorWorkflowAction
+    environment_id: str = Field(min_length=1)
+    enabled: bool = True
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    _check_name = field_validator("name")(_operator_trigger_name)
+
+    @model_validator(mode="after")
+    def _validate_write_path(self) -> OperatorTriggerCreate:
+        if isinstance(self.source, CronSource):
+            _validate_cron_expression(self.source.schedule, self.source.timezone)
+        _validate_input_template_bound(self.action)
+        return self
+
+
+class OperatorTriggerUpdate(BaseModel):
+    """Update body for ``PUT /v1/triggers/{name}``: the same Replace semantics as
+    :class:`TriggerUpdate`, limited to the operator shapes."""
+
+    model_config = ConfigDict(extra="forbid")
+    source: OperatorTriggerSourceReplace | None = None
+    action: OperatorWorkflowActionReplace | None = None
+    enabled: bool | None = None
+    metadata: dict[str, Any] | None = None
+
+    @model_validator(mode="after")
+    def _validate_write_path(self) -> OperatorTriggerUpdate:
+        if isinstance(self.source, CronSource):
+            _validate_cron_expression(self.source.schedule, self.source.timezone)
+        _validate_input_template_bound(self.action)
+        return self
+
+
+class OperatorTriggerEcho(TriggerEcho):
+    """Read view of an operator trigger: the trigger echo plus the environment its
+    runs bind to. ``warnings`` carries the write path's lint findings; reads
+    return none."""
+
+    environment_id: str
+    warnings: list[str] = Field(default_factory=list)
+
+
 class TriggerRunEcho(BaseModel):
     """Read view of one ``trigger_runs`` row — a single fire of a trigger.
 

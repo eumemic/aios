@@ -384,6 +384,9 @@ SESSION_MEMORY_STORES_POLICY: dict[str, Arm] = {
 TRIGGERS_POLICY: dict[str, Arm] = {
     "id": Arm.MINT_ID,
     "owner_session_id": Arm.REMAP_SESSION,
+    # A clone copies its parent session's triggers, which are always the
+    # ``session`` kind (migration 0190); operator triggers have no session.
+    "owner_kind": Arm.COPY,
     "account_id": Arm.COPY,
     "name": Arm.COPY,
     "enabled": Arm.COPY,

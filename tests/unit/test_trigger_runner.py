@@ -25,7 +25,10 @@ async def test_sandbox_observation_is_finished_on_cancellation(
     monkeypatch.setattr(runtime, "require_sandbox_registry", Mock(return_value=registry))
     monkeypatch.setattr(runtime, "require_tool_broker", Mock(return_value=broker))
 
-    trigger = SimpleNamespace(owner_session_id="session-1")
+    trigger = SimpleNamespace(
+        id="trigger-1",
+        owner=queries.SessionOwner(session_id="session-1", archived_at=None, parent_run_id=None),
+    )
     action = SandboxCommandAction(command="true")
 
     with pytest.raises(asyncio.CancelledError):
@@ -52,9 +55,8 @@ async def test_observation_reader_failure_does_not_fail_completed_wake(
         id="trigger-1",
         source="cron",
         action=WakeOwnerAction(content="wake"),
-        session_archived_at=None,
         enabled=True,
-        owner_session_id="owner",
+        owner=queries.SessionOwner(session_id="owner", archived_at=None, parent_run_id=None),
         account_id="account",
         name="watchdog",
         source_spec={},
@@ -96,9 +98,8 @@ async def test_observed_warning_failure_does_not_fail_completed_wake(
         id="trigger-1",
         source="cron",
         action=WakeOwnerAction(content="wake"),
-        session_archived_at=None,
         enabled=True,
-        owner_session_id="owner",
+        owner=queries.SessionOwner(session_id="owner", archived_at=None, parent_run_id=None),
         account_id="account",
         name="watchdog",
         source_spec={},
