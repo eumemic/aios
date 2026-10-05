@@ -127,6 +127,7 @@ from .list_response_inbound_grant import ListResponseInboundGrant
 from .list_response_memory_store import ListResponseMemoryStore
 from .list_response_memory_version import ListResponseMemoryVersion
 from .list_response_model_provider import ListResponseModelProvider
+from .list_response_operator_trigger_echo import ListResponseOperatorTriggerEcho
 from .list_response_recent_chat import ListResponseRecentChat
 from .list_response_runtime_token import ListResponseRuntimeToken
 from .list_response_session import ListResponseSession
@@ -195,6 +196,17 @@ from .o_auth_start_response import OAuthStartResponse
 from .obligation import Obligation
 from .obligation_output_schema_type_0 import ObligationOutputSchemaType0
 from .one_shot_source import OneShotSource
+from .operator_trigger_create import OperatorTriggerCreate
+from .operator_trigger_create_metadata import OperatorTriggerCreateMetadata
+from .operator_trigger_echo import OperatorTriggerEcho
+from .operator_trigger_echo_last_fire_status_type_0 import (
+    OperatorTriggerEchoLastFireStatusType0,
+)
+from .operator_trigger_echo_metadata import OperatorTriggerEchoMetadata
+from .operator_trigger_update import OperatorTriggerUpdate
+from .operator_trigger_update_metadata_type_0 import OperatorTriggerUpdateMetadataType0
+from .operator_workflow_action import OperatorWorkflowAction
+from .operator_workflow_action_replace import OperatorWorkflowActionReplace
 from .post_connector_runtime_chat_lifecycle_response_post_connector_runtime_chat_lifecycle import (
     PostConnectorRuntimeChatLifecycleResponsePostConnectorRuntimeChatLifecycle,
 )
@@ -524,6 +536,7 @@ __all__ = (
     "ListResponseMemoryStore",
     "ListResponseMemoryVersion",
     "ListResponseModelProvider",
+    "ListResponseOperatorTriggerEcho",
     "ListResponseRecentChat",
     "ListResponseRuntimeToken",
     "ListResponseSession",
@@ -588,6 +601,15 @@ __all__ = (
     "Obligation",
     "ObligationOutputSchemaType0",
     "OneShotSource",
+    "OperatorTriggerCreate",
+    "OperatorTriggerCreateMetadata",
+    "OperatorTriggerEcho",
+    "OperatorTriggerEchoLastFireStatusType0",
+    "OperatorTriggerEchoMetadata",
+    "OperatorTriggerUpdate",
+    "OperatorTriggerUpdateMetadataType0",
+    "OperatorWorkflowAction",
+    "OperatorWorkflowActionReplace",
     "PostConnectorRuntimeChatLifecycleResponsePostConnectorRuntimeChatLifecycle",
     "PostConnectorRuntimeLifecycleResponsePostConnectorRuntimeLifecycle",
     "PostConnectorRuntimeSessionLifecycleResponsePostConnectorRuntimeSessionLifecycle",

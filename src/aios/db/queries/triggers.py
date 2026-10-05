@@ -8,6 +8,7 @@ asyncpg, same conventions as the rest of the package.
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from datetime import datetime
 from types import EllipsisType
 from typing import Any, NamedTuple
@@ -27,6 +28,7 @@ from aios.models.triggers import (
     TRIGGER_ACTION_ADAPTER,
     TRIGGER_SOURCE_ADAPTER,
     AccountTriggerEcho,
+    OperatorTriggerEcho,
     TriggerAction,
     TriggerEcho,
     TriggerFireStatus,
@@ -38,27 +40,62 @@ from aios.models.workflows import RunVisibility
 # ─── triggers ───────────────────────────────────────────────────────────────
 
 
+@dataclass(frozen=True, slots=True)
+class SessionOwner:
+    """A trigger a session owns. ``archived_at`` is the session's, so the fire
+    handler can skip a fire whose session was archived between claim and fire;
+    ``parent_run_id`` is the session's own (immutable) parent run, the lineage a
+    timer-fired workflow action threads. Both are projected off the JOIN the row
+    already pays for."""
+
+    session_id: str
+    archived_at: datetime | None
+    parent_run_id: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class OperatorOwner:
+    """A trigger an operator owns (#2473): no session. The ``triggers_owner_kind_shape``
+    CHECK limits it to timer sources and a budgeted workflow action, whose runs are
+    operator runs."""
+
+
+type TriggerOwner = SessionOwner | OperatorOwner
+
+
+def _trigger_owner(row: asyncpg.Record) -> TriggerOwner:
+    if row["owner_kind"] == "operator":
+        return OperatorOwner()
+    return SessionOwner(
+        session_id=row["owner_session_id"],
+        archived_at=row["session_archived_at"],
+        parent_run_id=row["session_parent_run_id"],
+    )
+
+
+# The scheduler's liveness predicate over ``triggers AS t LEFT JOIN sessions AS s``:
+# a session trigger stops firing once its session is archived; an operator
+# trigger has no session.
+_OWNER_LIVE = "(t.owner_kind = 'operator' OR s.archived_at IS NULL)"
+
+
 class TriggerRow(NamedTuple):
     """Internal record for the trigger fire-handler + scheduler tick.
 
-    Carries ``owner_session_id``, ``account_id``, and the owning session's
-    ``session_archived_at`` alongside the definition fields so the unscoped
-    fire-job handler (which only has the trigger id) can resolve the owner
-    and verify it hasn't been archived between claim and fire — without an
-    extra round-trip.
+    Carries ``owner`` and ``account_id`` alongside the definition fields so the
+    unscoped fire-job handler (which only has the trigger id) can resolve the
+    owner and, for a session owner, verify it hasn't been archived between
+    claim and fire — without an extra round-trip.
 
     ``source`` is the raw discriminator text and ``source_spec`` the raw
     parsed dict (the scheduler/runner branch lifecycle on the source
     string); ``action`` is the validated union (the runner dispatches on
     ``action.kind``). ``environment_id`` is the first-class FK column —
     non-NULL iff the action kind is ``workflow`` (the iff CHECK).
-    ``session_parent_run_id`` is the owning session's own (immutable) parent
-    run — the lineage a timer-fired workflow action threads, projected here
-    off the JOIN the row already pays for.
     """
 
     id: str
-    owner_session_id: str
+    owner: TriggerOwner
     account_id: str
     name: str
     source: str
@@ -72,8 +109,6 @@ class TriggerRow(NamedTuple):
     consecutive_failures: int
     environment_id: str | None
     ingest_token_hash: str | None
-    session_archived_at: datetime | None
-    session_parent_run_id: str | None
 
 
 def _row_to_trigger_echo(row: asyncpg.Record) -> TriggerEcho:
@@ -353,6 +388,48 @@ async def update_trigger(
     the DB CHECK), so no merged-XOR re-validation is needed here — invalid
     shapes are unrepresentable.
     """
+    set_clauses, args = _trigger_set_clauses(
+        source=source,
+        source_spec=source_spec,
+        action=action,
+        enabled=enabled,
+        metadata=metadata,
+        next_fire=next_fire,
+        environment_id=environment_id,
+        ingest_token_hash=ingest_token_hash,
+        reset_consecutive_failures=reset_consecutive_failures,
+    )
+    args.extend([session_id, name, account_id])
+    sql = f"""
+        UPDATE triggers
+        SET {", ".join(set_clauses)}
+        WHERE owner_session_id = ${len(args) - 2}
+          AND name = ${len(args) - 1}
+          AND account_id = ${len(args)}
+        RETURNING *
+    """
+    row = await conn.fetchrow(sql, *args)
+    if row is None:
+        raise NotFoundError(
+            f"trigger {name!r} not found",
+            detail={"name": name, "session_id": session_id},
+        )
+    return _row_to_trigger_echo(row)
+
+
+def _trigger_set_clauses(
+    *,
+    source: str | None,
+    source_spec: dict[str, Any] | None,
+    action: dict[str, Any] | None,
+    enabled: bool | None,
+    metadata: dict[str, Any] | None,
+    next_fire: datetime | EllipsisType | None,
+    environment_id: str | EllipsisType | None,
+    ingest_token_hash: str | EllipsisType | None,
+    reset_consecutive_failures: bool,
+) -> tuple[list[str], list[Any]]:
+    """The ``SET`` list of a trigger update and its args, numbered from ``$1``."""
     set_clauses: list[str] = []
     args: list[Any] = []
 
@@ -378,26 +455,173 @@ async def update_trigger(
         add("ingest_token_hash", ingest_token_hash)
     if reset_consecutive_failures:
         set_clauses.append("consecutive_failures = 0")
-
     # Always bump ``updated_at`` so a no-op PATCH still records a write —
     # external pollers using ``updated_at > <since>`` mustn't miss it.
     set_clauses.append("updated_at = now()")
-    args.extend([session_id, name, account_id])
-    sql = f"""
+    return set_clauses, args
+
+
+# ─── operator-owned triggers (#2473) ─────────────────────────────────────────
+#
+# An operator trigger has no session, so these are keyed by (account, name), the
+# ``triggers_operator_name`` unique index. Agent tools never reach them: every
+# session-scoped query above is keyed by ``owner_session_id = <session>``, which
+# never matches an operator row.
+
+
+def _row_to_operator_trigger_echo(row: asyncpg.Record) -> OperatorTriggerEcho:
+    return OperatorTriggerEcho(
+        **_row_to_trigger_echo(row).model_dump(), environment_id=row["environment_id"]
+    )
+
+
+async def add_operator_trigger(
+    conn: asyncpg.Connection[Any],
+    *,
+    name: str,
+    source: str,
+    source_spec: dict[str, Any],
+    action: dict[str, Any],
+    enabled: bool,
+    metadata: dict[str, Any],
+    next_fire: datetime | None,
+    environment_id: str,
+    account_id: str,
+) -> OperatorTriggerEcho:
+    """Insert an operator trigger. A name already used by another operator trigger
+    in the account is a :class:`ConflictError`."""
+    try:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO triggers
+                (id, owner_kind, owner_session_id, account_id, name, source, source_spec,
+                 action, enabled, next_fire, environment_id, metadata)
+            VALUES ($1, 'operator', NULL, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            RETURNING *
+            """,
+            make_id(TRIGGER),
+            account_id,
+            name,
+            source,
+            json.dumps(source_spec),
+            json.dumps(action),
+            enabled,
+            next_fire,
+            environment_id,
+            json.dumps(metadata),
+        )
+    except asyncpg.UniqueViolationError as exc:
+        raise ConflictError(
+            f"an operator trigger named {name!r} already exists in this account",
+            detail={"name": name},
+        ) from exc
+    assert row is not None
+    return _row_to_operator_trigger_echo(row)
+
+
+async def get_operator_trigger(
+    conn: asyncpg.Connection[Any], name: str, *, account_id: str
+) -> OperatorTriggerEcho:
+    row = await conn.fetchrow(
+        "SELECT * FROM triggers WHERE owner_kind = 'operator' AND name = $1 AND account_id = $2",
+        name,
+        account_id,
+    )
+    if row is None:
+        raise NotFoundError(f"trigger {name!r} not found", detail={"name": name})
+    return _row_to_operator_trigger_echo(row)
+
+
+async def list_operator_triggers(
+    conn: asyncpg.Connection[Any], *, account_id: str
+) -> list[OperatorTriggerEcho]:
+    rows = await conn.fetch(
+        "SELECT * FROM triggers WHERE owner_kind = 'operator' AND account_id = $1 "
+        "ORDER BY created_at",
+        account_id,
+    )
+    return [_row_to_operator_trigger_echo(r) for r in rows]
+
+
+async def remove_operator_trigger(
+    conn: asyncpg.Connection[Any], name: str, *, account_id: str
+) -> None:
+    result = await conn.execute(
+        "DELETE FROM triggers WHERE owner_kind = 'operator' AND name = $1 AND account_id = $2",
+        name,
+        account_id,
+    )
+    if result == "DELETE 0":
+        raise NotFoundError(f"trigger {name!r} not found", detail={"name": name})
+
+
+async def update_operator_trigger(
+    conn: asyncpg.Connection[Any],
+    name: str,
+    *,
+    source: str | None = None,
+    source_spec: dict[str, Any] | None = None,
+    action: dict[str, Any] | None = None,
+    enabled: bool | None = None,
+    metadata: dict[str, Any] | None = None,
+    next_fire: datetime | EllipsisType | None = ...,
+    reset_consecutive_failures: bool = False,
+    account_id: str,
+) -> OperatorTriggerEcho:
+    """Update an operator trigger by name; the same field semantics as
+    :func:`update_trigger`. Its environment and (absent) ingest token never change."""
+    set_clauses, args = _trigger_set_clauses(
+        source=source,
+        source_spec=source_spec,
+        action=action,
+        enabled=enabled,
+        metadata=metadata,
+        next_fire=next_fire,
+        environment_id=...,
+        ingest_token_hash=...,
+        reset_consecutive_failures=reset_consecutive_failures,
+    )
+    args.extend([name, account_id])
+    row = await conn.fetchrow(
+        f"""
         UPDATE triggers
         SET {", ".join(set_clauses)}
-        WHERE owner_session_id = ${len(args) - 2}
+        WHERE owner_kind = 'operator'
           AND name = ${len(args) - 1}
           AND account_id = ${len(args)}
         RETURNING *
-    """
-    row = await conn.fetchrow(sql, *args)
+        """,
+        *args,
+    )
     if row is None:
-        raise NotFoundError(
-            f"trigger {name!r} not found",
-            detail={"name": name, "session_id": session_id},
-        )
-    return _row_to_trigger_echo(row)
+        raise NotFoundError(f"trigger {name!r} not found", detail={"name": name})
+    return _row_to_operator_trigger_echo(row)
+
+
+async def list_operator_trigger_runs(
+    conn: asyncpg.Connection[Any],
+    *,
+    account_id: str,
+    trigger_name: str,
+    limit: int = 50,
+) -> list[TriggerRunEcho]:
+    """An operator trigger's fires, newest first: the operator twin of
+    :func:`list_trigger_runs`, keyed by the denormalized name so a deleted
+    trigger's history stays readable. A NULL ``owner_session_id`` marks an
+    operator trigger's fire (the column has no FK, so nothing else nulls it).
+    Served by the ``trigger_runs_by_owner_name`` index."""
+    rows = await conn.fetch(
+        """
+        SELECT * FROM trigger_runs
+        WHERE account_id = $1 AND owner_session_id IS NULL AND trigger_name = $2
+        ORDER BY created_at DESC
+        LIMIT $3
+        """,
+        account_id,
+        trigger_name,
+        limit,
+    )
+    return [_row_to_trigger_run_echo(r) for r in rows]
 
 
 async def unscoped_get_trigger_row(
@@ -408,19 +632,19 @@ async def unscoped_get_trigger_row(
 
     Used by the fire-job handler, which runs cross-tenant in the worker;
     each row carries its ``account_id`` denormalized. INTENTIONALLY unscoped
-    — do not "fix" with account scoping. JOINs ``sessions`` so the handler
-    can re-check the owning session's archive state and skip a fire whose
-    session was archived between claim and execute.
+    — do not "fix" with account scoping. LEFT JOINs ``sessions`` so the handler
+    can re-check a session owner's archive state and skip a fire whose session
+    was archived between claim and execute; an operator trigger has no session.
     """
     row = await conn.fetchrow(
-        "SELECT t.id, t.owner_session_id, t.account_id, t.name, t.source, "
+        "SELECT t.id, t.owner_kind, t.owner_session_id, t.account_id, t.name, t.source, "
         "t.source_spec, t.action, t.enabled, t.next_fire, t.running_since, "
         "t.last_fire_at, t.last_fire_status, t.consecutive_failures, "
         "t.environment_id, t.ingest_token_hash, "
         "s.archived_at AS session_archived_at, "
         "s.parent_run_id AS session_parent_run_id "
         "FROM triggers AS t "
-        "JOIN sessions AS s ON s.id = t.owner_session_id "
+        "LEFT JOIN sessions AS s ON s.id = t.owner_session_id "
         "WHERE t.id = $1",
         trigger_id,
     )
@@ -431,7 +655,7 @@ async def unscoped_get_trigger_row(
         )
     return TriggerRow(
         id=row["id"],
-        owner_session_id=row["owner_session_id"],
+        owner=_trigger_owner(row),
         account_id=row["account_id"],
         name=row["name"],
         source=row["source"],
@@ -445,8 +669,6 @@ async def unscoped_get_trigger_row(
         consecutive_failures=row["consecutive_failures"],
         environment_id=row["environment_id"],
         ingest_token_hash=row["ingest_token_hash"],
-        session_archived_at=row["session_archived_at"],
-        session_parent_run_id=row["session_parent_run_id"],
     )
 
 
@@ -460,7 +682,7 @@ async def fetch_and_claim_due_triggers(
     """Atomically claim due triggers for the scheduler tick.
 
     In a single transaction: SELECT enabled triggers whose owning session is
-    not archived, whose ``next_fire <= now``, and which are either not
+    not archived (an operator trigger has none), whose ``next_fire <= now``, and which are either not
     running (``running_since IS NULL``) or stuck-running for more than
     ``stale_threshold_seconds`` (recovers from worker crashes mid-fire).
     For each claimed cron row, sets ``running_since`` to now and advances
@@ -487,8 +709,8 @@ async def fetch_and_claim_due_triggers(
 
     stale_cutoff = now_utc - timedelta(seconds=stale_threshold_seconds)
     rows = await conn.fetch(
-        """
-        SELECT t.id, t.owner_session_id, t.account_id, t.name, t.source,
+        f"""
+        SELECT t.id, t.owner_kind, t.owner_session_id, t.account_id, t.name, t.source,
                t.source_spec, t.source_spec ->> 'schedule' AS schedule,
                t.source_spec ->> 'timezone' AS cron_timezone,
                t.action, t.enabled, t.next_fire, t.running_since,
@@ -497,9 +719,9 @@ async def fetch_and_claim_due_triggers(
                s.archived_at AS session_archived_at,
                s.parent_run_id AS session_parent_run_id
         FROM triggers AS t
-        JOIN sessions AS s ON s.id = t.owner_session_id
+        LEFT JOIN sessions AS s ON s.id = t.owner_session_id
         WHERE t.enabled
-          AND s.archived_at IS NULL
+          AND {_OWNER_LIVE}
           AND t.next_fire IS NOT NULL
           AND t.next_fire <= $1
           AND (t.running_since IS NULL OR t.running_since <= $2)
@@ -545,7 +767,7 @@ async def fetch_and_claim_due_triggers(
         claimed.append(
             TriggerRow(
                 id=r["id"],
-                owner_session_id=r["owner_session_id"],
+                owner=_trigger_owner(r),
                 account_id=r["account_id"],
                 name=r["name"],
                 source=r["source"],
@@ -561,8 +783,6 @@ async def fetch_and_claim_due_triggers(
                 consecutive_failures=r["consecutive_failures"],
                 environment_id=r["environment_id"],
                 ingest_token_hash=r["ingest_token_hash"],
-                session_archived_at=r["session_archived_at"],
-                session_parent_run_id=r["session_parent_run_id"],
             )
         )
     return claimed
@@ -689,8 +909,9 @@ async def count_account_triggers(
     """Count trigger rows owned by ``account_id``.
 
     Backs the per-account cap enforced in
-    ``services.triggers.add_trigger``. Defaults to counting only enabled
-    rows on non-archived sessions — paused/disabled entries don't consume a
+    ``services.triggers.add_trigger`` and ``add_operator_trigger``: session and
+    operator triggers share one cap. Defaults to counting only enabled rows
+    whose session (if any) isn't archived — paused/disabled entries don't consume a
     "slot" against the cap, and rows attached to archived sessions are
     permanently unable to fire (the scheduler's claim and MIN queries both
     filter ``s.archived_at IS NULL``), so they shouldn't count either. Pass
@@ -704,13 +925,13 @@ async def count_account_triggers(
         )
         return result or 0
     result = await conn.fetchval(
-        """
+        f"""
         SELECT COUNT(*)
         FROM triggers AS t
-        JOIN sessions AS s ON s.id = t.owner_session_id
+        LEFT JOIN sessions AS s ON s.id = t.owner_session_id
         WHERE t.account_id = $1
           AND t.enabled
-          AND s.archived_at IS NULL
+          AND {_OWNER_LIVE}
         """,
         account_id,
     )
@@ -1035,7 +1256,7 @@ async def record_trigger_run(
     *,
     trigger_id: str,
     account_id: str,
-    owner_session_id: str,
+    owner_session_id: str | None,
     trigger_name: str,
     trigger_context: str,
     status: str,
@@ -1053,6 +1274,8 @@ async def record_trigger_run(
     skip tombstone. Timer rows are NEVER written at tick-claim time: the tick
     tail is contractually frozen (task-id-only payload, per-trigger
     queueing_lock whose coalesce would orphan a claim-time row as 'pending').
+
+    ``owner_session_id`` is ``None`` for an operator trigger's fire (#2473).
     """
     trigger_run_id = make_id(TRIGGER_RUN)
     await conn.execute(
@@ -1092,6 +1315,8 @@ async def mark_trigger_run_woken_by_workflow_session(
     workflow's model/builtin surface executes in child sessions whose
     ``parent_run_id`` points at that run, so this durable join covers the sibling
     effector without relying on the sandbox-only observation HTTP header.
+    Only session triggers' fires are attributed: an operator trigger (#2473) has
+    no owner to warn about a noisy wake.
     """
     # Record the effect against the workflow run first. This row is durable even
     # when the child executes before the trigger runner writes trigger_runs; the
@@ -1115,6 +1340,7 @@ async def mark_trigger_run_woken_by_workflow_session(
           AND tr.trigger_context = 'cron'
           AND tr.status = 'ok'
           AND NOT tr.woke_owner
+          AND tr.owner_session_id IS NOT NULL
         RETURNING tr.trigger_id, tr.account_id, tr.owner_session_id, tr.trigger_name
         """,
         session_id,
@@ -1260,7 +1486,7 @@ async def fetch_next_trigger_event(
     """Return when the event-driven scheduler should next wake.
 
     Computed as ``MIN(GREATEST(next_fire, running_since + stale_threshold))``
-    across enabled rows on non-archived sessions:
+    across enabled rows whose session (if any) isn't archived:
 
     - Idle rows (``running_since IS NULL``) contribute ``next_fire`` — the
       earliest of these is the next genuine fire.
@@ -1278,7 +1504,7 @@ async def fetch_next_trigger_event(
 
     stale_threshold = timedelta(seconds=stale_threshold_seconds)
     result: datetime | None = await conn.fetchval(
-        """
+        f"""
         SELECT MIN(
             CASE
                 WHEN t.running_since IS NULL THEN t.next_fire
@@ -1286,9 +1512,9 @@ async def fetch_next_trigger_event(
             END
         )
         FROM triggers AS t
-        JOIN sessions AS s ON s.id = t.owner_session_id
+        LEFT JOIN sessions AS s ON s.id = t.owner_session_id
         WHERE t.enabled
-          AND s.archived_at IS NULL
+          AND {_OWNER_LIVE}
           AND t.next_fire IS NOT NULL
         """,
         stale_threshold,

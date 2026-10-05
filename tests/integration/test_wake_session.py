@@ -901,7 +901,9 @@ class TestWakeSessionIntegration:
 
         trigger = queries.TriggerRow(
             id="trig_01WAKE",
-            owner_session_id="sess_trigger_owner_unused",
+            owner=queries.SessionOwner(
+                session_id="sess_trigger_owner_unused", archived_at=None, parent_run_id=None
+            ),
             account_id="acc_wake_trig",
             name="watchdog",
             source="cron",
@@ -915,8 +917,6 @@ class TestWakeSessionIntegration:
             consecutive_failures=0,
             environment_id=None,
             ingest_token_hash=None,
-            session_archived_at=None,
-            session_parent_run_id=None,
         )
         trigger_source_id = "trigger:trig_01WAKE"
         action = trigger.action

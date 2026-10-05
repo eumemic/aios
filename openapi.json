@@ -9284,6 +9284,366 @@
         }
       }
     },
+    "/v1/triggers": {
+      "post": {
+        "tags": [
+          "triggers"
+        ],
+        "summary": "Create Operator Trigger",
+        "description": "Create an operator trigger. Its source is ``cron`` or ``one_shot`` and its\naction a ``workflow`` with ``budget_usd``; each fire launches an operator run\nin ``environment_id``. ``warnings`` carries lint findings.",
+        "operationId": "create_operator_trigger",
+        "parameters": [
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OperatorTriggerCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OperatorTriggerEcho"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "triggers"
+        ],
+        "summary": "List Operator Triggers",
+        "description": "List the account's operator triggers.",
+        "operationId": "list_operator_triggers",
+        "parameters": [
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListResponse_OperatorTriggerEcho_"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/triggers/{name}": {
+      "get": {
+        "tags": [
+          "triggers"
+        ],
+        "summary": "Get Operator Trigger",
+        "description": "Get an operator trigger by name, with its last fire status and failure count.",
+        "operationId": "get_operator_trigger",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OperatorTriggerEcho"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "triggers"
+        ],
+        "summary": "Update Operator Trigger",
+        "description": "Replace an operator trigger's source/action/enabled/metadata by name. Omitted\nfields unchanged; ``source`` / ``action`` replace wholesale.",
+        "operationId": "update_operator_trigger",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OperatorTriggerUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OperatorTriggerEcho"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "triggers"
+        ],
+        "summary": "Delete Operator Trigger",
+        "description": "Delete an operator trigger by name. Runs it already launched keep running, and\nits fire history stays readable at ``/{name}/runs``.",
+        "operationId": "delete_operator_trigger",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "x-codegen": {
+          "mcp": {
+            "destructiveHint": true
+          }
+        }
+      }
+    },
+    "/v1/triggers/{name}/runs": {
+      "get": {
+        "tags": [
+          "triggers"
+        ],
+        "summary": "List Operator Trigger Runs",
+        "description": "List an operator trigger's fires (the per-fire audit), newest first. Keyed by\nname, so a deleted trigger's history stays readable until retention prunes it.",
+        "operationId": "list_operator_trigger_runs",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 200,
+              "minimum": 1,
+              "default": 50,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListResponse_TriggerRunEcho_"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/connectors/{connector}/tools_schema": {
       "put": {
         "tags": [
@@ -15825,6 +16185,38 @@
         ],
         "title": "ListResponse[ModelProvider]"
       },
+      "ListResponse_OperatorTriggerEcho_": {
+        "properties": {
+          "data": {
+            "items": {
+              "$ref": "#/components/schemas/OperatorTriggerEcho"
+            },
+            "type": "array",
+            "title": "Data"
+          },
+          "has_more": {
+            "type": "boolean",
+            "title": "Has More",
+            "default": false
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          }
+        },
+        "type": "object",
+        "required": [
+          "data"
+        ],
+        "title": "ListResponse[OperatorTriggerEcho]"
+      },
       "ListResponse_RecentChat_": {
         "properties": {
           "data": {
@@ -17468,6 +17860,439 @@
         ],
         "title": "OneShotSource",
         "description": "One-shot source: fires once at an absolute UTC time, then self-deletes."
+      },
+      "OperatorTriggerCreate": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]*$",
+            "title": "Name",
+            "description": "Stable identifier; unique among the account's operator triggers."
+          },
+          "source": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/CronSource"
+              },
+              {
+                "$ref": "#/components/schemas/OneShotSource"
+              }
+            ],
+            "title": "Source",
+            "discriminator": {
+              "propertyName": "kind",
+              "mapping": {
+                "cron": "#/components/schemas/CronSource",
+                "one_shot": "#/components/schemas/OneShotSource"
+              }
+            }
+          },
+          "action": {
+            "$ref": "#/components/schemas/OperatorWorkflowAction"
+          },
+          "environment_id": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Environment Id"
+          },
+          "enabled": {
+            "type": "boolean",
+            "title": "Enabled",
+            "default": true
+          },
+          "metadata": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Metadata"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "name",
+          "source",
+          "action",
+          "environment_id"
+        ],
+        "title": "OperatorTriggerCreate",
+        "description": "Request body for ``POST /v1/triggers``. ``environment_id`` is the\nenvironment the trigger's runs bind to, named by the operator as on\n``POST /v1/runs``; it can't be changed later."
+      },
+      "OperatorTriggerEcho": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "source": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/CronSource"
+              },
+              {
+                "$ref": "#/components/schemas/OneShotSource"
+              },
+              {
+                "$ref": "#/components/schemas/RunCompletionSource"
+              },
+              {
+                "$ref": "#/components/schemas/ExternalEventSource"
+              }
+            ],
+            "title": "Source",
+            "discriminator": {
+              "propertyName": "kind",
+              "mapping": {
+                "cron": "#/components/schemas/CronSource",
+                "external_event": "#/components/schemas/ExternalEventSource",
+                "one_shot": "#/components/schemas/OneShotSource",
+                "run_completion": "#/components/schemas/RunCompletionSource"
+              }
+            }
+          },
+          "action": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/SandboxCommandAction"
+              },
+              {
+                "$ref": "#/components/schemas/WakeOwnerAction"
+              },
+              {
+                "$ref": "#/components/schemas/WakeSessionAction"
+              },
+              {
+                "$ref": "#/components/schemas/WorkflowAction"
+              }
+            ],
+            "title": "Action",
+            "discriminator": {
+              "propertyName": "kind",
+              "mapping": {
+                "sandbox_command": "#/components/schemas/SandboxCommandAction",
+                "wake_owner": "#/components/schemas/WakeOwnerAction",
+                "wake_session": "#/components/schemas/WakeSessionAction",
+                "workflow": "#/components/schemas/WorkflowAction"
+              }
+            }
+          },
+          "enabled": {
+            "type": "boolean",
+            "title": "Enabled"
+          },
+          "next_fire": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Fire"
+          },
+          "last_fire_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Fire At"
+          },
+          "last_fire_status": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "ok",
+                  "error",
+                  "timeout",
+                  "skipped"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Fire Status"
+          },
+          "consecutive_failures": {
+            "type": "integer",
+            "title": "Consecutive Failures"
+          },
+          "metadata": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Metadata"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          },
+          "environment_id": {
+            "type": "string",
+            "title": "Environment Id"
+          },
+          "warnings": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Warnings"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "source",
+          "action",
+          "enabled",
+          "next_fire",
+          "last_fire_at",
+          "last_fire_status",
+          "consecutive_failures",
+          "metadata",
+          "created_at",
+          "updated_at",
+          "environment_id"
+        ],
+        "title": "OperatorTriggerEcho",
+        "description": "Read view of an operator trigger: the trigger echo plus the environment its\nruns bind to. ``warnings`` carries the write path's lint findings; reads\nreturn none."
+      },
+      "OperatorTriggerUpdate": {
+        "properties": {
+          "source": {
+            "anyOf": [
+              {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/CronSourceReplace"
+                  },
+                  {
+                    "$ref": "#/components/schemas/OneShotSource"
+                  }
+                ],
+                "discriminator": {
+                  "propertyName": "kind",
+                  "mapping": {
+                    "cron": "#/components/schemas/CronSourceReplace",
+                    "one_shot": "#/components/schemas/OneShotSource"
+                  }
+                }
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source"
+          },
+          "action": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OperatorWorkflowActionReplace"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Enabled"
+          },
+          "metadata": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Metadata"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "OperatorTriggerUpdate",
+        "description": "Update body for ``PUT /v1/triggers/{name}``: the same Replace semantics as\n:class:`TriggerUpdate`, limited to the operator shapes."
+      },
+      "OperatorWorkflowAction": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "const": "workflow",
+            "title": "Kind",
+            "default": "workflow"
+          },
+          "workflow_id": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Workflow Id"
+          },
+          "workflow_version": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workflow Version"
+          },
+          "version": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version"
+          },
+          "input_template": {
+            "title": "Input Template"
+          },
+          "vault_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Vault Ids"
+          },
+          "max_outstanding_runs": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Outstanding Runs"
+          },
+          "budget_usd": {
+            "type": "number",
+            "exclusiveMinimum": 0.0,
+            "title": "Budget Usd"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "workflow_id",
+          "budget_usd"
+        ],
+        "title": "OperatorWorkflowAction",
+        "description": "The workflow action of an operator trigger: ``budget_usd`` is required,\nso every operator run it launches is bounded."
+      },
+      "OperatorWorkflowActionReplace": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "const": "workflow",
+            "title": "Kind",
+            "default": "workflow"
+          },
+          "workflow_id": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Workflow Id"
+          },
+          "workflow_version": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workflow Version"
+          },
+          "version": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version"
+          },
+          "input_template": {
+            "title": "Input Template"
+          },
+          "vault_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Vault Ids"
+          },
+          "max_outstanding_runs": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Outstanding Runs"
+          },
+          "budget_usd": {
+            "type": "number",
+            "exclusiveMinimum": 0.0,
+            "title": "Budget Usd"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "workflow_id",
+          "workflow_version",
+          "version",
+          "input_template",
+          "vault_ids",
+          "max_outstanding_runs",
+          "budget_usd"
+        ],
+        "title": "OperatorWorkflowActionReplace"
       },
       "RebuiltRequest": {
         "properties": {
