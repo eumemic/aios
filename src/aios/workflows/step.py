@@ -426,9 +426,23 @@ async def _run_workflow_step_body(
     # rebuilt request. Rebuild it before taking the step's connection: the rebuild
     # reads on its own connection and renders off the event loop. ``last_event_seq``
     # is read under the run's lock, so 0 means this is the wake that starts the run.
+    # A run that is about to be cancelled, or to fail on the engine epoch, never needs
+    # its request: skip the rebuild, so a rebuild that crashes can't keep a cancel
+    # from landing.
     materialized: dict[str, Any] | str | None = None
-    if run.request_ref is not None and run.input is None and run.last_event_seq == 0:
-        materialized = await _materialize_request(pool, run, run.request_ref)
+    if (
+        run.request_ref is not None
+        and run.input is None
+        and run.last_event_seq == 0
+        and run.host_semantics_epoch == HOST_SEMANTICS_EPOCH
+    ):
+        async with pool.acquire() as conn:
+            cancelling = any(
+                s.call_key == wf_queries.CANCEL_SIGNAL_CALL_KEY
+                for s in await wf_queries.list_run_signals(conn, run_id)
+            )
+        if not cancelling:
+            materialized = await _materialize_request(pool, run, run.request_ref)
     async with pool.acquire() as conn:
         # ``running`` is the step's LEASE (#780): flipped on EVERY wake before any
         # journal write — not just the first — so a crash anywhere mid-step
@@ -504,13 +518,17 @@ async def _run_workflow_step_body(
                 script_input = materialized
             else:
                 script_input = run.input
-            await wf_queries.append_run_event(
+            started = await wf_queries.append_run_event(
                 conn,
                 account_id=account_id,
                 run_id=run_id,
                 type="run_started",
                 payload={"input": script_input},
             )
+            # Start from the stored copy, so this wake sees the same input (key order
+            # included, after the jsonb round trip) as every later wake.
+            if started is not None:
+                script_input = started.payload["input"]
 
         # Pre-replay harvest: resolve any inflight capability that is now done — a
         # gate with a delivered resume signal, or an agent child with a response (or a

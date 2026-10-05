@@ -956,6 +956,73 @@ async def test_a_ref_run_whose_request_is_gone_errors(
     assert events[-1].payload["error"]["kind"] == "request_unavailable"
 
 
+async def test_a_ref_to_another_accounts_request_does_not_resolve(
+    mwf_runtime: asyncpg.Pool[Any],
+) -> None:
+    """The rebuild is scoped to the run's own account: a run in another account
+    holding a ref to this session's request errors instead of reading it."""
+    pool = mwf_runtime
+    session_id, park_id, _ = await _parked_turn(pool)
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO accounts (id, parent_account_id, can_mint_children, display_name) "
+            "VALUES ('acc_other', $1, TRUE, 'other')",
+            _ACCOUNT,
+        )
+        await conn.execute(
+            "INSERT INTO environments (id, name, config, account_id) "
+            "VALUES ('env_other', 'other-env', '{}'::jsonb, 'acc_other')"
+        )
+        wf = await wf_queries.insert_workflow(
+            conn, account_id="acc_other", name="echo", script=_ECHO_AFTER_A_WAKE
+        )
+    run = await wf_run_service.create_run(
+        pool,
+        account_id="acc_other",
+        authority=OperatorAuthority(),
+        workflow_id=wf.id,
+        environment_id="env_other",
+        request_ref=RequestRef(session_id=session_id, request_id=park_id),
+    )
+
+    await run_workflow_step(run.id)
+
+    async with pool.acquire() as conn:
+        events = await wf_queries.list_run_events(conn, run.id)
+    assert [e.payload["error"]["kind"] for e in events] == ["request_unavailable"]
+
+
+async def test_a_ref_run_cancelled_before_it_starts_skips_the_rebuild(
+    mwf_runtime: asyncpg.Pool[Any],
+) -> None:
+    """A cancel lands even when the rebuild would crash: the first wake doesn't
+    rebuild a request for a run it is about to cancel."""
+    pool = mwf_runtime
+    session_id, park_id, _ = await _parked_turn(pool)
+    run = await wf_run_service.create_run(
+        pool,
+        account_id=_ACCOUNT,
+        authority=OperatorAuthority(),
+        workflow_id=await _echo_workflow(pool),
+        environment_id=_ENV,
+        request_ref=RequestRef(session_id=session_id, request_id=park_id),
+    )
+    async with pool.acquire() as conn:
+        await wf_queries.insert_run_signal(
+            conn, run_id=run.id, call_key=wf_queries.CANCEL_SIGNAL_CALL_KEY, kind="cancel"
+        )
+
+    with mock.patch(
+        "aios.workflows.step.rebuild_request", side_effect=RuntimeError("boom")
+    ) as rebuild:
+        await run_workflow_step(run.id)
+
+    rebuild.assert_not_called()
+    async with pool.acquire() as conn:
+        done = await wf_queries.get_run_for_step(conn, run.id)
+    assert done is not None and done.status == "cancelled"
+
+
 async def test_the_script_input_is_what_run_started_recorded(
     mwf_runtime: asyncpg.Pool[Any],
 ) -> None:
