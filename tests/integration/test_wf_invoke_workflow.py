@@ -25,7 +25,7 @@ from aios.db.pool import create_pool
 from aios.db.queries import trace as trace_q
 from aios.db.queries import workflows as wf_queries
 from aios.harness import runtime
-from aios.models.agents import ToolSpec
+from aios.models.agents import HttpMethod, HttpRouteSpec, HttpServerSpec, ToolSpec
 from aios.models.attenuation import surface_of
 from aios.models.sessions import Session
 from aios.models.workflows import AsAgent, OperatorAuthority, SessionAuthority, WfRun
@@ -921,3 +921,226 @@ async def test_sub_run_facts_reports_live_session_and_run_children_and_truncates
 
     assert cut["truncated"] is True and len(cut["nodes"]) == 1
     assert {k.id: k.label for k in kids} == {arm["id"]: "arm", judge["id"]: "judge"}
+
+
+# ── #2472 B1: pin the clamp law against the mutations the suites above let through ──
+#
+# Each test below is RED under one argument-order or bound-source regression in
+# ``service.create_run``: the as_agent inner meet swapped, the outer meet swapped, the
+# RunAuthority bound re-read from the launching session's LIVE agent, or the clamp skipped
+# for a pinned ``version=``.
+
+_GH = "https://api.github.com"
+
+
+def _narrow_gh() -> HttpServerSpec:
+    """The parent's grant: GET-only on /repos/a/**, no query string."""
+    return HttpServerSpec(
+        name="gh",
+        base_url=_GH,
+        routes=[HttpRouteSpec(path_pattern="/repos/a/**", methods=["GET"], allow_query=False)],
+    )
+
+
+def _broad_gh() -> HttpServerSpec:
+    """A wider grant on the same ``base_url``: every verb, query strings, and /**."""
+    return HttpServerSpec(
+        name="gh",
+        base_url=_GH,
+        routes=[
+            HttpRouteSpec(path_pattern="/repos/a/**", methods=None, allow_query=True),
+            HttpRouteSpec(path_pattern="/**", methods=None, allow_query=True),
+        ],
+    )
+
+
+def _routes(run: WfRun) -> list[tuple[str, list[HttpMethod] | None, bool]]:
+    return [
+        (r.path_pattern, r.methods, r.allow_query)
+        for srv in surface_of(run).http_servers
+        for r in srv.routes
+    ]
+
+
+async def _spawned_sub_run(pool: asyncpg.Pool[Any], parent_run: str) -> WfRun:
+    events = await _list(pool, parent_run)
+    assert not [e for e in events if e.type == "call_result"]  # spawned, not refused
+    cs = next(e for e in events if e.type == "call_started")
+    return await _run(pool, cs.payload["child_run_id"])
+
+
+async def _broad_http_child(pool: asyncpg.Pool[Any]) -> str:
+    async with pool.acquire() as conn:
+        wf = await wf_queries.insert_workflow(
+            conn,
+            account_id="acc_wf",
+            name="broad-http-child",
+            script="async def main(input):\n    return 1\n",
+            http_servers=[_broad_gh()],
+        )
+    return wf.id
+
+
+async def _narrow_http_parent(pool: asyncpg.Pool[Any], script: str) -> str:
+    async with pool.acquire() as conn:
+        wf = await wf_queries.insert_workflow(
+            conn,
+            account_id="acc_wf",
+            name="narrow-http-parent",
+            script=script,
+            http_servers=[_narrow_gh()],
+        )
+    return wf.id
+
+
+async def test_subrun_never_widens_parent_http_routes(
+    wf_runtime: asyncpg.Pool[Any],
+) -> None:
+    """#2472 (c): an http server that survives the meet keeps the PARENT's routes,
+    ``methods`` and ``allow_query``. The child declares every verb, ``allow_query`` and an
+    extra ``/**`` route; none of it may reach the sub-run. RED if the outer meet's
+    arguments are swapped (``clamp(bound, source_surface)``): the child's routes and
+    ``allow_query`` would then be kept verbatim."""
+    pool = wf_runtime
+    child_wf = await _broad_http_child(pool)
+    parent_wf = await _narrow_http_parent(pool, _INVOKE_PARENT)
+    parent_run = await _make_run(pool, parent_wf, input={"wf": child_wf})
+    assert _routes(await _run(pool, parent_run)) == [("/repos/a/**", ["GET"], False)]
+
+    await run_workflow_step(parent_run)
+
+    sub = await _spawned_sub_run(pool, parent_run)
+    assert _routes(sub) == [("/repos/a/**", ["GET"], False)]
+
+
+async def test_as_agent_subrun_never_widens_parent_http_routes(
+    wf_runtime: asyncpg.Pool[Any],
+) -> None:
+    """#2472 (d): under ``as_agent`` the parent stays the binding (second) argument of the
+    inner meet, so an agent version holding the broad http server grants the sub-run no
+    route, verb or ``allow_query`` the parent lacks. RED if the inner meet's arguments are
+    swapped (``clamp(bound, surface_of(av))``) or the outer one is."""
+    pool = wf_runtime
+    agent = await agents_service.create_agent(
+        pool,
+        account_id="acc_wf",
+        name="broad-http-agent",
+        model="test/dummy",
+        system="broad http agent",
+        tools=[],
+        http_servers=[_broad_gh()],
+        description=None,
+        metadata={},
+        window_min=1000,
+        window_max=100000,
+    )
+    child_wf = await _broad_http_child(pool)
+    parent_wf = await _narrow_http_parent(pool, _INVOKE_AS_AGENT)
+    parent_run = await _make_run(
+        pool,
+        parent_wf,
+        input={"wf": child_wf, "as_agent": {"agent_id": agent.id, "version": agent.version}},
+    )
+
+    await run_workflow_step(parent_run)
+
+    sub = await _spawned_sub_run(pool, parent_run)
+    assert sub.as_agent == AsAgent(agent_id=agent.id, version=agent.version)
+    assert _routes(sub) == [("/repos/a/**", ["GET"], False)]
+
+
+async def test_launcher_widened_after_parent_launch_does_not_widen_subrun(
+    wf_runtime: asyncpg.Pool[Any],
+) -> None:
+    """#2472 (a), the headline property: a sub-run is bound by its parent's FROZEN surface,
+    not the launching session's current one. The launcher holds no tools when the parent
+    launches and is widened to ``read`` before the parent spawns its sub-run; the sub-run
+    must still get no tools. RED if the RunAuthority bound is re-read from the launcher
+    session's live agent (the pre-#2472 law)."""
+    pool = wf_runtime
+    agent = await agents_service.create_agent(
+        pool,
+        account_id="acc_wf",
+        name="widened-launcher",
+        model="test/dummy",
+        system="widened launcher",
+        tools=[],
+        description=None,
+        metadata={},
+        window_min=1000,
+        window_max=100000,
+    )
+    session = await _make_launcher_session(pool, agent.id)
+    async with pool.acquire() as conn:
+        child_wf = await wf_queries.insert_workflow(
+            conn,
+            account_id="acc_wf",
+            name="reads-child",
+            script="async def main(input):\n    return 1\n",
+            tools=[ToolSpec(type="read")],
+        )
+        # The parent declares ``read`` too, so only the launcher's surface AT LAUNCH
+        # keeps it out of the parent's frozen surface.
+        parent_wf = await wf_queries.insert_workflow(
+            conn,
+            account_id="acc_wf",
+            name="reads-parent",
+            script=_INVOKE_PARENT,
+            tools=[ToolSpec(type="read")],
+        )
+    parent = await service.create_run(
+        pool,
+        account_id="acc_wf",
+        authority=SessionAuthority(session.id, None),
+        workflow_id=parent_wf.id,
+        environment_id="env_wf",
+        input={"wf": child_wf.id},
+    )
+    assert surface_of(parent).tools == []
+
+    widened = await agents_service.update_agent(
+        pool,
+        agent.id,
+        account_id="acc_wf",
+        expected_version=agent.version,
+        tools=[ToolSpec(type="read")],
+    )
+    assert [t.type for t in widened.tools] == ["read"]
+
+    await run_workflow_step(parent.id)
+
+    sub = await _spawned_sub_run(pool, parent.id)
+    assert sub.launcher_session_id == session.id
+    assert surface_of(sub).tools == []
+
+
+async def test_pinned_invoke_is_clamped_to_parent_surface(
+    wf_runtime: asyncpg.Pool[Any],
+) -> None:
+    """#2472 (b): a version-pinned ``invoke_workflow`` sub-run is clamped exactly like an
+    unpinned one. The operator parent declares no tools; v1 of the child declares
+    ``read``. RED if a pinned ``version=`` skips the clamp."""
+    pool = wf_runtime
+    async with pool.acquire() as conn:
+        child = await wf_queries.insert_workflow(
+            conn,
+            account_id="acc_wf",
+            name="pinned-reads-child",
+            script="async def main(input):\n    return 'v1'\n",
+            tools=[ToolSpec(type="read")],
+        )
+        await wf_queries.update_workflow(
+            conn,
+            child.id,
+            account_id="acc_wf",
+            expected_version=1,
+            script="async def main(input):\n    return 'v2'\n",
+        )
+    parent_wf = await _insert_workflow(pool, "pinned-no-tools-parent", _INVOKE_PINNED)
+    parent_run = await _make_run(pool, parent_wf, input={"wf": child.id, "version": 1})
+
+    await run_workflow_step(parent_run)
+
+    sub = await _spawned_sub_run(pool, parent_run)
+    assert sub.source_version == 1
+    assert surface_of(sub).tools == []
