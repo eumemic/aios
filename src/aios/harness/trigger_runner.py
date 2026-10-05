@@ -204,6 +204,18 @@ async def run_trigger_step(trigger_id: str, trigger_run_id: str | None = None) -
     # source identity was fixed at match time, stamped on the carrier row).
     is_one_shot = trigger_run_id is None and trigger.source == "one_shot"
 
+    if trigger.account_archived_at is not None:
+        # The account was archived between claim and execute (or after an event
+        # fire's carrier row was written). Nothing fires on its behalf.
+        log.info("trigger.skip_account_archived", trigger_id=trigger_id, name=trigger.name)
+        await _skip_claimed_fire(
+            trigger,
+            trigger_run_id=trigger_run_id,
+            reason="account archived",
+            fired_at=started_at,
+        )
+        return
+
     if isinstance(trigger.owner, SessionOwner) and trigger.owner.archived_at is not None:
         # Session was archived between claim and execute. Archive is the
         # lifecycle boundary: stop firing.
