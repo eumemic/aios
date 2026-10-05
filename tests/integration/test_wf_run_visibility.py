@@ -39,6 +39,7 @@ from aios.services import triggers as triggers_service
 from aios.services import workflows as wf_service
 from aios.tools import workflow_management as tools
 from aios.workflows import run_tools, service
+from aios.workflows.step import run_workflow_step
 
 pytestmark = pytest.mark.integration
 
@@ -398,3 +399,46 @@ async def test_the_replay_tools_refuse_a_session_run_and_an_undeclared_run(
     undeclared = _run_with(run, principal="operator", tools=[])
     refusal = run_tools.gate_run_tool(undeclared, "sample_requests")
     assert refusal is not None and "declared tools" in refusal["error"]
+
+
+async def test_a_generic_child_of_a_replay_run_holds_no_replay_tool(
+    pool: asyncpg.Pool[Any],
+) -> None:
+    """A generic ``agent()`` child inherits its run's surface, minus the replay tools:
+    no session holds one. Otherwise the child (an eval judge, say) would crash on its
+    first step, and could author a workflow that declares them."""
+    wf = await wf_service.create_workflow(
+        pool,
+        account_id="acc_vis",
+        name=f"eval-judge-{next(_names)}",
+        script="async def main(input):\n    return await agent('judge this', model='test/judge')\n",
+        tools=[*_REPLAY_TOOLS, ToolSpec(type="read")],
+    )
+    run = await service.create_run(
+        pool,
+        account_id="acc_vis",
+        authority=OperatorAuthority(),
+        workflow_id=wf.id,
+        environment_id="env_vis",
+    )
+    with (
+        mock.patch("aios.workflows.step.defer_wake", new=AsyncMock()),
+        mock.patch("aios.workflows.step.defer_run_wake", new=AsyncMock()),
+        mock.patch("aios.services.sessions.defer_wake", new=AsyncMock()),
+    ):
+        await run_workflow_step(run.id)
+
+    async with pool.acquire() as conn:
+        child_id = await conn.fetchval("SELECT id FROM sessions WHERE parent_run_id = $1", run.id)
+        frozen = await queries.get_session_frozen_surface(conn, child_id, account_id="acc_vis")
+    assert frozen is not None
+    assert [t.type for t in frozen.tools] == ["read"]
+    with pytest.raises(ForbiddenError):
+        await wf_service.create_workflow(
+            pool,
+            account_id="acc_vis",
+            name=f"laundered-{next(_names)}",
+            script="async def main(input):\n    return 1\n",
+            tools=_REPLAY_TOOLS,
+            creator_session_id=child_id,
+        )
