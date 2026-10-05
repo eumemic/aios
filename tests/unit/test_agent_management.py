@@ -331,6 +331,19 @@ class TestReturnShape:
         assert out["version"] == 3
         assert out["system"] == "SECRET-SYSTEM"
 
+    async def test_get_agent_never_echoes_an_inline_api_key(self, monkeypatch: Any) -> None:
+        agent = _agent(litellm_extra={"api_key": "sk-inline", "temperature": 0.2})
+        monkeypatch.setattr("aios.services.agents.get_agent", AsyncMock(return_value=agent))
+        out = await am.get_agent_handler("ses_1", {"agent_id": "agt_1"})
+        assert out["litellm_extra"] == {"temperature": 0.2, "api_key_set": True}
+
+    async def test_update_agent_never_echoes_the_kept_api_key(self, monkeypatch: Any) -> None:
+        # update_agent keeps the prior litellm_extra, so its echo carries the key too.
+        agent = _agent(litellm_extra={"api_key": "sk-inline"})
+        monkeypatch.setattr("aios.services.agents.update_agent", AsyncMock(return_value=agent))
+        out = await am.update_agent_handler("ses_1", {"agent_id": "agt_1", "version": 1})
+        assert out["litellm_extra"] == {"api_key_set": True}
+
     async def test_list_agents_trims_heavy_fields(self, monkeypatch: Any) -> None:
         monkeypatch.setattr("aios.services.agents.list_agents", AsyncMock(return_value=[_agent()]))
         out = await am.list_agents_handler("ses_1", {})

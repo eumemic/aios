@@ -54,7 +54,7 @@ class Rebuilt:
 
 @dataclass(frozen=True, slots=True)
 class Missing:
-    what: str
+    what: Literal["blob", "attachment"]
     record: dict[str, Any]
 
 
@@ -146,6 +146,10 @@ async def rebuild_request(
         "params": _decode(blobs[record["params_sha"]]),
     }
     if model != record["capability_model"]:
+        # No hash to compare, so an unreadable attachment can't be told apart from
+        # one the send couldn't read either: report it rather than render a marker.
+        if ctx.unavailable_attachments:
+            return Missing(what="attachment", record=record)
         return Rebuilt(request=request, fidelity="rerendered", record=record)
     if sha256_hex(request) == record["payload_sha"]:
         return Rebuilt(request=request, fidelity="exact", record=record)

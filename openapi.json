@@ -4351,6 +4351,105 @@
         }
       }
     },
+    "/v1/sessions/{session_id}/requests/{request_id}": {
+      "get": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "Get Request",
+        "description": "Rebuild a request the session sent (#2471).\n\n``request_id`` is the id of the span that opened the send: a\n``model_request_start`` event, or a ``model_workflow_park`` event for a\nworkflow-bound agent. The request is recomposed from its captured record,\nblobs and the event log, using today's renderer, and reported with its\nfidelity. ``?model=`` renders it for another model's vision and thinking gates\ninstead. 404 when the event isn't a captured request.\n\nAttachment files are read where the API runs: a request that inlined an image\nthis process can't read reports ``missing: attachment``.",
+        "operationId": "get_session_request",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          },
+          {
+            "name": "request_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Request Id"
+            }
+          },
+          {
+            "name": "model",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Model"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/RebuiltRequest"
+                    },
+                    {
+                      "$ref": "#/components/schemas/MissingRequest"
+                    }
+                  ],
+                  "discriminator": {
+                    "propertyName": "kind",
+                    "mapping": {
+                      "rebuilt": "#/components/schemas/RebuiltRequest",
+                      "missing": "#/components/schemas/MissingRequest"
+                    }
+                  },
+                  "title": "Response Get Session Request"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/sessions/{session_id}/context": {
       "get": {
         "tags": [
@@ -16953,6 +17052,46 @@
         ],
         "title": "MintKeyResponse"
       },
+      "MissingRequest": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "const": "missing",
+            "title": "Kind",
+            "default": "missing"
+          },
+          "session_id": {
+            "type": "string",
+            "title": "Session Id"
+          },
+          "request_id": {
+            "type": "string",
+            "title": "Request Id"
+          },
+          "missing": {
+            "type": "string",
+            "enum": [
+              "blob",
+              "attachment"
+            ],
+            "title": "Missing"
+          },
+          "record": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Record"
+          }
+        },
+        "type": "object",
+        "required": [
+          "session_id",
+          "request_id",
+          "missing",
+          "record"
+        ],
+        "title": "MissingRequest",
+        "description": "A captured request that can't be rebuilt: ``blob`` (a captured part is gone)\nor ``attachment`` (an image file the request inlined is unreadable here)."
+      },
       "ModelProvider": {
         "properties": {
           "id": {
@@ -17307,6 +17446,53 @@
         ],
         "title": "OneShotSource",
         "description": "One-shot source: fires once at an absolute UTC time, then self-deletes."
+      },
+      "RebuiltRequest": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "const": "rebuilt",
+            "title": "Kind",
+            "default": "rebuilt"
+          },
+          "session_id": {
+            "type": "string",
+            "title": "Session Id"
+          },
+          "request_id": {
+            "type": "string",
+            "title": "Request Id"
+          },
+          "fidelity": {
+            "type": "string",
+            "enum": [
+              "exact",
+              "inexact",
+              "rerendered"
+            ],
+            "title": "Fidelity"
+          },
+          "request": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Request"
+          },
+          "record": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Record"
+          }
+        },
+        "type": "object",
+        "required": [
+          "session_id",
+          "request_id",
+          "fidelity",
+          "request",
+          "record"
+        ],
+        "title": "RebuiltRequest",
+        "description": "A captured request, recomposed (#2471).\n\n``fidelity`` is ``exact`` when the rebuild hashes to the captured\n``payload_sha``: it is the request the session composed. ``inexact`` means\nthe renderer changed since (compare ``record.render_version``) or an image the\nrequest inlined changed on disk. ``rerendered`` means it was rendered for\nanother model (``?model=``), so there's no hash to compare. ``request`` is\n``{messages, tools, params}``; ``params`` never includes an ``api_key``."
       },
       "RecentChat": {
         "properties": {

@@ -71,6 +71,29 @@ def get(ctx: typer.Context, session_id: str) -> None:
     run_or_die(_run)
 
 
+@app.command("request", help="Rebuild a request the session sent, from its capture.")
+@covers("get_session_request")
+def request(
+    ctx: typer.Context,
+    session_id: str,
+    request_id: Annotated[
+        str, typer.Argument(help="The model_request_start (or model_workflow_park) event id.")
+    ],
+    model: Annotated[
+        str | None, typer.Option("--model", help="Render for this model's gates instead.")
+    ] = None,
+) -> None:
+    def _run() -> None:
+        raw_single(
+            ctx,
+            "GET",
+            f"/v1/sessions/{session_id}/requests/{request_id}",
+            params={"model": model},
+        )
+
+    run_or_die(_run)
+
+
 @app.command("egress", help="Inspect the live sandbox egress intercept set.")
 @covers("get_session_egress")
 def egress(ctx: typer.Context, session_id: str) -> None:
