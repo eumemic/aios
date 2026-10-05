@@ -1046,3 +1046,127 @@ async def test_the_script_input_is_what_run_started_recorded(
     async with pool.acquire() as conn:
         done = await wf_queries.get_run_for_step(conn, run.id)
     assert done is not None and done.output == {"n": 1}
+
+
+# ── #2474 B2: a run resolves only the ref it was created with ─────────────────
+
+
+async def _workflow(pool: asyncpg.Pool[Any], name: str, script: str) -> str:
+    async with pool.acquire() as conn:
+        wf = await wf_queries.insert_workflow(conn, account_id=_ACCOUNT, name=name, script=script)
+    return wf.id
+
+
+async def _operator_run(
+    pool: asyncpg.Pool[Any], workflow_id: str, *, input: Any, request_ref: RequestRef | None
+) -> str:
+    run = await wf_run_service.create_run(
+        pool,
+        account_id=_ACCOUNT,
+        authority=OperatorAuthority(),
+        workflow_id=workflow_id,
+        environment_id=_ENV,
+        input=input,
+        request_ref=request_ref,
+    )
+    return run.id
+
+
+async def _results(pool: asyncpg.Pool[Any], run_id: str) -> list[Any]:
+    async with pool.acquire() as conn:
+        events = await wf_queries.list_run_events(conn, run_id)
+    return [e.payload.get("result", e.payload) for e in events if e.type == "call_result"]
+
+
+async def test_a_ref_in_plain_input_grants_nothing(mwf_runtime: asyncpg.Pool[Any]) -> None:
+    """A ref-shaped value in a run's input is just data: ``call_llm`` refuses it, and
+    nothing is sent."""
+    pool = mwf_runtime
+    session_id, park_id, _ = await _parked_turn(pool)
+    wf = await _workflow(
+        pool,
+        "smuggle",
+        "async def main(input):\n    return await call_llm(request_ref=input['ref'])\n",
+    )
+    run_id = await _operator_run(
+        pool,
+        wf,
+        input={"ref": {"session_id": session_id, "request_id": park_id}},
+        request_ref=None,
+    )
+
+    with mock.patch("aios.workflows.run_llm.launch_call_llm_task") as launch:
+        await _drive(run_id, 2)
+
+    launch.assert_not_called()
+    [result] = await _results(pool, run_id)
+    assert result["error_kind"] == "request_ref_not_granted"
+
+
+async def test_a_run_hands_its_ref_to_a_sub_run_which_starts_from_it(
+    mwf_runtime: asyncpg.Pool[Any],
+) -> None:
+    """``invoke_workflow(request_ref=)`` hands on the parent's own ref: the sub-run's
+    row holds it as its grant and it starts from the rebuilt request."""
+    pool = mwf_runtime
+    session_id, park_id, wam_input = await _parked_turn(pool)
+    ref = RequestRef(session_id=session_id, request_id=park_id)
+    child = await _echo_workflow(pool)
+    parent = await _workflow(
+        pool,
+        "hand-on",
+        "async def main(input):\n"
+        "    return await invoke_workflow(input['wf'], None, request_ref=input['request_ref'])\n",
+    )
+    parent_id = await _operator_run(
+        pool, parent, input={"wf": child, "request_ref": ref.model_dump()}, request_ref=ref
+    )
+
+    await run_workflow_step(parent_id)
+
+    async with pool.acquire() as conn:
+        started = next(
+            e for e in await wf_queries.list_run_events(conn, parent_id) if e.type == "call_started"
+        )
+    sub_id = started.payload["child_run_id"]
+    await _drive(sub_id, 2)
+    async with pool.acquire() as conn:
+        sub = await wf_queries.get_run_for_step(conn, sub_id)
+    assert sub is not None and sub.request_ref == ref and sub.input is None
+    assert sub.status == "completed"
+    assert sub.output["messages"] == wam_input["messages"]
+    assert sub.output["session_id"] == sub_id
+
+
+async def test_a_run_cannot_hand_on_a_ref_it_was_not_given(
+    mwf_runtime: asyncpg.Pool[Any],
+) -> None:
+    pool = mwf_runtime
+    session_id, park_id, _ = await _parked_turn(pool)
+    parent = await _workflow(
+        pool,
+        "launder",
+        "async def main(input):\n"
+        "    return await invoke_workflow(input['wf'], None, request_ref=input['ref'])\n",
+    )
+    parent_id = await _operator_run(
+        pool,
+        parent,
+        input={
+            "wf": await _echo_workflow(pool),
+            "ref": {"session_id": session_id, "request_id": park_id},
+        },
+        request_ref=None,
+    )
+
+    await run_workflow_step(parent_id)
+
+    async with pool.acquire() as conn:
+        events = await wf_queries.list_run_events(conn, parent_id)
+    refusals = [e.payload["error"]["kind"] for e in events if e.type == "call_result"]
+    assert refusals == ["invoke_workflow_refused"]
+    async with pool.acquire() as conn:
+        subs = await conn.fetchval(
+            "SELECT count(*) FROM wf_runs WHERE parent_run_id = $1", parent_id
+        )
+    assert subs == 0

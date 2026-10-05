@@ -59,6 +59,7 @@ import asyncpg
 
 from aios.config import get_settings
 from aios.db.queries import workflows as wf_queries
+from aios.errors import NotFoundError
 from aios.harness import runtime
 from aios.harness.completion import (
     LlmRequest,
@@ -69,9 +70,10 @@ from aios.harness.completion import (
 from aios.jobs.app import defer_run_wake
 from aios.logging import get_logger
 from aios.models.attenuation import api_base_of
-from aios.models.workflows import WfRun
+from aios.models.workflows import RequestRef, WfRun
 from aios.services import attenuation as attenuation_service
 from aios.services import model_providers as model_providers_service
+from aios.services.requests import Missing, rebuild_request
 
 log = get_logger("aios.workflows.run_llm")
 
@@ -172,10 +174,6 @@ async def invoke_call_llm(*, run: WfRun, spec: dict[str, Any]) -> tuple[dict[str
     effective ``api_base``, then check the account-resolved provider auth doesn't
     conflict with it. Only a call past all four runs.
     """
-    messages = spec.get("messages")
-    if not isinstance(messages, list):
-        return {"error": "call_llm requires a 'messages' list"}, 0
-
     # Model resolution: the request's model, else the run's default child model.
     model = spec.get("model") or run.default_child_model
     if not isinstance(model, str) or not model:
@@ -202,13 +200,47 @@ async def invoke_call_llm(*, run: WfRun, spec: dict[str, Any]) -> tuple[dict[str
             0,
         )
 
-    params = spec.get("params") if isinstance(spec.get("params"), dict) else None
+    pool = runtime.require_pool()
+    # The launcher's litellm_extra for guard 2. A run carries none of its own (None).
+    launcher_extra: dict[str, Any] | None = None
+    session_id: str | None
+    if spec.get("kind") == "ref":
+        # By reference (#2474). The step admitted only the run's own ref.
+        ref = RequestRef.model_validate(spec.get("request_ref"))
+        try:
+            rebuilt = await rebuild_request(
+                pool,
+                account_id=run.account_id,
+                session_id=ref.session_id,
+                request_event_id=ref.request_id,
+                target_model=model,
+            )
+        except NotFoundError as exc:
+            return _request_unavailable(str(exc)), 0
+        if isinstance(rebuilt, Missing):
+            return _request_unavailable(f"a {rebuilt.what} it needs is gone"), 0
+        messages = rebuilt.request["messages"]
+        tools = rebuilt.request["tools"]
+        # The captured params (endpoint included) belong to the model the request was
+        # sent to, and their launcher already passed #823 for them. Another model gets
+        # none, so the request can't reach that model's endpoint with another's key.
+        params = rebuilt.request["params"] if model == rebuilt.record["model"] else None
+        launcher_extra = params
+        # An operator run (an eval arm) gets its own prompt-cache key.
+        session_id = ref.session_id if run.principal == "session" else run.id
+    else:
+        messages = spec.get("messages")
+        if not isinstance(messages, list):
+            return {"error": "call_llm requires a 'messages' list"}, 0
+        tools = spec.get("tools") if isinstance(spec.get("tools"), list) else None
+        params = spec.get("params") if isinstance(spec.get("params"), dict) else None
+        session_id = spec.get("session_id") if isinstance(spec.get("session_id"), str) else None
 
     # Guard 2 — model-identity clamp (#823). A redirected api_base in params would send
-    # the whole prompt to another endpoint; admit it only if trusted. A run is the
-    # launcher and carries no litellm_extra of its own (None) → the equality arm reduces
-    # to "must not redirect"; the operator allowlist is the only way to admit a redirect.
-    if not attenuation_service.model_identity_trusted(params, None):
+    # the whole prompt to another endpoint; admit it only if trusted. Inline, the
+    # launcher's litellm_extra is None → the equality arm reduces to "must not
+    # redirect"; the operator allowlist is the only way to admit a redirect.
+    if not attenuation_service.model_identity_trusted(params, launcher_extra):
         redirect = api_base_of(params)
         return (
             {
@@ -235,7 +267,6 @@ async def invoke_call_llm(*, run: WfRun, spec: dict[str, Any]) -> tuple[dict[str
     # re-dispatch forever — a silent wedge. So a persistent resolve failure resolves
     # as an error the script branches on, exactly like a provider error from the
     # inference call below. Transient DB errors self-heal via the sweep's re-wake.
-    pool = runtime.require_pool()
     try:
         auth, conflict = await model_providers_service.resolve_provider_auth_or_conflict(
             pool,
@@ -260,8 +291,6 @@ async def invoke_call_llm(*, run: WfRun, spec: dict[str, Any]) -> tuple[dict[str
             "error_kind": "model_provider_not_configured",
         }, 0
 
-    tools = spec.get("tools") if isinstance(spec.get("tools"), list) else None
-    session_id = spec.get("session_id") if isinstance(spec.get("session_id"), str) else None
     request = LlmRequest(messages=messages, tools=tools, params=params, session_id=session_id)
 
     try:
@@ -290,6 +319,13 @@ async def invoke_call_llm(*, run: WfRun, spec: dict[str, Any]) -> tuple[dict[str
         "message": response.message,
     }
     return result, _to_microusd(response.cost)
+
+
+def _request_unavailable(why: str) -> dict[str, Any]:
+    return {
+        "error": f"call_llm: the request is unavailable: {why}",
+        "error_kind": "request_unavailable",
+    }
 
 
 def _to_microusd(cost_usd: float | None) -> int:

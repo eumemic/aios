@@ -219,6 +219,7 @@ def invoke_workflow(
     output_schema: Any = None,
     label: str | None = None,
     as_agent: dict[str, Any] | None = None,
+    request_ref: Any = None,
 ) -> _Capability:
     """Invoke another workflow as a sub-run and await its result — the dual of
     :func:`agent` (which invokes a child *session*), keyed by id like
@@ -237,7 +238,14 @@ def invoke_workflow(
     launch. ``as_agent={"agent_id": ..., "version": N}`` (operator runs only) clamps the
     sub-run to that agent version's surface as well, so an eval arm runs with the
     authority that agent would give it.
+
+    ``request_ref`` hands the sub-run a request this run can resolve (the
+    ``request_ref`` in a workflow-as-model run's input). Pass ``None`` as ``input``:
+    the sub-run starts with that request rebuilt, in the shape a workflow-as-model run
+    gets, so an eval arm sees what production would have given it.
     """
+    if request_ref is not None and input is not None:
+        raise ValueError("invoke_workflow() takes input=None with request_ref")
     annotations: dict[str, Any] = {}
     if label is not None:
         annotations["label"] = label
@@ -255,7 +263,21 @@ def invoke_workflow(
         spec["version"] = version
     if as_agent is not None:
         spec["as_agent"] = as_agent
+    if request_ref is not None:
+        spec["request_ref"] = _request_ref_spec(request_ref)
     return _Capability("invoke_workflow", spec, annotations)
+
+
+def _request_ref_spec(ref: Any) -> dict[str, str]:
+    """Check a request ref's shape in the script process, so a malformed one is a
+    replay-identical author error. Whether the run may resolve it is the worker's call."""
+    if (
+        not isinstance(ref, dict)
+        or set(ref) != {"session_id", "request_id"}
+        or not all(isinstance(v, str) for v in ref.values())
+    ):
+        raise ValueError(f"a request_ref is {{'session_id': str, 'request_id': str}}, got {ref!r}")
+    return {"session_id": ref["session_id"], "request_id": ref["request_id"]}
 
 
 def budget() -> _Capability:
@@ -312,7 +334,7 @@ def tool(name: str, input: Any) -> _Capability:
     return _Capability("tool", {"tool_name": name, "input": input})
 
 
-def call_llm(request: Any) -> _Capability:
+def call_llm(request: Any = None, *, request_ref: Any = None, model: Any = None) -> _Capability:
     """Run one raw inference turn and await its result — the workflow author's
     *inference primitive*.
 
@@ -349,7 +371,26 @@ def call_llm(request: Any) -> _Capability:
     **Crash semantics: at-least-once.** A worker crash mid-call re-drives the
     inference on resume — a second, billable model call. Inference is read-only
     (no external mutation), so a re-drive is safe beyond the duplicated spend.
+
+    **By reference.** ``call_llm(request_ref=input["request_ref"], model=...)`` sends
+    the request this run was created with (a workflow-as-model run's own request, or
+    one handed to it), rendered for ``model`` (default: the run's default child
+    model). The journal keeps only the ref. Called with the model the request was
+    captured for, it keeps that request's provider params, endpoint included; with
+    another model it sends none. A run can send only the request it was created with:
+    any other ref resolves as an ``{"error": …}`` value.
     """
+    if request_ref is not None:
+        if request is not None:
+            raise ValueError("call_llm() takes a request or a request_ref, not both")
+        if model is not None and not isinstance(model, str):
+            raise ValueError(f"call_llm() requires model to be a string, got {model!r}")
+        return _Capability(
+            "call_llm",
+            {"kind": "ref", "request_ref": _request_ref_spec(request_ref), "model": model},
+        )
+    if model is not None:
+        raise ValueError("call_llm() takes model= only with request_ref; put it in the request")
     spec = _llm_request_spec(request)
     return _Capability("call_llm", spec)
 

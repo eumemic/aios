@@ -19,6 +19,7 @@ import pytest
 from aios.config import Settings
 from aios.harness.completion import LlmResponse, ModelCallDeadlineError
 from aios.models.model_providers import ProviderAuth
+from aios.services.requests import Missing, Rebuilt
 from aios.workflows import run_llm
 from aios.workflows.run_llm import _to_microusd, invoke_call_llm
 from aios.workflows.wf_script_host import call_llm
@@ -300,3 +301,102 @@ def test_to_microusd() -> None:
 
 def test_has_inflight_false_when_unknown() -> None:
     assert run_llm.has_inflight("wfr_x", "sha:k#0") is False
+
+
+# ─── by reference (#2474) ─────────────────────────────────────────────────────
+
+_REF = {"session_id": "ses_1", "request_id": "evt_1"}
+_CAPTURED_PARAMS = {"api_base": "https://proxy.internal/v1", "temperature": 0.3}
+
+
+def _rebuilt(*, captured_model: str = "openrouter/captured") -> Rebuilt:
+    return Rebuilt(
+        request={
+            "messages": [{"role": "user", "content": "from the log"}],
+            "tools": [{"type": "function", "function": {"name": "t"}}],
+            "params": _CAPTURED_PARAMS,
+        },
+        fidelity="exact",
+        record={"model": captured_model},
+    )
+
+
+def _ref_run(principal: str) -> Any:
+    return SimpleNamespace(
+        id="wfr_1", account_id="acc_t", default_child_model="gpt-4o-mini", principal=principal
+    )
+
+
+async def _call_by_ref(
+    run: Any, rebuilt: Any, *, model: str | None
+) -> tuple[dict[str, Any], int, Any]:
+    with (
+        patch("aios.workflows.run_llm.rebuild_request", AsyncMock(return_value=rebuilt)) as rb,
+        patch("aios.workflows.run_llm.call_litellm", AsyncMock(return_value=_response())) as m,
+    ):
+        result, cost = await invoke_call_llm(
+            run=run, spec={"kind": "ref", "request_ref": _REF, "model": model}
+        )
+    assert rb.await_args is not None
+    assert rb.await_args.kwargs["target_model"] == (model or run.default_child_model)
+    return result, cost, m
+
+
+async def test_by_ref_with_the_captured_model_keeps_its_params_and_endpoint() -> None:
+    """The captured api_base passed #823 for its launcher, so it's admitted for the
+    same model even though it is on no allowlist."""
+    _, cost, m = await _call_by_ref(_ref_run("session"), _rebuilt(), model="openrouter/captured")
+    request = m.await_args.args[0]
+    assert request.messages == [{"role": "user", "content": "from the log"}]
+    assert request.tools == [{"type": "function", "function": {"name": "t"}}]
+    assert request.params == _CAPTURED_PARAMS
+    assert request.session_id == "ses_1"  # a run acting for the session shares its key
+    assert cost == 2000
+
+
+async def test_by_ref_with_another_model_sends_no_captured_params() -> None:
+    """Another model must not reach the captured endpoint with its own key."""
+    _, _, m = await _call_by_ref(_ref_run("operator"), _rebuilt(), model="openrouter/judge")
+    request = m.await_args.args[0]
+    assert request.params is None
+    assert request.session_id == "wfr_1"  # an operator run gets its own cache key
+
+
+async def test_by_ref_defaults_to_the_runs_default_child_model() -> None:
+    _, _, m = await _call_by_ref(_ref_run("operator"), _rebuilt(), model=None)
+    assert m.await_args.kwargs["model"] == "gpt-4o-mini"
+
+
+async def test_by_ref_an_unavailable_request_is_an_error_value() -> None:
+    result, cost, m = await _call_by_ref(
+        _ref_run("operator"), Missing(what="blob", record={}), model="openrouter/judge"
+    )
+    assert result["error_kind"] == "request_unavailable"
+    assert cost == 0
+    m.assert_not_awaited()
+
+
+def test_call_llm_shim_by_ref() -> None:
+    cap = call_llm(request_ref=dict(_REF), model="m")
+    assert cap._spec == {"kind": "ref", "request_ref": _REF, "model": "m"}
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"request": {"messages": []}, "request_ref": _REF},
+        {"request_ref": {"session_id": "s"}},
+        {"request_ref": {**_REF, "extra": "x"}},
+        {"request_ref": {"session_id": "s", "request_id": 1}},
+        {"request": {"messages": []}, "model": "m"},
+    ],
+)
+def test_call_llm_shim_rejects_a_malformed_ref_call(kwargs: dict[str, Any]) -> None:
+    with pytest.raises(ValueError):
+        call_llm(**kwargs)
+
+
+def test_inline_call_llm_spec_is_unchanged() -> None:
+    """An inline call's spec, and so its call key, is what it was before refs."""
+    cap = call_llm({"model": "m", "messages": [{"role": "user", "content": "x"}]})
+    assert set(cap._spec) == {"model", "messages", "tools", "params", "session_id"}
