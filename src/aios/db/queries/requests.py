@@ -61,10 +61,15 @@ async def present_blob_shas(
 # The request spans of one agent's sessions in ``[start, end)``, one per payload,
 # capped per (session, UTC day), in a seeded order. A request counts only if it was
 # answered: a ``model_request_start`` closed by a successful ``model_request_end``
-# (a cancelled end carries no ``model``), or a ``model_workflow_park`` whose run was
-# harvested without error. The closing span may land after ``end``, so the span read
-# runs a day past it. Sessions a replay run spawned (its tree is the only operator
-# run stamped ``session``) are eval traffic, not production, and are skipped.
+# (a cancelled end carries no ``model``; a refusal's end, ``finish_reason`` =
+# ``content_filter``, persists no assistant message), or the last
+# ``model_workflow_park`` for a run that was harvested without error (a relaunch
+# re-parks the same run, and only the last park's request was sent). Only an
+# answered request has its own assistant message: the first one after its span,
+# since a session runs one inference at a time. The closing span may land after
+# ``end``, so the span read runs a day past it. Sessions a replay run spawned (its
+# tree is the only operator run stamped ``session``) are eval traffic, not
+# production, and are skipped.
 _SAMPLE_REQUEST_SPANS_SQL = """
 WITH agent_sessions AS (
     SELECT s.id
@@ -103,11 +108,17 @@ answered AS (
            (data->>'event' = 'model_request_start' AND id IN (
                SELECT data->>'model_request_start_id' FROM spans
                 WHERE data->>'event' = 'model_request_end'
-                  AND data->>'is_error' = 'false' AND data ? 'model'))
-           OR (data->>'event' = 'model_workflow_park' AND data->>'run_id' IN (
-               SELECT data->>'run_id' FROM spans
-                WHERE data->>'event' = 'model_workflow_harvest_end'
-                  AND data->>'is_error' = 'false'))
+                  AND data->>'is_error' = 'false' AND data ? 'model'
+                  AND data->>'finish_reason' IS DISTINCT FROM 'content_filter'))
+           OR (data->>'event' = 'model_workflow_park'
+               AND data->>'run_id' IN (
+                   SELECT data->>'run_id' FROM spans
+                    WHERE data->>'event' = 'model_workflow_harvest_end'
+                      AND data->>'is_error' = 'false')
+               AND id IN (
+                   SELECT DISTINCT ON (data->>'run_id') id FROM spans
+                    WHERE data->>'event' = 'model_workflow_park'
+                    ORDER BY data->>'run_id', seq DESC))
        )
      ORDER BY data->'request'->>'payload_sha', created_at, id
 ),

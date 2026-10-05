@@ -133,8 +133,9 @@ async def _request(
 ) -> tuple[str, str | None]:
     """Seed one request span and how it ended. Returns ``(span id, answer message id)``.
 
-    ``end`` is ``ok`` (answered), ``error``, ``cancelled`` (no ``model`` on the end) or
-    ``none`` (never closed)."""
+    ``end`` is ``ok`` (answered), ``error``, ``cancelled`` (no ``model`` on the end),
+    ``refused`` (a ``content_filter`` end, no assistant message) or ``none`` (never
+    closed)."""
     seq = next(_seqs)
     record = {
         "payload_sha": payload_sha or make_id(EVENT),
@@ -172,7 +173,12 @@ async def _request(
             }
             if end != "cancelled":
                 done["model"] = "openrouter/prod"
+            if end == "refused":
+                done["finish_reason"] = "content_filter"
         await _event(conn, session_id, seq + 1, "span", done, at + timedelta(seconds=1))
+        if end == "refused":
+            # A refusal latches an errored turn: no assistant message is persisted.
+            return span_id, None
         answer = await _event(
             conn,
             session_id,
@@ -284,6 +290,76 @@ async def test_the_sample_is_answered_deduped_capped_and_seeded(
     other = await _sample(run, agent_id=agent, seed="s2", n=2)
     first_two = await _sample(run, agent_id=agent, n=2)
     assert other["items"] != first_two["items"]
+
+
+async def test_a_sampled_request_is_paired_with_its_own_answer(
+    pool: asyncpg.Pool[Any],
+) -> None:
+    """A refused request has no assistant message, so it isn't sampled (its "answer"
+    would be the next turn's). A relaunched park's first span was never sent: only the
+    last park for the run counts, paired with the harvest's message."""
+    agent = await _agent(pool)
+    session = await _session(pool, agent)
+    await _request(pool, session, agent, _DAY, end="refused")
+    later, later_answer = await _request(pool, session, agent, _DAY + timedelta(hours=1))
+    run_id = make_id(EVENT)
+    at = _DAY + timedelta(hours=2)
+    record = {
+        "system_sha": "sha-system",
+        "tools_sha": "sha-tools",
+        "params_sha": "sha-params",
+        "model": "workflow:wf_x",
+        "capability_model": "openrouter/prod",
+        "binding": {"kind": "agent", "agent_id": agent, "version": 1},
+    }
+    seq = next(_seqs)
+    async with pool.acquire() as conn:
+        await _event(
+            conn,
+            session,
+            seq,
+            "span",
+            {
+                "event": "model_workflow_park",
+                "run_id": run_id,
+                "request": {**record, "payload_sha": "sha-unsent"},
+            },
+            at,
+        )
+        relaunched = await _event(
+            conn,
+            session,
+            seq + 1,
+            "span",
+            {
+                "event": "model_workflow_park",
+                "run_id": run_id,
+                "request": {**record, "payload_sha": "sha-sent"},
+            },
+            at + timedelta(seconds=1),
+        )
+        await _event(
+            conn,
+            session,
+            seq + 2,
+            "span",
+            {"event": "model_workflow_harvest_end", "run_id": run_id, "is_error": False},
+            at + timedelta(seconds=2),
+        )
+        harvest_answer = await _event(
+            conn,
+            session,
+            seq + 3,
+            "message",
+            {"role": "assistant", "content": "deliberated"},
+            at + timedelta(seconds=3),
+        )
+    run = await _replay_run(pool)
+
+    result = await _sample(run, agent_id=agent, cluster_cap=10)
+
+    answers = {i["request_ref"]["request_id"]: i["response_event_id"] for i in result["items"]}
+    assert answers == {later: later_answer, relaunched: harvest_answer}
 
 
 async def test_the_sample_skips_eval_traffic_and_reports_missing_blobs(
