@@ -204,8 +204,11 @@ async def invoke_call_llm(*, run: WfRun, spec: dict[str, Any]) -> tuple[dict[str
     # The launcher's litellm_extra for guard 2. A run carries none of its own (None).
     launcher_extra: dict[str, Any] | None = None
     session_id: str | None
+    # How exactly a by-ref request was rebuilt (#2475): reported on the result, since a
+    # sampled ref's fidelity is only known when it is used.
+    fidelity: str | None = None
     if spec.get("kind") == "ref":
-        # By reference (#2474). The step admitted only the run's own ref.
+        # By reference (#2474). The step admitted only a ref this run may resolve.
         ref = RequestRef.model_validate(spec.get("request_ref"))
         try:
             rebuilt = await rebuild_request(
@@ -233,6 +236,7 @@ async def invoke_call_llm(*, run: WfRun, spec: dict[str, Any]) -> tuple[dict[str
             return _request_unavailable(f"a {rebuilt.what} it needs is gone"), 0
         messages = rebuilt.request["messages"]
         tools = rebuilt.request["tools"]
+        fidelity = rebuilt.fidelity
         # The captured params (endpoint included) belong to the model the request was
         # sent to, and their launcher already passed #823 for them. Another model gets
         # none, so the request can't reach that model's endpoint with another's key.
@@ -330,6 +334,8 @@ async def invoke_call_llm(*, run: WfRun, spec: dict[str, Any]) -> tuple[dict[str
         "cost": response.cost,
         "message": response.message,
     }
+    if fidelity is not None:
+        result["fidelity"] = fidelity
     return result, _to_microusd(response.cost)
 
 

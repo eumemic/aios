@@ -73,7 +73,7 @@ from aios.services.sessions import (
 )
 from aios.tools.registry import tool_executes_class
 from aios.tools.schema_errors import normalize_and_format_schema_violation
-from aios.workflows import run_llm, run_sandbox, run_tools
+from aios.workflows import run_llm, run_replay, run_sandbox, run_tools
 from aios.workflows.child_id import child_session_id
 from aios.workflows.child_run_id import child_run_id
 from aios.workflows.determinism import HOST_SEMANTICS_EPOCH
@@ -363,14 +363,6 @@ async def _enrich_agent_result(
         "duration_ms": max(0, int((now - started_at).total_seconds() * 1000)),
         "tool_calls": int(tool_calls or 0),
     }
-
-
-def _request_ref_granted(run: WfRun, ref: Any) -> bool:
-    """Whether ``run`` may resolve ``ref`` (#2474): only the ref it was created with.
-    A ref-shaped value anywhere else (plain input, a tool or gate result) grants
-    nothing. Refs a run mints itself (#2475) will be granted by the call key of the
-    minting capability's ``call_result``, never by the value's shape."""
-    return run.request_ref is not None and ref == run.request_ref.model_dump()
 
 
 async def _materialize_request(
@@ -1127,11 +1119,11 @@ async def _run_workflow_step_body(
                             f"${run.budget_usd:.2f} — call_llm is refused"
                         )
                     }
-                elif llm_spec.get("kind") == "ref" and not _request_ref_granted(
-                    run, llm_spec.get("request_ref")
+                elif llm_spec.get("kind") == "ref" and not await run_replay.request_ref_granted(
+                    conn, run, llm_spec.get("request_ref")
                 ):
                     refusal = {
-                        "error": ("call_llm can send only the request this run was created with"),
+                        "error": "call_llm can send only a request this run was given or sampled",
                         "error_kind": "request_ref_not_granted",
                     }
                 if refusal is not None:
@@ -1567,10 +1559,10 @@ async def _open_invoke_workflow_capability(
     request_ref_spec = spec.get("request_ref")
     request_ref: RequestRef | None = None
     if request_ref_spec is not None:
-        if not _request_ref_granted(run, request_ref_spec):
+        if not await run_replay.request_ref_granted(conn, run, request_ref_spec):
             return await _reject(
                 "invoke_workflow_refused",
-                "invoke_workflow() can hand on only the request this run was created with",
+                "invoke_workflow() can hand on only a request this run was given or sampled",
             )
         request_ref = RequestRef.model_validate(request_ref_spec)
     # output_schema rides the wire as a canonical JSON *string* (mirror agent());

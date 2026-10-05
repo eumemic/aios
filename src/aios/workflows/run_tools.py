@@ -52,6 +52,7 @@ from aios.tools.workflow_management import (
     _GetRunArgs,
     _ListRunsArgs,
 )
+from aios.workflows import run_replay
 from aios.workflows.idempotency_key import (
     AIOS_IDEMPOTENCY_KEY_SENTINEL,
     idempotency_key,
@@ -93,6 +94,7 @@ def _substitute_idempotency_sentinel(
 # correlate the GitHub blackboard against which runs are live. The other sandbox builtins
 # (read/write/edit/glob/grep) and authed-MCP / search_events stay out of scope (later
 # slices), so a ``tool('read')`` is a recoverable not-callable value at the run frontier.
+# The replay tools (#2475, :mod:`aios.workflows.run_replay`) run on the worker too.
 RUN_TOOLS: frozenset[str] = frozenset(
     {
         "web_search",
@@ -102,6 +104,7 @@ RUN_TOOLS: frozenset[str] = frozenset(
         "list_runs",
         "get_run",
         "list_account_triggers",
+        *REPLAY_TOOL_TYPES,
     }
 )
 
@@ -307,6 +310,9 @@ async def invoke_run_tool(
     the ``http_request`` branch substitutes for an author's sentinel header."""
     if (err := gate_run_tool(run, tool_name)) is not None:
         return err
+    if tool_name in REPLAY_TOOL_TYPES:
+        # Run-only tools: no session registry entry, so they validate their own args.
+        return await run_replay.invoke_replay_tool(run=run, tool_name=tool_name, args=tool_input)
 
     args = tool_input if isinstance(tool_input, dict) else {}
     schema_error = validate_arguments(args, registry.get(tool_name).parameters_schema)

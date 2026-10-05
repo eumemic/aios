@@ -345,7 +345,10 @@ async def _call_by_ref(
 async def test_by_ref_with_the_captured_model_keeps_its_params_and_endpoint() -> None:
     """The captured api_base passed #823 for its launcher, so it's admitted for the
     same model even though it is on no allowlist."""
-    _, cost, m = await _call_by_ref(_ref_run("session"), _rebuilt(), model="openrouter/captured")
+    result, cost, m = await _call_by_ref(
+        _ref_run("session"), _rebuilt(), model="openrouter/captured"
+    )
+    assert result["fidelity"] == "exact"  # reported at use, since a sample doesn't rebuild
     request = m.await_args.args[0]
     assert request.messages == [{"role": "user", "content": "from the log"}]
     assert request.tools == [{"type": "function", "function": {"name": "t"}}]

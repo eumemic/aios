@@ -405,6 +405,11 @@ _DB_HELPER_SYMBOLS = frozenset(
         "request_queries.get_blobs",
         "request_queries.get_events_by_seq",
         "request_queries.insert_blobs",
+        "request_queries.present_blob_shas",
+        "request_queries.sample_request_spans",
+        # A DB read of the run's own grants (its row and journal), #2475.
+        "request_ref_granted",
+        "run_replay.request_ref_granted",
         "wf_queries.get_workflow",
         "wf_queries.get_workflow_version",
         "wf_queries.insert_run_signal",

@@ -2013,6 +2013,44 @@ async def call_started_labels(
     return {r["child"]: r["label"] for r in rows if r["child"] is not None}
 
 
+async def request_ref_minted(
+    conn: asyncpg.Connection[Any],
+    run_id: str,
+    ref: dict[str, str],
+    *,
+    account_id: str,
+    minting_tools: list[str],
+) -> bool:
+    """Whether ``ref`` is an item's ``request_ref`` in the result of one of the run's own
+    ``tool()`` calls to a tool in ``minting_tools`` (#2475). Keyed on the call that
+    produced the value, never its shape: a ref-shaped value in a gate resume or any other
+    call's result doesn't count. Reads this run's journal only."""
+    minted: bool = await conn.fetchval(
+        """
+        SELECT EXISTS (
+            SELECT 1
+              FROM wf_runs w
+              JOIN wf_run_events s ON s.run_id = w.id AND s.type = 'call_started'
+              JOIN wf_run_events r
+                ON r.run_id = s.run_id AND r.call_key = s.call_key AND r.type = 'call_result'
+             CROSS JOIN LATERAL jsonb_array_elements(
+                 CASE WHEN jsonb_typeof(r.payload->'result'->'items') = 'array'
+                      THEN r.payload->'result'->'items' ELSE '[]'::jsonb END
+             ) AS item
+             WHERE w.id = $1 AND w.account_id = $2
+               AND s.payload->>'capability' = 'tool'
+               AND s.payload->>'tool_name' = ANY($3)
+               AND item->'request_ref' = $4::jsonb
+        )
+        """,
+        run_id,
+        account_id,
+        minting_tools,
+        json.dumps(ref),
+    )
+    return minted
+
+
 def _iso(value: Any) -> str | None:
     return None if value is None else value.isoformat()
 
