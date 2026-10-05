@@ -35,9 +35,10 @@ class WorkflowCreate:
             - Injected capability API, available without imports:
               - `agent(input, *, agent_id=None, output_schema=None, model=None, label=None)`: invoke a generic or named
             agent and await its result.
-              - `invoke_workflow(workflow_id, input, *, output_schema=None, label=None)`: invoke another workflow as a sub-
-            run and await its result (the run dual of `agent`). The sub-run runs under this run's surface intersected with
-            the target's; a failed or gone sub-run raises like a failed `agent`.
+              - `invoke_workflow(workflow_id, input, *, version=None, output_schema=None, label=None)`: invoke another
+            workflow as a sub-run and await its result (the run dual of `agent`). `version` pins a registered version;
+            omitted, the version current at launch runs. The sub-run runs under this run's surface intersected with the
+            target's; a failed or gone sub-run raises like a failed `agent`.
               - `tool(name, input)`: invoke a declared tool; tool errors are returned, not raised.
               - `call_llm(request)`: run one raw inference turn and await the assistant turn. `request` carries `model`
             (omit to use the run's default child model; a `workflow:` target is rejected), `messages` (required), optional

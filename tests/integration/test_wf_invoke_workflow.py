@@ -587,3 +587,63 @@ async def test_agent_originated_nested_invoke_workflow_propagates_principal(
     result_evt = next(e for e in c_events if e.type == "call_result")
     assert result_evt.payload["error"]["kind"] == "workflow_model_forbidden"
     assert grandkids == 0
+
+
+# ── #2472 D1: invoke_workflow(version=N) pins the sub-run's version ───────────
+
+_INVOKE_PINNED = (
+    "async def main(input):\n"
+    "    return await invoke_workflow(input['wf'], {}, version=input['version'])\n"
+)
+
+
+async def _two_versions(pool: asyncpg.Pool[Any]) -> str:
+    """A workflow whose v1 returns 'v1' and whose current v2 returns 'v2'."""
+    wf_id = await _insert_workflow(pool, "versioned", "async def main(input):\n    return 'v1'\n")
+    async with pool.acquire() as conn:
+        await wf_queries.update_workflow(
+            conn,
+            wf_id,
+            account_id="acc_wf",
+            expected_version=1,
+            script="async def main(input):\n    return 'v2'\n",
+        )
+    return wf_id
+
+
+async def _invoke_once(pool: asyncpg.Pool[Any], wf_id: str, version: Any) -> list[Any]:
+    parent_wf = await _insert_workflow(pool, f"pinned-parent-{version}", _INVOKE_PINNED)
+    parent = await _make_run(pool, parent_wf, input={"wf": wf_id, "version": version})
+    await run_workflow_step(parent)
+    async with pool.acquire() as conn:
+        return list(await wf_queries.list_run_events(conn, parent))
+
+
+async def test_a_pinned_invoke_runs_the_pinned_version(wf_runtime: asyncpg.Pool[Any]) -> None:
+    pool = wf_runtime
+    wf_id = await _two_versions(pool)
+    events = await _invoke_once(pool, wf_id, 1)
+    started = next(e for e in events if e.type == "call_started")
+    sub = await _run(pool, started.payload["child_run_id"])
+    assert sub.source_version == 1
+    await run_workflow_step(sub.id)
+    assert (await _run(pool, sub.id)).output == "v1"
+
+
+async def test_a_bad_or_unknown_version_is_a_catchable_rejection(
+    wf_runtime: asyncpg.Pool[Any],
+) -> None:
+    pool = wf_runtime
+    wf_id = await _two_versions(pool)
+    cases = (
+        (wf_id, 0, "bad_invoke_workflow"),
+        # Past int4: a catchable rejection, not a DataError crashing the step.
+        (wf_id, 2**31, "bad_invoke_workflow"),
+        (wf_id, 7, "workflow_version_not_found"),
+        # A pin on a workflow that doesn't exist is still workflow_not_found.
+        ("wf_absent", 1, "workflow_not_found"),
+    )
+    for target, version, kind in cases:
+        events = await _invoke_once(pool, target, version)
+        kinds = [e.payload["error"]["kind"] for e in events if e.type == "call_result"]
+        assert kinds == [kind], (target, version, kinds)
