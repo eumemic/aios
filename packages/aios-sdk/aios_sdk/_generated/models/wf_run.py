@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from ..models.as_agent import AsAgent
     from ..models.http_server_spec import HttpServerSpec
     from ..models.mcp_server_spec import McpServerSpec
+    from ..models.request_ref import RequestRef
     from ..models.ssh_server_spec import SshServerSpec
     from ..models.tool_spec import ToolSpec
     from ..models.usage_node_ref import UsageNodeRef
@@ -75,6 +76,9 @@ class WfRun:
             as_agent (AsAgent | None | Unset): Set when an operator run invoked this run with `as_agent`: the agent version
                 whose surface it was clamped to, within the parent run's. Only the surface changes; the model and vaults still
                 come from the parent run.
+            request_ref (None | RequestRef | Unset): The request this run works on, when it was created with one: a
+                workflow-as-model turn's own request, or one handed to a sub-run. The run can resolve this request and no other.
+                With no `input`, the run's first step rebuilds the request and starts the script with it.
             depth (int | Unset):  Default: 0.
             request_id (None | str | Unset):
             caller (None | Unset | WfRunCallerType0):
@@ -115,6 +119,7 @@ class WfRun:
     parent_run_id: None | str | Unset = UNSET
     launcher_session_id: None | str | Unset = UNSET
     as_agent: AsAgent | None | Unset = UNSET
+    request_ref: None | RequestRef | Unset = UNSET
     depth: int | Unset = 0
     request_id: None | str | Unset = UNSET
     caller: None | Unset | WfRunCallerType0 = UNSET
@@ -139,6 +144,7 @@ class WfRun:
 
     def to_dict(self) -> dict[str, Any]:
         from ..models.as_agent import AsAgent
+        from ..models.request_ref import RequestRef
         from ..models.usage_node_ref import UsageNodeRef
         from ..models.wf_run_caller_type_0 import WfRunCallerType0
         from ..models.wf_run_request_output_schema_type_0 import (
@@ -206,6 +212,14 @@ class WfRun:
             as_agent = self.as_agent.to_dict()
         else:
             as_agent = self.as_agent
+
+        request_ref: dict[str, Any] | None | Unset
+        if isinstance(self.request_ref, Unset):
+            request_ref = UNSET
+        elif isinstance(self.request_ref, RequestRef):
+            request_ref = self.request_ref.to_dict()
+        else:
+            request_ref = self.request_ref
 
         depth = self.depth
 
@@ -355,6 +369,8 @@ class WfRun:
             field_dict["launcher_session_id"] = launcher_session_id
         if as_agent is not UNSET:
             field_dict["as_agent"] = as_agent
+        if request_ref is not UNSET:
+            field_dict["request_ref"] = request_ref
         if depth is not UNSET:
             field_dict["depth"] = depth
         if request_id is not UNSET:
@@ -403,6 +419,7 @@ class WfRun:
         from ..models.as_agent import AsAgent
         from ..models.http_server_spec import HttpServerSpec
         from ..models.mcp_server_spec import McpServerSpec
+        from ..models.request_ref import RequestRef
         from ..models.ssh_server_spec import SshServerSpec
         from ..models.tool_spec import ToolSpec
         from ..models.usage_node_ref import UsageNodeRef
@@ -499,6 +516,23 @@ class WfRun:
             return cast(AsAgent | None | Unset, data)
 
         as_agent = _parse_as_agent(d.pop("as_agent", UNSET))
+
+        def _parse_request_ref(data: object) -> None | RequestRef | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            try:
+                if not isinstance(data, dict):
+                    raise TypeError()
+                request_ref_type_0 = RequestRef.from_dict(data)
+
+                return request_ref_type_0
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            return cast(None | RequestRef | Unset, data)
+
+        request_ref = _parse_request_ref(d.pop("request_ref", UNSET))
 
         depth = d.pop("depth", UNSET)
 
@@ -730,6 +764,7 @@ class WfRun:
             parent_run_id=parent_run_id,
             launcher_session_id=launcher_session_id,
             as_agent=as_agent,
+            request_ref=request_ref,
             depth=depth,
             request_id=request_id,
             caller=caller,

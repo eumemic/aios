@@ -209,6 +209,7 @@ from .rebuilt_request_fidelity import RebuiltRequestFidelity
 from .rebuilt_request_record import RebuiltRequestRecord
 from .rebuilt_request_request import RebuiltRequestRequest
 from .recent_chat import RecentChat
+from .request_ref import RequestRef
 from .require_approval import RequireApproval
 from .run_completion_source import RunCompletionSource
 from .run_completion_source_replace import RunCompletionSourceReplace
@@ -595,6 +596,7 @@ __all__ = (
     "RebuiltRequestRecord",
     "RebuiltRequestRequest",
     "RecentChat",
+    "RequestRef",
     "RequireApproval",
     "RunCompletionSource",
     "RunCompletionSourceReplace",

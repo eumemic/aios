@@ -45,6 +45,7 @@ from aios.models.sessions import Err, Ok, Outcome
 from aios.models.workflows import (
     TERMINAL_RUN_STATUSES,
     AsAgent,
+    RequestRef,
     RunReader,
     WfRun,
     WfRunEvent,
@@ -120,6 +121,11 @@ def _row_to_wf_run(row: asyncpg.Record) -> WfRun:
         as_agent=(
             AsAgent(agent_id=row["as_agent_id"], version=row["as_agent_version"])
             if row.get("as_agent_id") is not None
+            else None
+        ),
+        request_ref=(
+            RequestRef(session_id=row["request_ref_session_id"], request_id=row["request_ref_id"])
+            if row.get("request_ref_id") is not None
             else None
         ),
         visibility=row["visibility"],
@@ -740,6 +746,7 @@ async def insert_wf_run(
     workspace_path: str | None = None,
     trigger_id: str | None = None,
     as_agent: AsAgent | None = None,
+    request_ref: RequestRef | None = None,
 ) -> WfRun:
     """Insert a fresh ``pending`` run that snapshots ``script`` (+ ``script_sha``) and the
     declared tool surface (``tools``/``mcp_servers``/``http_servers``) — pinned at launch.
@@ -792,11 +799,12 @@ async def insert_wf_run(
                  script, script_sha, source_version, host_semantics_epoch, status, input,
                  tools, mcp_servers, http_servers, budget_total_microusd, default_child_model,
                  depth, tools_vocab_epoch, creator_session_id, creator_run_id, ssh_servers,
-                 trigger_id, as_agent_id, as_agent_version)
+                 trigger_id, as_agent_id, as_agent_version,
+                 request_ref_session_id, request_ref_id)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10, $11, $12, $13, $14, $15,
                     'pending', $16::jsonb,
                     $17::jsonb, $18::jsonb, $19::jsonb, $20, $21, $22, $23, $24, $25, $26::jsonb,
-                    $27, $28, $29)
+                    $27, $28, $29, $30, $31)
             ON CONFLICT (id) DO NOTHING
             RETURNING *
             """,
@@ -829,6 +837,8 @@ async def insert_wf_run(
             trigger_id,
             as_agent.agent_id if as_agent is not None else None,
             as_agent.version if as_agent is not None else None,
+            request_ref.session_id if request_ref is not None else None,
+            request_ref.request_id if request_ref is not None else None,
         )
     except asyncpg.ForeignKeyViolationError as exc:
         raise NotFoundError(

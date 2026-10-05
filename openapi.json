@@ -17536,6 +17536,26 @@
         "title": "RecentChat",
         "description": "Distinct chat_id observed on a connection's account, with the\nmost-recent inbound timestamp.\n\nReturned by ``GET /v1/connections/{id}/recent-chats`` so operators\ncan find the chat_id for a specific peer without digging through\nevent logs before calling ``bind-chat`` or opening an ``AllowList``.\n\n``chat_id`` is the **authoritative, gate-relevant identifier** \u2014 it is\nexactly what the inbound-admission gate (``AllowList.chat_ids``) matches\non, so it is the value an operator copies into an allowlist. This view\ndeliberately does not present a connector-supplied ``display_name`` /\n``sender_name`` alongside it: that name is self-reported by the\nconnector and forgeable, never a verified identity."
       },
+      "RequestRef": {
+        "properties": {
+          "session_id": {
+            "type": "string",
+            "title": "Session Id"
+          },
+          "request_id": {
+            "type": "string",
+            "title": "Request Id"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "session_id",
+          "request_id"
+        ],
+        "title": "RequestRef",
+        "description": "A reference to a request a session sent: the span that captured it (#2471),\nnamed the way ``GET /v1/sessions/{session_id}/requests/{request_id}`` names it.\n\nA ref means something only in a field typed as one. A run resolves only the ref\nit was created with (``WfRun.request_ref``), never a ref-shaped value it finds\nin its input or in a tool result."
+      },
       "RequireApproval": {
         "properties": {
           "kind": {
@@ -22045,6 +22065,17 @@
               }
             ],
             "description": "Set when an operator run invoked this run with `as_agent`: the agent version whose surface it was clamped to, within the parent run's. Only the surface changes; the model and vaults still come from the parent run."
+          },
+          "request_ref": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RequestRef"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The request this run works on, when it was created with one: a workflow-as-model turn's own request, or one handed to a sub-run. The run can resolve this request and no other. With no `input`, the run's first step rebuilds the request and starts the script with it."
           },
           "visibility": {
             "type": "string",
