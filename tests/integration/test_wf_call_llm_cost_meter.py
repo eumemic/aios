@@ -70,8 +70,12 @@ async def test_meter_defaults_to_zero(wf_conn: asyncpg.Connection[Any]) -> None:
 
 async def test_charge_accumulates_atomically(wf_conn: asyncpg.Connection[Any]) -> None:
     run_id = await _seed_run(wf_conn)
-    await wf_queries.add_run_call_llm_cost_microusd(wf_conn, run_id, 1500, account_id="acc_root")
-    await wf_queries.add_run_call_llm_cost_microusd(wf_conn, run_id, 2500, account_id="acc_root")
+    await wf_queries.add_run_call_llm_cost_microusd(
+        wf_conn, run_id, 1500, account_id="acc_root", model="test/model"
+    )
+    await wf_queries.add_run_call_llm_cost_microusd(
+        wf_conn, run_id, 2500, account_id="acc_root", model="test/model"
+    )
     # Each charge is col = col + delta — the two accumulate, never clobber.
     assert (
         await wf_queries.get_run_call_llm_cost_microusd(wf_conn, run_id, account_id="acc_root")
@@ -82,8 +86,12 @@ async def test_charge_accumulates_atomically(wf_conn: asyncpg.Connection[Any]) -
 async def test_zero_or_negative_charge_is_noop(wf_conn: asyncpg.Connection[Any]) -> None:
     run_id = await _seed_run(wf_conn)
     # An unreported LiteLLM cost (None → 0) or a degenerate negative never writes.
-    await wf_queries.add_run_call_llm_cost_microusd(wf_conn, run_id, 0, account_id="acc_root")
-    await wf_queries.add_run_call_llm_cost_microusd(wf_conn, run_id, -5, account_id="acc_root")
+    await wf_queries.add_run_call_llm_cost_microusd(
+        wf_conn, run_id, 0, account_id="acc_root", model="test/model"
+    )
+    await wf_queries.add_run_call_llm_cost_microusd(
+        wf_conn, run_id, -5, account_id="acc_root", model="test/model"
+    )
     assert (
         await wf_queries.get_run_call_llm_cost_microusd(wf_conn, run_id, account_id="acc_root") == 0
     )
@@ -91,13 +99,17 @@ async def test_zero_or_negative_charge_is_noop(wf_conn: asyncpg.Connection[Any])
 
 async def test_meter_is_account_scoped(wf_conn: asyncpg.Connection[Any]) -> None:
     run_id = await _seed_run(wf_conn)
-    await wf_queries.add_run_call_llm_cost_microusd(wf_conn, run_id, 9000, account_id="acc_root")
+    await wf_queries.add_run_call_llm_cost_microusd(
+        wf_conn, run_id, 9000, account_id="acc_root", model="test/model"
+    )
     # A foreign-account read never sees the spend (and a foreign-account charge no-ops).
     assert (
         await wf_queries.get_run_call_llm_cost_microusd(wf_conn, run_id, account_id="acc_other")
         == 0
     )
-    await wf_queries.add_run_call_llm_cost_microusd(wf_conn, run_id, 1000, account_id="acc_other")
+    await wf_queries.add_run_call_llm_cost_microusd(
+        wf_conn, run_id, 1000, account_id="acc_other", model="test/model"
+    )
     assert (
         await wf_queries.get_run_call_llm_cost_microusd(wf_conn, run_id, account_id="acc_root")
         == 9000
@@ -111,7 +123,9 @@ async def test_budget_gate_sums_meter_with_child_rollup(
     # of the child-session rollup and the run's own call_llm meter. With no child
     # sessions, a $0.50 budget and $0.60 of call_llm spend is over budget.
     run_id = await _seed_run(wf_conn, budget_usd=0.50)
-    await wf_queries.add_run_call_llm_cost_microusd(wf_conn, run_id, 600_000, account_id="acc_root")
+    await wf_queries.add_run_call_llm_cost_microusd(
+        wf_conn, run_id, 600_000, account_id="acc_root", model="test/model"
+    )
     children = await wf_queries.run_children_usage(wf_conn, run_id, account_id="acc_root")
     meter = await wf_queries.get_run_call_llm_cost_microusd(wf_conn, run_id, account_id="acc_root")
     run = await wf_queries.get_wf_run(wf_conn, run_id, account_id="acc_root")

@@ -2547,6 +2547,7 @@ async def increment_usage(
     cache_read_input_tokens: int = 0,
     cache_creation_input_tokens: int = 0,
     cost_microusd: int = 0,
+    model: str | None,
 ) -> int:
     """Atomically add token and spend counts; return the account spend total."""
     async with pool.acquire() as conn:
@@ -2559,6 +2560,7 @@ async def increment_usage(
             cache_creation_input_tokens=cache_creation_input_tokens,
             cost_microusd=cost_microusd,
             account_id=account_id,
+            model=model,
         )
 
 

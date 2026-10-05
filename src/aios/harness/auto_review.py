@@ -727,6 +727,7 @@ async def _apply_verdict(
                 cache_creation_input_tokens=verdict.usage.get("cache_creation_input_tokens", 0),
                 cost_microusd=round(cost_usd * 1_000_000) if cost_usd is not None else 0,
                 account_id=account_id,
+                model=verdict.model,
             )
 
     # The verdict log — allow AND ask (the spec's audit/tuning requirement).

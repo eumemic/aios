@@ -689,7 +689,7 @@ class TestUsage:
                 depth=10,
             )
             await wf_queries.add_run_call_llm_cost_microusd(
-                conn, run.id, 12_345, account_id=child_id
+                conn, run.id, 12_345, account_id=child_id, model="test/model"
             )
 
         usage = await http_client.get(
@@ -730,6 +730,7 @@ class TestUsage:
                 input_tokens=1_000,
                 output_tokens=100,
                 cost_microusd=50_000,
+                model="test/model",
             )
 
         ranked = await http_client.get(
