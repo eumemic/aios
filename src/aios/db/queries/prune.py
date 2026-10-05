@@ -57,16 +57,26 @@ from typing import Any
 import asyncpg
 
 
+def _replay_tree(alias: str) -> str:
+    """A run in a replay tree (#2475): one that declares a replay tool, or a sub-run of
+    one. Exactly the runs that are operator-principal yet ``session``-visible: the
+    visibility trigger (0191) stamps a replay run ``session`` and its sub-runs inherit
+    it, while every other ``session`` run (a workflow-as-model turn, its sub-runs) acts
+    for a session. Any of them may hold requests it read, in its journal or, for a
+    sub-run handed one as plain input, on its row."""
+    return f"({alias}.principal = 'operator' AND {alias}.visibility = 'session')"
+
+
 def _request_copy(alias: str) -> str:
     """A run whose journal holds a copy of a session's request (#2474): one with a
     request ref (a workflow-as-model turn, or an arm handed a ref), a workflow-as-model
-    run from before refs, or one that declares ``get_request``. These get the short
+    run from before refs, or a run in a replay tree. These get the short
     ``wf_runs_request_copy_*`` grace and retention: the request is rebuildable from the
     session log, and nothing reads their journal once they're terminal."""
     return (
         f"({alias}.request_ref_id IS NOT NULL"
         f" OR {alias}.caller->>'purpose' = 'model_dispatch'"
-        f""" OR {alias}.tools @> '[{{"type": "get_request"}}]'::jsonb)"""
+        f" OR {_replay_tree(alias)})"
     )
 
 
@@ -86,8 +96,10 @@ async def prune_archived_runs(
 
     A request-copy run (see :func:`_request_copy`) is pruned after
     ``request_copy_retention_days``, every other run after ``retention_days``. Pruning
-    a workflow-as-model run also clears its ``input``: one from before #2474 carries
-    the full request there, and the row is kept forever.
+    also clears the ``input`` of a run that may carry a full request there, since the
+    row is kept forever: a workflow-as-model run from before #2474, and a replay-tree
+    sub-run (an eval arm handed a request as plain input). A replay-tree root keeps
+    its input: the operator gave it, and it is the eval's own parameters.
     """
     deleted = 0
     # The LEAST bound is the index range (``wf_runs_prune_eligibility_idx``); the
@@ -130,7 +142,9 @@ async def prune_archived_runs(
         if not remaining:
             await conn.execute(
                 "UPDATE wf_runs SET journal_pruned_at=now(), input = CASE "
-                "WHEN caller->>'purpose' = 'model_dispatch' THEN NULL ELSE input END "
+                "WHEN caller->>'purpose' = 'model_dispatch' "
+                f"OR (parent_run_id IS NOT NULL AND {_replay_tree('wf_runs')}) "
+                "THEN NULL ELSE input END "
                 "WHERE id=$1 AND status IN ('completed','errored','cancelled')",
                 run_id,
             )
