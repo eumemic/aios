@@ -37,7 +37,7 @@ from aios.models.agents import HttpRouteSpec, HttpServerSpec, ToolSpec
 from aios.models.attenuation import Surface
 from aios.models.sessions import Err, Ok, Session
 from aios.models.vaults import VaultCredentialCreate
-from aios.models.workflows import WfRunStatus
+from aios.models.workflows import OperatorAuthority, SessionAuthority, WfRunStatus
 from aios.services import agents as agents_service
 from aios.services import sessions as sessions_service
 from aios.services import tasks as tasks_service
@@ -125,7 +125,12 @@ async def _make_run(
     async with pool.acquire() as conn:
         wf = await wf_queries.insert_workflow(conn, account_id="acc_wf", name=name, script=script)
     run = await service.create_run(
-        pool, account_id="acc_wf", workflow_id=wf.id, environment_id="env_wf", input=input
+        pool,
+        account_id="acc_wf",
+        authority=OperatorAuthority(),
+        workflow_id=wf.id,
+        environment_id="env_wf",
+        input=input,
     )
     return run.id
 
@@ -363,9 +368,9 @@ async def test_launcher_receives_gate_opened_and_resume_gate_happy_path(
     run = await service.create_run(
         pool,
         account_id="acc_wf",
+        authority=SessionAuthority(launcher.id, None),
         workflow_id=wf.id,
         environment_id="env_wf",
-        launcher_session_id=launcher.id,
     )
 
     await run_workflow_step(run.id)
@@ -415,9 +420,9 @@ async def test_gate_opened_delivery_dedupes_by_call_key_on_replay(
     run = await service.create_run(
         pool,
         account_id="acc_wf",
+        authority=SessionAuthority(launcher.id, None),
         workflow_id=wf.id,
         environment_id="env_wf",
-        launcher_session_id=launcher.id,
     )
 
     await run_workflow_step(run.id)
@@ -447,9 +452,9 @@ async def test_non_launcher_cannot_resume_gate(
     run = await service.create_run(
         pool,
         account_id="acc_wf",
+        authority=SessionAuthority(launcher.id, None),
         workflow_id=wf.id,
         environment_id="env_wf",
-        launcher_session_id=launcher.id,
     )
 
     await run_workflow_step(run.id)
@@ -1051,7 +1056,11 @@ async def test_generic_agent_spawn_creates_agentless_child_with_run_surface(
             tools=[ToolSpec(type="web_search")],
         )
     run = await service.create_run(
-        pool, account_id="acc_wf", workflow_id=wf.id, environment_id="env_wf"
+        pool,
+        account_id="acc_wf",
+        authority=OperatorAuthority(),
+        workflow_id=wf.id,
+        environment_id="env_wf",
     )
     await run_workflow_step(run.id)
 
@@ -1091,9 +1100,9 @@ async def _make_agent_launched_run(pool: asyncpg.Pool[Any], script: str, agent_i
     run = await service.create_run(
         pool,
         account_id="acc_wf",
+        authority=SessionAuthority(launcher.id, None),
         workflow_id=wf.id,
         environment_id="env_wf",
-        launcher_session_id=launcher.id,
     )
     return run.id
 
@@ -4301,7 +4310,11 @@ async def test_service_create_and_resume_by_nonce_roundtrip(wf_runtime: asyncpg.
         pool, account_id="acc_wf", name="gate-demo", script=_GATE_SCRIPT
     )
     run = await wf_service.create_run(
-        pool, account_id="acc_wf", workflow_id=wf.id, environment_id="env_wf"
+        pool,
+        account_id="acc_wf",
+        authority=OperatorAuthority(),
+        workflow_id=wf.id,
+        environment_id="env_wf",
     )
 
     await run_workflow_step(run.id)  # → suspends at the gate
@@ -4341,7 +4354,11 @@ async def test_service_resume_by_nonce_rejects_bad_nonce_and_cross_tenant(
         pool, account_id="acc_wf", name="gate-demo", script=_GATE_SCRIPT
     )
     run = await wf_service.create_run(
-        pool, account_id="acc_wf", workflow_id=wf.id, environment_id="env_wf"
+        pool,
+        account_id="acc_wf",
+        authority=OperatorAuthority(),
+        workflow_id=wf.id,
+        environment_id="env_wf",
     )
     await run_workflow_step(run.id)  # → suspended at the gate
     events = await wf_service.list_run_events(pool, run.id, account_id="acc_wf", reader=None)
@@ -4905,6 +4922,7 @@ async def _make_tool_run(
     run = await service.create_run(
         pool,
         account_id="acc_wf",
+        authority=OperatorAuthority(),
         workflow_id=wf.id,
         environment_id="env_wf",
         vault_ids=vault_ids,
@@ -5838,7 +5856,11 @@ async def test_update_workflow_does_not_disturb_inflight_runs(
             tools=[ToolSpec(type="web_search")],
         )
     old_run = await service.create_run(
-        pool, account_id="acc_wf", workflow_id=wf.id, environment_id="env_wf"
+        pool,
+        account_id="acc_wf",
+        authority=OperatorAuthority(),
+        workflow_id=wf.id,
+        environment_id="env_wf",
     )
 
     # Update the workflow mid-flight: new script, surface dropped.
@@ -5864,7 +5886,11 @@ async def test_update_workflow_does_not_disturb_inflight_runs(
 
     # A run launched after the update gets the new definition.
     new_run = await service.create_run(
-        pool, account_id="acc_wf", workflow_id=wf.id, environment_id="env_wf"
+        pool,
+        account_id="acc_wf",
+        authority=OperatorAuthority(),
+        workflow_id=wf.id,
+        environment_id="env_wf",
     )
     await run_workflow_step(new_run.id)
     async with pool.acquire() as conn:
@@ -5881,7 +5907,12 @@ async def test_budget_primitive_round_trip_and_no_ceiling(wf_runtime: asyncpg.Po
             conn, account_id="acc_wf", name="budgeted", script=script
         )
     run = await service.create_run(
-        pool, account_id="acc_wf", workflow_id=wf.id, environment_id="env_wf", budget_usd=1.25
+        pool,
+        account_id="acc_wf",
+        authority=OperatorAuthority(),
+        workflow_id=wf.id,
+        environment_id="env_wf",
+        budget_usd=1.25,
     )
     await run_workflow_step(run.id)
     async with pool.acquire() as conn:
@@ -5958,7 +5989,12 @@ async def test_owed_drive_disposition_always_self_wakes_via_budget_read(
             conn, account_id="acc_wf", name="owed-budget", script=script
         )
     run = await service.create_run(
-        pool, account_id="acc_wf", workflow_id=wf.id, environment_id="env_wf", budget_usd=1.0
+        pool,
+        account_id="acc_wf",
+        authority=OperatorAuthority(),
+        workflow_id=wf.id,
+        environment_id="env_wf",
+        budget_usd=1.0,
     )
     with mock.patch("aios.workflows.step.defer_run_wake", new=AsyncMock()) as wake:
         await run_workflow_step(run.id)
@@ -6011,7 +6047,12 @@ async def test_over_budget_rejection_flips_running_and_self_wakes(
             conn, account_id="acc_wf", name="over-budget-coupling", script=script
         )
     run = await service.create_run(
-        pool, account_id="acc_wf", workflow_id=wf.id, environment_id="env_wf", budget_usd=1.0
+        pool,
+        account_id="acc_wf",
+        authority=OperatorAuthority(),
+        workflow_id=wf.id,
+        environment_id="env_wf",
+        budget_usd=1.0,
     )
     async with pool.acquire() as conn:
         await conn.execute(
@@ -6057,7 +6098,12 @@ async def test_over_budget_agent_refusal_is_catchable(
             conn, account_id="acc_wf", name="over-budget", script=script
         )
     run = await service.create_run(
-        pool, account_id="acc_wf", workflow_id=wf.id, environment_id="env_wf", budget_usd=1.0
+        pool,
+        account_id="acc_wf",
+        authority=OperatorAuthority(),
+        workflow_id=wf.id,
+        environment_id="env_wf",
+        budget_usd=1.0,
     )
     async with pool.acquire() as conn:
         await conn.execute(
@@ -6229,12 +6275,20 @@ async def test_list_runs_enriches_each_run_with_usage(
         )
     run_a = (
         await service.create_run(
-            pool, account_id="acc_wf", workflow_id=wf.id, environment_id="env_wf"
+            pool,
+            account_id="acc_wf",
+            authority=OperatorAuthority(),
+            workflow_id=wf.id,
+            environment_id="env_wf",
         )
     ).id
     run_b = (
         await service.create_run(
-            pool, account_id="acc_wf", workflow_id=wf.id, environment_id="env_wf"
+            pool,
+            account_id="acc_wf",
+            authority=OperatorAuthority(),
+            workflow_id=wf.id,
+            environment_id="env_wf",
         )
     ).id
     await _seed_child_session(pool, sid="ses_la", run_id=run_a, cost_microusd=500, input_tokens=7)
@@ -6387,6 +6441,7 @@ async def _budgeted_run(pool: asyncpg.Pool[Any], agent_id: str, budget_usd: floa
     run = await service.create_run(
         pool,
         account_id="acc_wf",
+        authority=OperatorAuthority(),
         workflow_id=wf.id,
         environment_id="env_wf",
         budget_usd=budget_usd,
@@ -6453,7 +6508,12 @@ async def test_budget_view_reports_subtree_spend(
             script="async def main(input):\n    return await budget()\n",
         )
     run = await service.create_run(
-        pool, account_id="acc_wf", workflow_id=wf.id, environment_id="env_wf", budget_usd=2.0
+        pool,
+        account_id="acc_wf",
+        authority=OperatorAuthority(),
+        workflow_id=wf.id,
+        environment_id="env_wf",
+        budget_usd=2.0,
     )
     await _seed_subtree_session(
         pool, sid="ses_bv_child", cost_microusd=250_000, creator_run_id=run.id
@@ -6702,6 +6762,7 @@ async def _over_budget_run_in_account(pool: asyncpg.Pool[Any], account_id: str) 
     run = await service.create_run(
         pool,
         account_id=account_id,
+        authority=OperatorAuthority(),
         workflow_id=wf.id,
         environment_id=f"env_{account_id}",
         budget_usd=1.0,

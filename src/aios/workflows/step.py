@@ -35,6 +35,7 @@ from typing import Any, Literal, NamedTuple
 
 import asyncpg
 import jsonschema
+from pydantic import ValidationError as PydanticValidationError
 from referencing import Registry, Resource
 from referencing.exceptions import Unresolvable
 from referencing.jsonschema import DRAFT202012
@@ -49,7 +50,14 @@ from aios.jobs.app import defer_run_wake, defer_trigger_fire, defer_wake
 from aios.logging import get_logger
 from aios.models.attenuation import api_base_of, surface_of
 from aios.models.sessions import Err, Outcome
-from aios.models.workflows import TERMINAL_RUN_STATUSES, WfRun, WfRunEvent, WfRunStatus
+from aios.models.workflows import (
+    TERMINAL_RUN_STATUSES,
+    AsAgent,
+    RunAuthority,
+    WfRun,
+    WfRunEvent,
+    WfRunStatus,
+)
 from aios.services import attenuation as attenuation_service
 from aios.services.model_binding_authz import is_workflow_binding
 from aios.services.sessions import (
@@ -1448,6 +1456,19 @@ async def _open_invoke_workflow_capability(
             "bad_invoke_workflow",
             f"invoke_workflow() requires version to be a positive integer, got {version!r}",
         )
+    as_agent_spec = spec.get("as_agent")
+    try:
+        as_agent = (
+            AsAgent.model_validate(as_agent_spec, strict=True)
+            if as_agent_spec is not None
+            else None
+        )
+    except PydanticValidationError:
+        return await _reject(
+            "bad_invoke_workflow",
+            "invoke_workflow() requires as_agent to be {'agent_id': str, 'version': int >= 1}, "
+            f"got {as_agent_spec!r}",
+        )
     # output_schema rides the wire as a canonical JSON *string* (mirror agent());
     # reconstruct the dict and apply the SAME author-facing validity gates.
     output_schema_raw = spec.get("output_schema")
@@ -1469,7 +1490,6 @@ async def _open_invoke_workflow_capability(
         return rejected
 
     sub_run_id = child_run_id(run.id, cap.call_key)
-    run_vaults = await wf_queries.get_run_vault_ids(conn, run.id, account_id=account_id)
     # Spawn (or idempotently re-attach) the sub-run. ``create_run`` owns its own
     # transaction on a separate pooled connection (like ``create_child_session``);
     # its create-or-reattach + caps are all internal. A 404 (workflow gone /
@@ -1481,25 +1501,24 @@ async def _open_invoke_workflow_capability(
             workflow_id=workflow_id,
             environment_id=run.environment_id,
             input=spec.get("input"),
-            vault_ids=run_vaults,
             run_id=sub_run_id,
             version=version,
-            parent_run_id=run.id,
-            # #1653: propagate the originating launcher down the ``parent_run_id``
-            # lineage, so ``create_run`` clamps the sub-run to that session's surface
-            # (#794) and the insert trigger stamps the sub-run's principal from it. NULL
-            # for an operator chain, and also once the launching session is deleted —
-            # ``create_run`` refuses that case (#2467), since nothing is left to clamp to.
-            launcher_session_id=run.launcher_session_id,
+            # The sub-run acts within this run's frozen surface and inherits its vaults
+            # (#2472); ``as_agent`` re-roots the surface at an agent version.
+            authority=RunAuthority(run.id, as_agent),
             request_id=cap.call_key,  # the invoke_workflow() call IS the request
             caller={"kind": "run", "id": run.id, "awaited": True},
             request_output_schema=output_schema,
         )
     except NotFoundError as exc:
-        # Exactly the shape ``get_workflow_version`` raises: a launcher's missing
-        # agent version also carries a ``version`` key, under ``agent_id``.
+        # The exact shapes ``get_workflow_version`` and ``get_agent_version`` raise.
         if exc.detail == {"workflow_id": workflow_id, "version": version}:
             return await _reject("workflow_version_not_found", str(exc))
+        if as_agent is not None and exc.detail == {
+            "agent_id": as_agent.agent_id,
+            "version": as_agent.version,
+        }:
+            return await _reject("agent_version_not_found", str(exc))
         return await _reject("workflow_not_found", f"workflow {workflow_id!r} not found")
     except ConflictError as exc:
         return await _reject("bad_invoke_workflow", str(exc))

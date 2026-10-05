@@ -25,6 +25,7 @@ from aios.db.queries import workflows as wf_queries
 from aios.errors import ConflictError, NotFoundError
 from aios.harness import runtime
 from aios.models.agents import ToolSpec
+from aios.models.workflows import OperatorAuthority
 from aios.workflows import run_tools, service
 
 pytestmark = pytest.mark.integration
@@ -89,6 +90,7 @@ async def test_pinned_version_snapshots_that_version(wf_pool: asyncpg.Pool[Any])
     run = await service.create_run(
         wf_pool,
         account_id="acc_sv",
+        authority=OperatorAuthority(),
         workflow_id=wf_id,
         environment_id="env_sv",
         version=2,
@@ -107,6 +109,7 @@ async def test_default_resolves_to_current_version(wf_pool: asyncpg.Pool[Any]) -
     run = await service.create_run(
         wf_pool,
         account_id="acc_sv",
+        authority=OperatorAuthority(),
         workflow_id=wf_id,
         environment_id="env_sv",
     )
@@ -120,6 +123,7 @@ async def test_missing_version_404s(wf_pool: asyncpg.Pool[Any]) -> None:
         await service.create_run(
             wf_pool,
             account_id="acc_sv",
+            authority=OperatorAuthority(),
             workflow_id=wf_id,
             environment_id="env_sv",
             version=99,
@@ -137,6 +141,7 @@ async def test_archived_workflow_refuses_any_version(wf_pool: asyncpg.Pool[Any])
         await service.create_run(
             wf_pool,
             account_id="acc_sv",
+            authority=OperatorAuthority(),
             workflow_id=wf_id,
             environment_id="env_sv",
             version=1,
@@ -150,6 +155,7 @@ async def test_source_version_resolves_via_fk_and_read_model(
     run = await service.create_run(
         wf_pool,
         account_id="acc_sv",
+        authority=OperatorAuthority(),
         workflow_id=wf_id,
         environment_id="env_sv",
         version=1,

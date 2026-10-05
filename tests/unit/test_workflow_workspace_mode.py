@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 from aios.api.deps import get_account_id, get_pool
 from aios.api.routers.workflows import runs_router
 from aios.errors import ValidationError, install_exception_handlers
-from aios.models.workflows import WfRunCreate
+from aios.models.workflows import OperatorAuthority, WfRunCreate
 from aios.tools.invoke_session import _CallWorkflowArgs
 from aios.workflows import service
 from aios.workflows.determinism import content_hash
@@ -68,6 +68,7 @@ async def test_service_shared_without_launcher_rejected_before_database() -> Non
         await service.create_run(
             _ExplodingPool(),
             account_id="acc_test",
+            authority=OperatorAuthority(),
             workflow_id="wf_1",
             environment_id="env_1",
             workspace="shared",

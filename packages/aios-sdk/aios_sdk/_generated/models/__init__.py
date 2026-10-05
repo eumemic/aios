@@ -30,6 +30,7 @@ from .agent_version_preempt_policy import AgentVersionPreemptPolicy
 from .allow_all import AllowAll
 from .allow_list import AllowList
 from .allow_senders import AllowSenders
+from .as_agent import AsAgent
 from .attributed_usage import AttributedUsage
 from .await_response import AwaitResponse
 from .await_response_error_type_0 import AwaitResponseErrorType0
@@ -433,6 +434,7 @@ __all__ = (
     "AllowAll",
     "AllowList",
     "AllowSenders",
+    "AsAgent",
     "AttributedUsage",
     "AwaitingToolCall",
     "AwaitingToolCallKind",
