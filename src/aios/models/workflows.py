@@ -276,7 +276,9 @@ class WfRun(BaseModel):
         description=(
             "Who may read the run through agent tools: `account` (any session in the "
             "account) or `session` (only its launching session). A workflow-as-model "
-            "run is `session`, and sub-runs inherit their parent's. The operator API "
+            "run is `session`, and so is a run that declares a replay tool "
+            "(`sample_requests`, `get_request`); it has no launching session, so no "
+            "agent can read it. Sub-runs inherit their parent's. The operator API "
             "reads every run."
         )
     )

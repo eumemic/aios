@@ -37,6 +37,7 @@ from aios.harness import runtime
 from aios.jobs.app import defer_run_wake
 from aios.logging import get_logger
 from aios.mcp.client import resolve_auth_for_target_url_run
+from aios.models.agents import REPLAY_TOOL_TYPES
 from aios.models.workflows import RunReader, WfRun
 from aios.services import triggers as triggers_service
 from aios.services import workflows as wf_service
@@ -187,7 +188,16 @@ def gate_run_tool(run: WfRun, tool_name: str) -> dict[str, Any] | None:
     Returns the recoverable ``{"error": …}`` value to surface to the script when
     either check fails (the script branches on it — gating is never run-terminal),
     or ``None`` when the call is admitted.
+
+    A replay tool (#2475) also needs the run to act for the operator: the #794 lattice
+    position is "operator principal AND a declared tool no agent can hold", never one
+    without the other.
     """
+    if tool_name in REPLAY_TOOL_TYPES:
+        if run.principal != "operator":
+            return {"error": f"tool {tool_name!r} is only callable from an operator run"}
+        if tool_name not in {t.type for t in run.tools if t.enabled}:
+            return {"error": f"tool {tool_name!r} is not in the workflow's declared tools"}
     if tool_name not in RUN_TOOLS:
         return {"error": f"tool {tool_name!r} is not callable from a workflow run"}
     if tool_name not in {t.type for t in run.tools if t.enabled}:
