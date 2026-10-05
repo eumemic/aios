@@ -79,7 +79,9 @@ class WfRun:
                 come from the parent run.
             request_ref (None | RequestRef | Unset): The request this run works on, when it was created with one: a
                 workflow-as-model turn's own request, or one handed to a sub-run. The run can resolve this request and no other.
-                With no `input`, the run's first step rebuilds the request and starts the script with it.
+                Such a run's `input` is null: the script's input (the request plus this ref) is the `run_started` event in its
+                journal, which is pruned a day after the run ends. A sub-run handed a ref rebuilds the request on its first
+                step.
             depth (int | Unset):  Default: 0.
             request_id (None | str | Unset):
             caller (None | Unset | WfRunCallerType0):

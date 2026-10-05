@@ -116,6 +116,7 @@ async def sweep_reclaimable_ephemera(pool: asyncpg.Pool[Any]) -> PruneResult:
         prune=lambda c: queries.reconcile_terminal_archival_batch(
             c,
             grace_days=settings.wf_runs_archive_grace_days,
+            request_copy_grace_days=settings.wf_runs_request_copy_archive_grace_days,
             row_limit=settings.reclaimable_prune_batch_rows,
         ),
     )
@@ -128,6 +129,7 @@ async def sweep_reclaimable_ephemera(pool: asyncpg.Pool[Any]) -> PruneResult:
         prune=lambda c: queries.prune_archived_runs(
             c,
             retention_days=run_days,
+            request_copy_retention_days=settings.wf_runs_request_copy_retention_days,
             row_limit=settings.reclaimable_prune_batch_rows,
         ),
     )

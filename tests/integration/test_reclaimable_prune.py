@@ -724,3 +724,90 @@ async def test_sweep_one_family_raise_does_not_disable_the_others(
         assert await _count(conn, "wf_run_events", "run_id", run_id) == 0
         assert await _count(conn, "workflows", "id", free_wf.id) == 0
         assert await _count(conn, "skills", "id", "sk_free2") == 0
+
+
+# ─── #2474 B4: runs whose journal holds a request copy ─────────────────────────
+
+_REQUEST_COPY_MARKS = {
+    "ref": "request_ref_session_id = 'sess_x', request_ref_id = 'evt_x'",
+    "model_dispatch": (
+        'caller = \'{"kind": "session", "id": "sess_x", "purpose": "model_dispatch"}\'::jsonb'
+    ),
+    "get_request": 'tools = \'[{"type": "get_request"}]\'::jsonb',
+    "plain": None,
+}
+
+
+async def _mark(conn: asyncpg.Connection[Any], run_id: str, kind: str) -> None:
+    mark = _REQUEST_COPY_MARKS[kind]
+    await conn.execute(
+        'UPDATE wf_runs SET input = \'{"messages": ["full request"]}\'::jsonb WHERE id = $1',
+        run_id,
+    )
+    if mark is not None:
+        await conn.execute(f"UPDATE wf_runs SET {mark} WHERE id = $1", run_id)
+
+
+async def test_a_request_copy_run_is_pruned_after_its_short_retention(
+    conn: asyncpg.Connection[Any],
+) -> None:
+    """A run with a request ref, a workflow-as-model run, and a run that declares
+    ``get_request`` are pruned after ``request_copy_retention_days``; a plain run of the
+    same age keeps the default window. Pruning a workflow-as-model run also clears the
+    full request a pre-#2474 one carries in ``input``."""
+    runs = {}
+    for age, kind in enumerate(_REQUEST_COPY_MARKS, start=2):
+        runs[kind] = await _make_archived_run(conn, archived_age_days=age)
+        await _mark(conn, runs[kind], kind)
+
+    assert await prune_archived_runs(conn, retention_days=30, request_copy_retention_days=1) == 6
+
+    for kind, run_id in runs.items():
+        row = await conn.fetchrow(
+            "SELECT journal_pruned_at, input FROM wf_runs WHERE id = $1", run_id
+        )
+        pruned = kind != "plain"
+        assert (row["journal_pruned_at"] is not None) == pruned, kind
+        assert (await _count(conn, "wf_run_events", "run_id", run_id) == 0) == pruned, kind
+        assert (row["input"] is None) == (kind == "model_dispatch"), kind
+
+
+async def test_a_request_copy_run_is_archived_without_the_default_grace(
+    conn: asyncpg.Connection[Any],
+) -> None:
+    runs = {}
+    for kind in _REQUEST_COPY_MARKS:
+        wf = await wf_queries.insert_workflow(
+            conn, account_id="acc_root", name=f"grace_{kind}", script="x"
+        )
+        run = await wf_queries.insert_wf_run(
+            conn,
+            account_id="acc_root",
+            workflow_id=wf.id,
+            environment_id="env_root",
+            script="x",
+            host_semantics_epoch=HOST_SEMANTICS_EPOCH,
+            script_sha="sha",
+            depth=10,
+        )
+        await wf_queries.set_run_terminal(
+            conn,
+            run.id,
+            status="completed",
+            output=None,
+            account_id="acc_root",
+            terminal_summary={"is_error": False},
+        )
+        await _mark(conn, run.id, kind)
+        await conn.execute(
+            "UPDATE wf_runs SET updated_at = now() - interval '1 hour' WHERE id = $1", run.id
+        )
+        runs[kind] = run.id
+
+    assert (
+        await reconcile_terminal_archival_batch(conn, grace_days=7, request_copy_grace_days=0) == 3
+    )
+
+    for kind, run_id in runs.items():
+        archived_at = await conn.fetchval("SELECT archived_at FROM wf_runs WHERE id = $1", run_id)
+        assert (archived_at is not None) == (kind != "plain"), kind
