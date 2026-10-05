@@ -13,9 +13,11 @@ from typing import Any
 import pytest
 
 from aios.harness.channels import (
+    CHANNEL_NAME_MAX_CHARS,
     apply_monologue_prefix,
     augment_with_focal_paradigm,
     build_focal_paradigm_block,
+    channel_display_name,
     max_channels_reminder_local,
     render_channels_reminder,
 )
@@ -30,13 +32,17 @@ def _user_event(
     orig: str | None = None,
     focal_at: str | None = None,
     content: str = "hello",
+    metadata: dict[str, Any] | None = None,
 ) -> Event:
+    data: dict[str, Any] = {"role": "user", "content": content}
+    if metadata is not None:
+        data["metadata"] = metadata
     return Event(
         id=f"evt_{seq:04d}",
         session_id="sess_x",
         seq=seq,
         kind="message",
-        data={"role": "user", "content": content},
+        data=data,
         cumulative_tokens=None,
         created_at=datetime(2026, 4, 17, tzinfo=UTC),
         orig_channel=orig,
@@ -196,6 +202,139 @@ class TestRenderChannelsReminder:
         assert f"○ channel_id={self._FAMILY} — 0 unread" in content
 
 
+class TestChannelDisplayName:
+    """#118 type-directed naming ladder: group -> chat_name, dm ->
+    sender_name, neither -> None."""
+
+    def test_group_uses_chat_name(self) -> None:
+        md = {"chat_type": "group", "chat_name": "AI Bros", "sender_name": "Tom"}
+        assert channel_display_name(md, "signal/bot/grp") == "AI Bros"
+
+    def test_dm_uses_sender_name(self) -> None:
+        md = {"chat_type": "dm", "chat_name": "ignored", "sender_name": "Tom"}
+        assert channel_display_name(md, "signal/bot/x") == "Tom"
+
+    def test_telegram_supergroup_counts_as_group(self) -> None:
+        md = {"chat_type": "supergroup", "chat_name": "AI Bros", "sender_name": "Tom"}
+        assert channel_display_name(md, "telegram/1/-100") == "AI Bros"
+
+    def test_missing_chat_type_falls_back_to_address_shape(self) -> None:
+        md = {"chat_name": "AI Bros", "sender_name": "Tom"}
+        assert channel_display_name(md, "telegram/1/-1003881335823") == "AI Bros"
+        assert channel_display_name(md, "telegram/1/1595907265") == "Tom"
+
+    def test_group_without_chat_name_has_no_name(self) -> None:
+        md = {"chat_type": "group", "sender_name": "Tom"}
+        assert channel_display_name(md, "signal/bot/grp") is None
+
+    def test_no_metadata_has_no_name(self) -> None:
+        assert channel_display_name(None, "signal/bot/grp") is None
+        assert channel_display_name({}, "signal/bot/grp") is None
+
+    def test_blank_and_non_string_names_ignored(self) -> None:
+        assert channel_display_name({"chat_type": "group", "chat_name": "  "}, "a/b/c") is None
+        assert channel_display_name({"chat_type": "dm", "sender_name": 7}, "a/b/c") is None
+
+    def test_name_normalized_and_truncated(self) -> None:
+        md = {"chat_type": "group", "chat_name": "line one\nline two " + "y" * 100}
+        name = channel_display_name(md, "a/b/c")
+        assert name is not None
+        assert "\n" not in name
+        assert name == ("line one line two " + "y" * 100)[:CHANNEL_NAME_MAX_CHARS] + "…"
+
+
+class TestRenderChannelsReminderNames:
+    """#118: each listing line carries the latest-observed human-readable
+    name after the (still load-bearing) channel_id."""
+
+    _ALICE = "signal/bot/alice"
+    _GROUP = "signal/bot/grp"
+    _DM = "telegram/bot/1595907265"
+
+    def test_group_name_on_unread_line(self) -> None:
+        md = {"chat_type": "group", "chat_name": "AI Bros", "sender_name": "Tom"}
+        events = [_user_event(1, orig=self._GROUP, focal_at=self._ALICE, content="yo", metadata=md)]
+        content = render_channels_reminder(
+            [self._ALICE, self._GROUP], events, focal_channel=self._ALICE
+        )
+        assert content is not None
+        assert f'○ channel_id={self._GROUP} "AI Bros" — 1 unread: "yo"' in content
+
+    def test_dm_name_on_zero_unread_line(self) -> None:
+        md = {"chat_type": "dm", "sender_name": "Tom"}
+        events = [_user_event(1, orig=self._DM, focal_at=self._DM, content="hi", metadata=md)]
+        content = render_channels_reminder(
+            [self._ALICE, self._DM], events, focal_channel=self._ALICE
+        )
+        assert content is not None
+        assert f'○ channel_id={self._DM} "Tom" — 0 unread' in content
+
+    def test_focal_line_carries_name(self) -> None:
+        md = {"chat_type": "group", "chat_name": "AI Bros"}
+        events = [_user_event(1, orig=self._GROUP, focal_at=self._GROUP, metadata=md)]
+        content = render_channels_reminder([self._GROUP], events, focal_channel=self._GROUP)
+        assert content is not None
+        assert f'▸ channel_id={self._GROUP} "AI Bros" (focal)' in content
+
+    def test_latest_observed_name_wins(self) -> None:
+        events = [
+            _user_event(
+                1,
+                orig=self._GROUP,
+                focal_at=self._ALICE,
+                metadata={"chat_type": "group", "chat_name": "Old Name"},
+            ),
+            _user_event(
+                2,
+                orig=self._GROUP,
+                focal_at=self._ALICE,
+                metadata={"chat_type": "group", "chat_name": "New Name"},
+            ),
+            # A later event with no name doesn't erase the known one.
+            _user_event(3, orig=self._GROUP, focal_at=self._ALICE, metadata={"chat_type": "group"}),
+        ]
+        content = render_channels_reminder(
+            [self._ALICE, self._GROUP], events, focal_channel=self._ALICE
+        )
+        assert content is not None
+        assert '"New Name"' in content
+        assert "Old Name" not in content
+
+    def test_no_name_line_byte_identical_to_bare(self) -> None:
+        events = [
+            _user_event(1, orig=self._GROUP, focal_at=self._ALICE, content="yo"),
+            _user_event(
+                2,
+                orig=self._GROUP,
+                focal_at=self._ALICE,
+                content="yo",
+                metadata={"chat_type": "group", "sender_name": "Tom"},
+            ),
+        ]
+        content = render_channels_reminder(
+            [self._ALICE, self._GROUP], events, focal_channel=self._ALICE
+        )
+        assert content == (
+            "━━━ Channels ━━━\n"
+            f"▸ channel_id={self._ALICE} (focal)\n"
+            f'○ channel_id={self._GROUP} — 2 unread: "yo"'
+        )
+
+    def test_shared_name_still_disambiguated_by_id(self) -> None:
+        other = "signal/bot2/grp"
+        md = {"chat_type": "group", "chat_name": "AI Bros"}
+        events = [
+            _user_event(1, orig=self._GROUP, focal_at=self._ALICE, metadata=md),
+            _user_event(2, orig=other, focal_at=self._ALICE, metadata=md),
+        ]
+        content = render_channels_reminder(
+            [self._ALICE, self._GROUP, other], events, focal_channel=self._ALICE
+        )
+        assert content is not None
+        assert f'channel_id={self._GROUP} "AI Bros"' in content
+        assert f'channel_id={other} "AI Bros"' in content
+
+
 class TestMaxChannelsReminderLocal:
     """The reserve must cover the fattest listing a step can WRITE — the
     preview is truncated by code point, so a dense non-ASCII preview costs
@@ -221,8 +360,11 @@ class TestMaxChannelsReminderLocal:
     )
     def test_bound_covers_the_real_render(self, preview: str) -> None:
         channels = [self._ALICE, *self._OTHERS]
+        # #118: every channel also carries a maximal (over-long, densest)
+        # name so the reserve must cover the name clause too.
+        md = {"chat_type": "group", "chat_name": "\U0010fffd" * 200}
         events = [
-            _user_event(i + 1, orig=addr, focal_at=self._ALICE, content=preview)
+            _user_event(i + 1, orig=addr, focal_at=self._ALICE, content=preview, metadata=md)
             for i, addr in enumerate(self._OTHERS)
         ]
         content = render_channels_reminder(channels, events, focal_channel=self._ALICE)

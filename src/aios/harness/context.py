@@ -47,6 +47,7 @@ from pathlib import Path
 from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
+from aios.harness.channels import channel_display_name
 from aios.harness.image_resize import (
     ImageDownsampleError,
     _blocking_downsample,
@@ -635,8 +636,12 @@ def _format_notification_marker(
 
     Shape::
 
-        🔔 channel_id=<orig_channel> · from=<sender_name> · <preview>
+        🔔 channel_id=<orig_channel> "<name>" · from=<sender_name> · <preview>
         (to respond, call switch_channel(channel_id=<orig_channel>) first)
+
+    The quoted ``"<name>"`` is the advisory human-readable channel name
+    (#118, :func:`~aios.harness.channels.channel_display_name`): the group
+    title for a group, the counterparty for a DM; omitted when unknown.
 
     The ``from`` clause is omitted when ``sender_name`` is absent from
     metadata.  The preview clause is omitted when content is empty and
@@ -644,7 +649,9 @@ def _format_notification_marker(
     emitted — it tells the reader how to turn this notification into
     full-content context.
     """
-    parts = [f"{_NOTIFICATION_MARKER_PREFIX} channel_id={orig_channel}"]
+    name = channel_display_name(metadata, orig_channel)
+    name_clause = f' "{name}"' if name else ""
+    parts = [f"{_NOTIFICATION_MARKER_PREFIX} channel_id={orig_channel}{name_clause}"]
     if isinstance(metadata, dict):
         sender_name = metadata.get("sender_name")
         if isinstance(sender_name, str) and sender_name:

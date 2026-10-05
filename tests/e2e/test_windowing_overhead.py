@@ -169,14 +169,17 @@ class TestWindowingOverhead:
 
         # Per-channel inbound so the tail shows non-zero unread + a preview
         # string per channel — the full-fat shape that appears on a live
-        # session.
-        for addr in addresses:
+        # session.  #118: every channel also carries a maximal (32-char
+        # after truncation) group name, so the listing's name clause is at
+        # its widest and the reserve must still cover it.
+        for i, addr in enumerate(addresses):
+            chat_name = f"group {i:02d} " + "N" * 60
             for j in range(3):
                 await sessions_service.append_user_message(
                     harness._pool,
                     session.id,
                     f"inbound on {addr} — body number {j} " + "word " * 8,
-                    metadata={"channel": addr},
+                    metadata={"channel": addr, "chat_type": "group", "chat_name": chat_name},
                     account_id=account_id,
                 )
 
@@ -199,6 +202,11 @@ class TestWindowingOverhead:
             None,
         )
         assert tail_text is not None, "channels listing not present — preconditions broken"
+        # Windowing may evict the earliest channels' inbound, so check for
+        # any maximal name rather than a specific channel's.
+        assert f' {"N" * 23}…" — ' in tail_text, (
+            "maximal channel names not rendered — #118 preconditions broken"
+        )
         tail_local = approx_tokens([{"role": "user", "content": tail_text}])
         assert tail_local >= 100, (
             f"listing only {tail_local} local tokens — not chunky enough "
