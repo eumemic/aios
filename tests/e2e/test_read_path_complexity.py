@@ -459,6 +459,12 @@ def _drop() -> int:
     return _WINDOW_STATE["window_tokens"]
 
 
+def _after_seq() -> int:
+    """The slate's lower bound for ``_drop()``: the last dropped message's seq.
+    Message ``g`` sits at seq ``g`` with running sum ``g * _DELTA`` here."""
+    return _drop() // _DELTA
+
+
 # The exact SQL each hot read issues (mirrors db/queries/events.py post-#1657).
 _SQL_LATEST_CUMULATIVE = (
     "SELECT cumulative_tokens FROM events "
@@ -480,12 +486,12 @@ _SQL_RETAINED_WINDOW = (
     "SELECT id, session_id, seq, kind, data, created_at, role "
     "FROM events "
     "WHERE session_id = $1 AND account_id = $2 AND kind = 'message' "
-    "AND cumulative_tokens > $3 "
+    "AND seq > $3 AND cumulative_tokens IS NOT NULL "
     "ORDER BY seq ASC"
 )
 
 _SQL_OMISSION_BOUNDARY = (
-    "SELECT cumulative_messages, created_at FROM events "
+    "SELECT seq, cumulative_messages FROM events "
     "WHERE session_id = $1 AND account_id = $2 AND kind = 'message' "
     "AND cumulative_tokens <= $3 "
     "ORDER BY cumulative_tokens DESC LIMIT 1"
@@ -578,7 +584,7 @@ HOT_PATH_READS: list[HotRead] = [
         name="read_windowed_context_events",
         declared_complexity="O(W)",
         sql=_SQL_RETAINED_WINDOW,
-        args=lambda: (_SESSION_ID, _ACCOUNT_ID, _drop()),
+        args=lambda: (_SESSION_ID, _ACCOUNT_ID, _after_seq()),
         max_rows=_OW_ROW_CEIL,
     ),
     HotRead(
@@ -872,7 +878,7 @@ class TestRowsReturnedGate:
 # lifecycle UNION arm of ``read_windowed_context_events`` (#1741): before
 # migration 0135 that arm had no supporting partial index and fell back to a
 # whole-session heap filter on ``kind = 'lifecycle'``. This EXPLAINs the real
-# ``drop=None`` lifecycle arm (verbatim from ``events.py``) against a slate
+# ``after_seq=None`` lifecycle arm (verbatim from ``events.py``) against a slate
 # seeded with lifecycle rows and asserts the ``events`` scan carries no
 # residual ``kind`` filter — i.e. ``events_session_lifecycle_seq_idx``
 # absorbed the predicate.
@@ -905,7 +911,7 @@ _LIFECYCLE_ARM_SERVING_INDEXES = frozenset(
 
 @needs_docker
 class TestLifecycleArmPlanShapeGate:
-    """The lifecycle arm of ``read_windowed_context_events`` (``drop=None``
+    """The lifecycle arm of ``read_windowed_context_events`` (``after_seq=None``
     variant) must plan as an index scan on a lifecycle-serving partial index
     (0135's ``events_session_lifecycle_seq_idx`` or, once 0145 lands, the
     strictly-narrower ``events_session_model_visible_lifecycle_seq_idx`` the
@@ -984,7 +990,8 @@ class TestLifecycleArmPlanShapeGate:
                 f"EXPLAIN (FORMAT JSON) {_SQL_RETAINED_WINDOW}",
                 _SESSION_ID_LIFECYCLE,
                 _ACCOUNT_ID,
-                _N_LARGE * _DELTA // 2,
+                # Interleaved lifecycle rows put message ``g`` at seq ``2g - 1``.
+                2 * (_N_LARGE // 2) - 1,
             )
         if isinstance(result, str):
             result = json.loads(result)
@@ -1313,8 +1320,8 @@ class TestAdvisoryScalingBackstop:
         # The windowed retained-slate read against a fixed-fraction drop: an
         # O(W) read whose window grows with N here (drop == half), so this is
         # the most demanding advisory case. It must still stay well under 2.5x.
-        small_args = (_SESSION_ID_SMALL, _ACCOUNT_ID, _N_SMALL * _DELTA // 2)
-        large_args = (_SESSION_ID, _ACCOUNT_ID, _N_LARGE * _DELTA // 2)
+        small_args = (_SESSION_ID_SMALL, _ACCOUNT_ID, _N_SMALL // 2)
+        large_args = (_SESSION_ID, _ACCOUNT_ID, _N_LARGE // 2)
         t1 = await _time_read(two_scale_pool, _SQL_RETAINED_WINDOW, small_args, repeats=_M_REPEATS)
         t2 = await _time_read(two_scale_pool, _SQL_RETAINED_WINDOW, large_args, repeats=_M_REPEATS)
         ratio = t2 / t1 if t1 > 0 else float("inf")

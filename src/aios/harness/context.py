@@ -2194,3 +2194,32 @@ def _concat_user_messages(a: dict[str, Any], b: dict[str, Any]) -> dict[str, Any
         lb = cb if isinstance(cb, list) else [{"type": "text", "text": cb or ""}]
         merged = {"role": "user", "content": [*la, *lb]}
     return merged
+
+
+def finalize_messages(
+    messages: list[dict[str, Any]],
+    *,
+    reminder_contents: tuple[str, ...],
+    model: str,
+) -> list[dict[str, Any]]:
+    """The render stage after :func:`build_messages`: the request's final messages.
+
+    Appends the reminder rows this step writes (``aios.harness.reminders``), which
+    land in the log after the slate ``build_messages`` read, so they render at the
+    tail. Merges adjacent user turns (Anthropic requires alternating roles; see
+    :func:`merge_adjacent_user_messages`). For a thinking-capable ``model``, stubs
+    ``reasoning_content`` onto assistant turns that lack it: such providers reject
+    replayed turns without the field. For any other model ``build_messages`` has
+    already stripped the field, and re-adding it would undo that.
+
+    Pure, and shared by the step and by request rebuild (#2471), so a rebuilt
+    request can't diverge from a sent one through duplicated logic. ``messages``
+    is consumed: it is extended in place.
+    """
+    from aios.harness.completion import model_descriptor
+
+    messages.extend(reminder_message(content) for content in reminder_contents)
+    merged = merge_adjacent_user_messages(messages)
+    if model_descriptor(model).supports_thinking:
+        stub_missing_reasoning_content(merged)
+    return merged

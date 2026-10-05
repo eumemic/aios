@@ -78,7 +78,7 @@ class _FakeConn:
         # a present row (7 omitted); passing ``omission_row=None`` explicitly
         # selects the no-boundary case.
         self.omission_row: dict[str, Any] | None = (
-            {"cumulative_messages": 7, "created_at": _BEGAN_AT}
+            {"seq": 5, "cumulative_messages": 7, "created_at": _BEGAN_AT}
             if isinstance(omission_row, _Unset)
             else omission_row
         )
@@ -184,8 +184,8 @@ async def test_insufficient_ratio_1_matches_today() -> None:
         account_id=account_id,
     )
     assert conn.fetch_calls, "expected bounded range scan to be called"
-    # Second positional arg to conn.fetch is the drop value.
-    _session_id, drop_local, *_ = conn.fetch_calls[-1]
+    # The boundary seek's second positional arg is the drop value.
+    _session_id, drop_local, *_ = conn.omission_calls[-1]
     assert drop_local == 1_000
 
 
@@ -222,7 +222,7 @@ async def test_ratio_above_1_drops_more(monkeypatch: pytest.MonkeyPatch) -> None
         overhead_local=0,
         account_id=account_id,
     )
-    _session_id, drop_local, *_ = conn.fetch_calls[-1]
+    _session_id, drop_local, *_ = conn.omission_calls[-1]
     import math
 
     assert drop_local == math.ceil(1_000 / (1.5 * 1.3))
@@ -262,12 +262,12 @@ async def test_ratio_below_1_never_inflates_window(monkeypatch: pytest.MonkeyPat
 
 @pytest.mark.asyncio
 async def test_windowed_read_reports_omission() -> None:
-    """A real drop returns the omitted-span facts, queried against the
-    SAME boundary value as the retained range scan (exact complements).
+    """A real drop returns the omitted-span facts, read from the boundary row
+    whose ``seq`` is the retained range scan's lower bound (exact complements).
 
     Post-#1657 the omitted count is the boundary row's ``cumulative_messages``
-    running counter (O(1) index seek), not a ``count(*)`` scan — but the
-    boundary value it is read at must still equal the retained scan's drop.
+    running counter (O(1) index seek), not a ``count(*)`` scan — and the
+    retained scan must start right after that same row.
     """
     account_id = "acc_test_stub"
     conn = _FakeConn(total_local=3_000, ratio_n=4, ratio_mean=0.0)
@@ -281,12 +281,12 @@ async def test_windowed_read_reports_omission() -> None:
         account_id=account_id,
     )
     assert result.omission == WindowOmission(began_at=_BEGAN_AT, omitted_messages=7)
-    # Complement check: both the retained scan and the omission boundary seek
-    # saw the same drop boundary.
+    # Complement check: the retained scan starts right after the boundary row
+    # the omission was read from (the fake boundary row sits at seq 5).
     assert conn.omission_calls, "expected the omission boundary row to be queried"
-    _sid, retained_drop, *_ = conn.fetch_calls[-1]
-    _sid2, omitted_drop, *_ = conn.omission_calls[-1]
-    assert retained_drop == omitted_drop
+    _sid, _account_id, retained_after_seq, *_ = conn.fetch_calls[-1]
+    assert retained_after_seq == 5
+    assert result.after_seq == 5
 
 
 @pytest.mark.asyncio
@@ -334,6 +334,7 @@ async def test_omission_prebackfill_falls_back_to_count(
         ratio_n=4,
         ratio_mean=0.0,
         omission_row={
+            "seq": 5,
             "cumulative_messages": None,
             "created_at": _BEGAN_AT,
             "omitted_messages": 5,
@@ -380,20 +381,16 @@ async def test_ceil_div_never_overshoots_window(
     # ``_retained_class_mass`` per-class mass row and the omission boundary
     # row. Both return None here — no per-class composition signal (blend
     # folds to the neutral mean) and no omission (oversized first event).
-    conn.fetchrow = AsyncMock(return_value=None)
-
     captured: dict[str, int] = {}
 
-    async def _fetch(sql: str, *args: Any) -> list[Any]:
-        # Per-class calibration scan routes through fetch too — only the
-        # bounded retained scan carries the drop boundary as its second
-        # positional arg.
-        if "model_request_end" in sql:
-            return []
-        captured["drop_local"] = args[1]
-        return []
+    async def _fetchrow(sql: str, *args: Any) -> None:
+        if "ORDER BY cumulative_tokens DESC" in sql:
+            # The boundary seek: its second positional arg is the drop value.
+            captured["drop_local"] = args[1]
+        return None
 
-    conn.fetch = _fetch
+    conn.fetchrow = _fetchrow
+    conn.fetch = AsyncMock(return_value=[])
     await queries.read_windowed_events(
         conn,
         "sess_x",
@@ -464,18 +461,18 @@ async def test_overhead_clamp_never_drops_entire_window(
     # row (no composition signal here -> None, blend folds to the neutral
     # mean) and the omission boundary row present here (matches every row);
     # its ``cumulative_messages`` seek returns a count.
+    captured: dict[str, int] = {}
+
     async def _fetchrow(sql: str, *args: Any) -> dict[str, Any] | None:
         if "cumulative_text_mass" in sql or "tool_call_id" in sql:
             return None
-        return {"cumulative_messages": 7, "created_at": _BEGAN_AT}
+        # The boundary seek: its second positional arg is the drop value.
+        captured["drop_local"] = args[1]
+        return {"seq": 5, "cumulative_messages": 7, "created_at": _BEGAN_AT}
 
     conn.fetchrow = _fetchrow
-    captured: dict[str, int] = {}
 
     async def _fetch(sql: str, *args: Any) -> list[Any]:
-        if "model_request_end" in sql:
-            return []
-        captured["drop_local"] = args[1]
         return []
 
     conn.fetch = _fetch
@@ -557,7 +554,7 @@ async def test_incident_geometry_retains_history_floor(
     assert floor.events_window_max == 52_500
     assert floor.effective == 39_375
 
-    _session_id, drop_local, *_ = conn.fetch_calls[-1]
+    _session_id, drop_local, *_ = conn.omission_calls[-1]
     retained_effective = (total_local - drop_local) * eff
     # The heart of the bug: retained history used to collapse below the floor
     # (to a single event). It must now land inside the band.
@@ -701,5 +698,5 @@ async def test_omission_always_pairs_with_non_empty_events(
         account_id=account_id,
     )
     assert result.omission is not None
-    _session_id, drop_local, *_ = conn.fetch_calls[-1]
+    _session_id, drop_local, *_ = conn.omission_calls[-1]
     assert drop_local < total_local
