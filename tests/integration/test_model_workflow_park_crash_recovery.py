@@ -571,6 +571,22 @@ async def test_crash_after_record_before_launch_launches_the_recorded_run(
     await run_session_step(session_id)
 
     assert await _inner_run_ids(pool, session_id) == [park["run_id"]]
+    # The relaunch appended a fresh park record for the request it actually sent, and
+    # the run it created refers to that record, not the crashed attempt's (#2474).
+    async with pool.acquire() as conn:
+        park_ids = [
+            r["id"]
+            for r in await conn.fetch(
+                "SELECT id FROM events WHERE session_id = $1 AND kind = 'span' "
+                "AND data->>'event' = 'model_workflow_park' ORDER BY seq",
+                session_id,
+            )
+        ]
+        relaunched = await wf_queries.get_run_for_step(conn, park["run_id"])
+    assert len(park_ids) == 2
+    assert relaunched is not None and relaunched.request_ref == RequestRef(
+        session_id=session_id, request_id=park_ids[-1]
+    )
     run_output = await _resolve_inner_run(pool, park["run_id"])
     await write_harvest_event(
         pool,
