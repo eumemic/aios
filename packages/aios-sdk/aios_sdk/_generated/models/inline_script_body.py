@@ -43,12 +43,13 @@ class InlineScriptBody:
                 - Injected capability API, available without imports:
                   - `agent(input, *, agent_id=None, output_schema=None, model=None, label=None)`: invoke a generic or named
                 agent and await its result.
-                  - `invoke_workflow(workflow_id, input, *, version=None, output_schema=None, label=None, as_agent=None)`:
-                invoke another workflow as a sub-run and await its result (the run dual of `agent`). `version` pins a registered
-                version; omitted, the version current at launch runs. The sub-run runs under this run's surface intersected with
-                the target's, and binds this run's vaults; a failed or gone sub-run raises like a failed `agent`.
-                `as_agent={"agent_id": ..., "version": N}` also intersects the sub-run's surface with that agent version's; only
-                a run an operator launched may pass it.
+                  - `invoke_workflow(workflow_id, input, *, version=None, output_schema=None, label=None, as_agent=None,
+                request_ref=None)`: invoke another workflow as a sub-run and await its result (the run dual of `agent`).
+                `version` pins a registered version; omitted, the version current at launch runs. The sub-run runs under this
+                run's surface intersected with the target's, and binds this run's vaults; a failed or gone sub-run raises like a
+                failed `agent`. `as_agent={"agent_id": ..., "version": N}` also intersects the sub-run's surface with that agent
+                version's; only a run an operator launched may pass it. `request_ref` (with `input=None`) hands the sub-run the
+                request this run was created with: it starts with that request as a workflow-as-model run would.
                   - `tool(name, input)`: invoke a declared tool; tool errors are returned, not raised.
                   - `call_llm(request)`: run one raw inference turn and await the assistant turn. `request` carries `model`
                 (omit to use the run's default child model; a `workflow:` target is rejected), `messages` (required), optional
@@ -56,7 +57,10 @@ class InlineScriptBody:
                 (provider knobs). The result is `{"content", "tool_calls", "finish_reason", "usage", "cost", "message"}`, or
                 `{"error": ...}` — a model error is returned, not raised. Its cost is metered against this run's `budget_usd`
                 ceiling, so a budget-exhausted run refuses further `call_llm`. Use it to route/judge/fact-check around
-                inference; use `agent(...)` when you want the tool calls executed.
+                inference; use `agent(...)` when you want the tool calls executed. `call_llm(request_ref=input["request_ref"],
+                model=None)` sends the request this run was created with instead, rendered for `model`; with the model it was
+                captured for it keeps that request's provider params, with another it sends none. Any other ref resolves as an
+                error value.
                   - `gate()`: suspend until an external resume delivers a value.
                   - `budget()`: read this run's shared child-spend budget, or None when unset.
                   - `sub_runs()`: read facts about every session and run this run created, directly or through descendants:

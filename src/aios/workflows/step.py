@@ -365,6 +365,14 @@ async def _enrich_agent_result(
     }
 
 
+def _request_ref_granted(run: WfRun, ref: Any) -> bool:
+    """Whether ``run`` may resolve ``ref`` (#2474): only the ref it was created with.
+    A ref-shaped value anywhere else (plain input, a tool or gate result) grants
+    nothing. Refs a run mints itself (#2475) will be granted by the call key of the
+    minting capability's ``call_result``, never by the value's shape."""
+    return run.request_ref is not None and ref == run.request_ref.model_dump()
+
+
 async def _materialize_request(
     pool: asyncpg.Pool[Any], run: WfRun, ref: RequestRef
 ) -> dict[str, Any] | str:
@@ -1109,8 +1117,24 @@ async def _run_workflow_step_body(
                 # resolve" contract). The call_started/result pair fully resolves it —
                 # no worker task launches, so no inference (and no spend) occurs.
                 llm_spec = cap.spec if isinstance(cap.spec, dict) else {}
+                refusal: dict[str, Any] | None = None
                 if over_budget:
                     assert run.budget_usd is not None
+                    refusal = {
+                        "error": (
+                            f"run budget exhausted: spent "
+                            f"${budget_spent_microusd / 1_000_000:.2f} of "
+                            f"${run.budget_usd:.2f} — call_llm is refused"
+                        )
+                    }
+                elif llm_spec.get("kind") == "ref" and not _request_ref_granted(
+                    run, llm_spec.get("request_ref")
+                ):
+                    refusal = {
+                        "error": ("call_llm can send only the request this run was created with"),
+                        "error_kind": "request_ref_not_granted",
+                    }
+                if refusal is not None:
                     await wf_queries.append_run_event(
                         conn,
                         account_id=account_id,
@@ -1125,16 +1149,7 @@ async def _run_workflow_step_body(
                         run_id=run_id,
                         type="call_result",
                         call_key=cap.call_key,
-                        payload={
-                            "result": {
-                                "error": (
-                                    f"run budget exhausted: spent "
-                                    f"${budget_spent_microusd / 1_000_000:.2f} of "
-                                    f"${run.budget_usd:.2f} — call_llm is refused"
-                                )
-                            },
-                            "is_error": False,
-                        },
+                        payload={"result": refusal, "is_error": False},
                     )
                     disposition = _escalate(disposition, "owed_drive")
                     continue
@@ -1547,6 +1562,17 @@ async def _open_invoke_workflow_capability(
             "invoke_workflow() requires as_agent to be {'agent_id': str, 'version': int >= 1}, "
             f"got {as_agent_spec!r}",
         )
+    # The script host checked the ref's shape; this run may hand on only a ref it can
+    # resolve itself (#2474). The sub-run's row then holds it as its own grant.
+    request_ref_spec = spec.get("request_ref")
+    request_ref: RequestRef | None = None
+    if request_ref_spec is not None:
+        if not _request_ref_granted(run, request_ref_spec):
+            return await _reject(
+                "invoke_workflow_refused",
+                "invoke_workflow() can hand on only the request this run was created with",
+            )
+        request_ref = RequestRef.model_validate(request_ref_spec)
     # output_schema rides the wire as a canonical JSON *string* (mirror agent());
     # reconstruct the dict and apply the SAME author-facing validity gates.
     output_schema_raw = spec.get("output_schema")
@@ -1584,6 +1610,7 @@ async def _open_invoke_workflow_capability(
             # The sub-run acts within this run's frozen surface and inherits its vaults
             # (#2472); ``as_agent`` re-roots the surface at an agent version.
             authority=RunAuthority(run.id, as_agent),
+            request_ref=request_ref,
             request_id=cap.call_key,  # the invoke_workflow() call IS the request
             caller={"kind": "run", "id": run.id, "awaited": True},
             request_output_schema=output_schema,
