@@ -346,7 +346,7 @@ class WorkflowAction(BaseModel):
     # ``create_run`` as ``budget_usd``. Counted against the run's full creation
     # subtree and enforced on a parked run by the sweep. ``None`` = no budget
     # (prior behaviour).
-    budget_usd: float | None = Field(default=None, gt=0)
+    budget_usd: float | None = Field(default=None, gt=0, allow_inf_nan=False)
 
     @model_validator(mode="after")
     def _reject_version_and_assertion(self) -> WorkflowAction:
@@ -375,7 +375,7 @@ class WorkflowActionReplace(WorkflowAction):
     input_template: Any
     vault_ids: list[str]
     max_outstanding_runs: int | None = Field(ge=1)
-    budget_usd: float | None = Field(gt=0)
+    budget_usd: float | None = Field(gt=0, allow_inf_nan=False)
 
 
 TriggerAction = Annotated[
@@ -524,7 +524,10 @@ class AccountTriggerEcho(BaseModel):
     Unlike :class:`TriggerEcho` (session-scoped, echoed on ``Session.triggers``)
     this carries the ``owner_session_id`` — the account-wide sweep needs to name
     *which* session owns each trigger, and correlate a zombie
-    (``enabled=true, next_fire=NULL``) back to its cron.
+    (``enabled=true, next_fire=NULL``) back to its cron. Operator triggers
+    (#2473) are part of the account population too (#2525): they carry
+    ``owner_kind="operator"`` and ``owner_session_id=None``, so a reader can tell
+    "no triggers" from "only operator triggers" and must not assume a session.
 
     ``source_kind`` is the discriminator text only (``cron`` / ``one_shot`` /
     ``run_completion`` / ``external_event``) — the auditor branches on it to
@@ -536,7 +539,10 @@ class AccountTriggerEcho(BaseModel):
 
     id: str
     name: str
-    owner_session_id: str
+    # ``operator`` rows (#2473) have no owning session: ``owner_session_id`` is
+    # ``None`` for them and only for them (the ``triggers_owner_kind_shape`` CHECK).
+    owner_kind: Literal["session", "operator"]
+    owner_session_id: str | None
     source_kind: str
     enabled: bool
     next_fire: datetime | None
@@ -562,11 +568,13 @@ class OperatorWorkflowAction(WorkflowAction):
     """The workflow action of an operator trigger: ``budget_usd`` is required,
     so every operator run it launches is bounded."""
 
-    budget_usd: float = Field(gt=0)
+    # ``allow_inf_nan=False``: ``1e400`` parses to ``inf``, which ``gt=0`` admits
+    # and the JSONB insert then rejects with a 500 (#2525). Refuse it as a 422.
+    budget_usd: float = Field(gt=0, allow_inf_nan=False)
 
 
 class OperatorWorkflowActionReplace(WorkflowActionReplace):
-    budget_usd: float = Field(gt=0)
+    budget_usd: float = Field(gt=0, allow_inf_nan=False)
 
 
 def _operator_trigger_name(name: str) -> str:

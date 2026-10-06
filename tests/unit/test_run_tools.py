@@ -609,6 +609,41 @@ async def test_list_account_triggers_enabled_only_arg_flows_through() -> None:
     assert svc.await_args.kwargs["enabled_only"] is False
 
 
+async def test_list_account_triggers_renders_an_operator_row_with_a_null_owner() -> None:
+    """An operator trigger (#2473) has no owning session. The run surface serializes the
+    real :class:`AccountTriggerEcho`, so the script gets ``owner_kind="operator"`` and an
+    explicit ``owner_session_id: None`` instead of a crash or a missing key (#2525)."""
+    from aios.models.triggers import AccountTriggerEcho
+
+    run = _run(tools=[ToolSpec(type="list_account_triggers")])
+    echo = AccountTriggerEcho(
+        id="trg_op",
+        name="weekly",
+        owner_kind="operator",
+        owner_session_id=None,
+        source_kind="cron",
+        enabled=True,
+        next_fire=None,
+        last_fire_status=None,
+        consecutive_failures=0,
+    )
+    svc = AsyncMock(return_value=[echo])
+    with (
+        patch("aios.harness.runtime.require_pool", return_value="POOL"),
+        patch("aios.workflows.run_tools.triggers_service.list_account_triggers", new=svc),
+    ):
+        out = await invoke_run_tool(
+            run=run,
+            call_key="sha:k#0",
+            account_id="acc_t",
+            tool_name="list_account_triggers",
+            tool_input={"enabled_only": False},
+        )
+    [row] = out["triggers"]
+    assert row["owner_kind"] == "operator"
+    assert "owner_session_id" in row and row["owner_session_id"] is None
+
+
 async def test_account_trigger_read_error_is_recoverable_not_a_raise() -> None:
     """A service-layer AiosError surfaces as a recoverable {"error": ...} value the script
     branches on — never a run-terminal raise (the agent()/http_request errors-resolve

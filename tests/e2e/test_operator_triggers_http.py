@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import secrets
 from collections.abc import AsyncIterator
 from typing import Any
@@ -78,3 +79,68 @@ async def test_create_read_update_list_runs_and_delete(
     assert deleted.status_code == 204, deleted.text
     gone = await http_client.get(f"/v1/triggers/{name}")
     assert gone.status_code == 404
+
+
+@pytest.mark.parametrize("literal", ["1e400", "Infinity", "NaN"])
+async def test_a_non_finite_budget_is_a_422_and_writes_nothing(
+    pool: Any, http_client: httpx.AsyncClient, literal: str
+) -> None:
+    """``1e400`` parses to ``inf`` (and Python's JSON reader accepts ``Infinity`` /
+    ``NaN``). ``gt=0`` admits ``inf``, and the JSONB insert then failed with a 500
+    (#2525). Both the create and the replace body refuse it with a 422, and no row
+    is written or changed."""
+    env = await environments_service.create_environment(
+        pool, name=f"op-inf-{secrets.token_hex(4)}", account_id="acc_test_stub"
+    )
+    wf = await http_client.post(
+        "/v1/workflows",
+        json={
+            "name": f"op-inf-{secrets.token_hex(4)}",
+            "script": "async def main(input):\n    return input\n",
+        },
+    )
+    assert wf.status_code == 201, wf.text
+    wf_id = wf.json()["id"]
+    name = f"inf-{secrets.token_hex(3)}"
+    create_body = {
+        "name": name,
+        "source": {"kind": "cron", "schedule": "0 9 * * 1"},
+        "action": {"kind": "workflow", "workflow_id": wf_id, "budget_usd": "BUDGET"},
+        "environment_id": env.id,
+    }
+    raw_create = json.dumps(create_body).replace('"BUDGET"', literal)
+    headers = {"content-type": "application/json"}
+
+    created = await http_client.post("/v1/triggers", content=raw_create, headers=headers)
+    assert created.status_code == 422, created.text
+    assert (await http_client.get(f"/v1/triggers/{name}")).status_code == 404
+    async with pool.acquire() as conn:
+        assert await conn.fetchval("SELECT count(*) FROM triggers WHERE name = $1", name) == 0
+
+    ok = await http_client.post(
+        "/v1/triggers",
+        json={
+            "name": name,
+            "source": {"kind": "cron", "schedule": "0 9 * * 1"},
+            "action": {"kind": "workflow", "workflow_id": wf_id, "budget_usd": 3},
+            "environment_id": env.id,
+        },
+    )
+    assert ok.status_code == 201, ok.text
+    replace_body = {
+        "action": {
+            "kind": "workflow",
+            "workflow_id": wf_id,
+            "workflow_version": None,
+            "version": None,
+            "input_template": None,
+            "vault_ids": [],
+            "max_outstanding_runs": None,
+            "budget_usd": "BUDGET",
+        }
+    }
+    raw_replace = json.dumps(replace_body).replace('"BUDGET"', literal)
+    replaced = await http_client.put(f"/v1/triggers/{name}", content=raw_replace, headers=headers)
+    assert replaced.status_code == 422, replaced.text
+    after = await http_client.get(f"/v1/triggers/{name}")
+    assert after.json()["action"]["budget_usd"] == 3

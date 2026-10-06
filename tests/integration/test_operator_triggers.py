@@ -210,7 +210,11 @@ async def test_an_agent_cannot_see_change_or_remove_an_operator_trigger(
     with pytest.raises(NotFoundError):
         await trig_service.remove_trigger(pool, session_id, "weekly", account_id=ACC)
     assert await trig_service.list_triggers(pool, session_id, account_id=ACC) == []
-    assert await trig_service.list_account_triggers(pool, account_id=ACC) == []
+    # The account-wide liveness read DOES see it (#2525) — it is not a session read.
+    assert [
+        (e.name, e.owner_kind, e.owner_session_id)
+        for e in await trig_service.list_account_triggers(pool, account_id=ACC)
+    ] == [("weekly", "operator", None)]
     assert await trig_service.list_trigger_runs(pool, session_id, "weekly", account_id=ACC) == []
 
     current = await trig_service.get_operator_trigger(pool, "weekly", account_id=ACC)

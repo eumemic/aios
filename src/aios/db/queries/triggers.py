@@ -283,10 +283,13 @@ async def list_account_triggers(
     ``next_fire`` to catch the #925 zombie class (``enabled=true,
     next_fire=NULL`` cron rows the scheduler filters out and never fires).
 
-    JOINs ``sessions`` and filters ``s.archived_at IS NULL`` for the same reason
-    the scheduler's claim/MIN queries do: a trigger on an archived session can
-    never fire regardless of its own ``enabled`` flag, so it isn't part of the
-    live-liveness population. Defaults to ``enabled_only=True`` (the population
+    LEFT JOINs ``sessions`` and filters on :data:`_OWNER_LIVE` for the same
+    reason the scheduler's claim/MIN queries do: a trigger on an archived session
+    can never fire regardless of its own ``enabled`` flag, so it isn't part of the
+    live-liveness population. Operator triggers (#2473) have no session
+    (``owner_session_id`` NULL) and ARE live, so they are returned with
+    ``owner_kind='operator'`` and ``owner_session_id=None`` (#2525): an INNER
+    JOIN here made them invisible to every account-wide liveness monitor. Defaults to ``enabled_only=True`` (the population
     the auditor's non-null-``next_fire`` invariant is about); pass
     ``enabled_only=False`` for an operator-visible total.
 
@@ -299,13 +302,13 @@ async def list_account_triggers(
     where_enabled = "AND t.enabled" if enabled_only else ""
     rows = await conn.fetch(
         f"""
-        SELECT t.id, t.name, t.owner_session_id, t.source AS source_kind,
-               t.enabled, t.next_fire, t.last_fire_status,
-               t.consecutive_failures
+        SELECT t.id, t.name, t.owner_kind, t.owner_session_id,
+               t.source AS source_kind, t.enabled, t.next_fire,
+               t.last_fire_status, t.consecutive_failures
         FROM triggers AS t
-        JOIN sessions AS s ON s.id = t.owner_session_id
+        LEFT JOIN sessions AS s ON s.id = t.owner_session_id
         WHERE t.account_id = $1
-          AND s.archived_at IS NULL
+          AND {_OWNER_LIVE}
           {where_enabled}
         ORDER BY t.owner_session_id, t.name
         """,
@@ -315,6 +318,7 @@ async def list_account_triggers(
         AccountTriggerEcho(
             id=r["id"],
             name=r["name"],
+            owner_kind=r["owner_kind"],
             owner_session_id=r["owner_session_id"],
             source_kind=r["source_kind"],
             enabled=r["enabled"],

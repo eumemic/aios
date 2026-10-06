@@ -27,6 +27,7 @@ from aios.models.triggers import (
     TriggerRunEcho,
     TriggerUpdate,
     WorkflowAction,
+    WorkflowActionReplace,
     compute_initial_next_fire,
 )
 from aios.models.workflows import WfRun
@@ -509,3 +510,26 @@ class TestTriggerRunEcho:
         )
         assert echo.status == "some_future_status"
         assert echo.event is not None and echo.event["run_id"] == "wfr_1"
+
+
+@pytest.mark.parametrize("bad", [float("inf"), float("nan")], ids=str)
+def test_session_workflow_action_budget_must_be_finite(bad: float) -> None:
+    """The session trigger's optional ``budget_usd`` (#2446 a) has the same
+    ``inf``-to-500 hole as the operator one (#2525); both are refused."""
+    with pytest.raises(ValidationError, match="finite"):
+        WorkflowAction.model_validate(
+            {"kind": "workflow", "workflow_id": "wf_x", "budget_usd": bad}
+        )
+    with pytest.raises(ValidationError, match="finite"):
+        WorkflowActionReplace.model_validate(
+            {
+                "kind": "workflow",
+                "workflow_id": "wf_x",
+                "workflow_version": None,
+                "version": None,
+                "input_template": None,
+                "vault_ids": [],
+                "max_outstanding_runs": None,
+                "budget_usd": bad,
+            }
+        )

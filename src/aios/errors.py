@@ -11,6 +11,7 @@ The ``type`` is a stable machine-readable string clients can branch on. The
 from __future__ import annotations
 
 import json
+import math
 from typing import Any
 
 from fastapi import FastAPI, Request
@@ -312,6 +313,18 @@ async def http_exception_handler(request: Request, exc: Exception) -> JSONRespon
     )
 
 
+def _finite_json(value: Any) -> Any:
+    """``value`` (parsed JSON) with every non-finite float replaced by its string
+    (``"inf"``, ``"-inf"``, ``"nan"``), which strict JSON cannot represent."""
+    if isinstance(value, float) and not math.isfinite(value):
+        return str(value)
+    if isinstance(value, list):
+        return [_finite_json(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _finite_json(v) for k, v in value.items()}
+    return value
+
+
 async def validation_error_handler(request: Request, exc: Exception) -> JSONResponse:
     """Render pydantic/FastAPI request validation errors.
 
@@ -322,13 +335,18 @@ async def validation_error_handler(request: Request, exc: Exception) -> JSONResp
     lose the 422 and the error envelope. We drop ``ctx`` (internal pydantic
     bookkeeping, not load-bearing for clients) and coerce every remaining value
     to JSON-safe via a ``default=str`` round-trip, so the error list is total.
+    A non-finite float ``input`` (``1e400`` parses to ``inf``) survives that
+    round-trip (``json`` writes and reads back ``Infinity``) and then makes the
+    strict ``JSONResponse`` render raise, so it is rendered as its string (#2525).
     """
     assert isinstance(exc, RequestValidationError)
     _log_handler_error("api.validation_error", request, 422, error_type="validation_error")
-    errors = json.loads(
-        json.dumps(
-            [{k: v for k, v in err.items() if k != "ctx"} for err in exc.errors()],
-            default=str,
+    errors = _finite_json(
+        json.loads(
+            json.dumps(
+                [{k: v for k, v in err.items() if k != "ctx"} for err in exc.errors()],
+                default=str,
+            )
         )
     )
     return JSONResponse(
