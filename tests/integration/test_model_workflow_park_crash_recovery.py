@@ -1391,6 +1391,7 @@ async def test_a_parked_turn_holds_a_ref_to_its_own_request(
     assert run.input["request_ref"] == {"session_id": session_id, "request_id": park_id}
     assert run.input["params"] == {"temperature": 0.2}
     assert run.input["session_id"] == session_id
+    assert run.visibility == "session"
 
     # The input is on the row too (until the contract step stops writing it), so no
     # wake rebuilds the request.
