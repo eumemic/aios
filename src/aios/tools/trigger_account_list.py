@@ -22,10 +22,11 @@ workflow RUN may call it — the run path dispatches account-scoped to
 ops-agent is a workflow run, so the run path is the load-bearing one; the session
 surface is parity.
 
-Each returned trigger carries ``{id, name, owner_session_id, source_kind,
-enabled, next_fire, last_fire_status, consecutive_failures}`` — the
+Each returned trigger carries ``{id, name, owner_kind, owner_session_id,
+source_kind, enabled, next_fire, last_fire_status, consecutive_failures}`` — the
 liveness-audit projection (:class:`aios.models.triggers.AccountTriggerEcho`).
-``owner_session_id`` lets the sweep name which session owns a zombie;
+``owner_session_id`` lets the sweep name which session owns a zombie; it is
+``null`` exactly when ``owner_kind == "operator"`` (#2473, #2525);
 ``source_kind`` lets it classify schedulable (``cron`` → ``next_fire`` must be
 non-null) vs reactive/one-shot (``run_completion`` / ``external_event`` →
 exempt).
@@ -44,13 +45,16 @@ from aios.tools.input import tool_input
 from aios.tools.registry import registry
 
 LIST_ACCOUNT_TRIGGERS_DESCRIPTION = (
-    "List every trigger across the entire account (all sessions), each with its "
-    "id, name, owner_session_id, source kind, enabled state, next_fire, last fire "
-    "status, and consecutive failure count. Account-wide — unlike trigger_list, "
+    "List every trigger across the entire account (all sessions, plus operator "
+    "triggers), each with its id, name, owner_kind, owner_session_id, source kind, "
+    "enabled state, next_fire, last fire status, and consecutive failure count. "
+    "owner_kind is 'session' or 'operator'; an operator trigger has no owning "
+    "session, so its owner_session_id is null. Account-wide — unlike trigger_list, "
     "which lists only THIS session's triggers. Use it to audit trigger liveness: a "
     "schedulable (cron) trigger that is enabled but has a null next_fire is a "
     "zombie the scheduler will never fire. Defaults to enabled triggers only; set "
-    "enabled_only=false for every trigger on non-archived sessions."
+    "enabled_only=false for every trigger on non-archived sessions and every "
+    "operator trigger."
 )
 
 

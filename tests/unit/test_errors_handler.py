@@ -92,3 +92,24 @@ async def test_non_serializable_input_does_not_crash_handler() -> None:
     assert body["error"]["type"] == "validation_error"
     # The non-serializable ``input`` is coerced to a string, not crashed on.
     assert isinstance(body["error"]["detail"]["errors"][0]["input"], str)
+
+
+async def test_non_finite_float_input_does_not_crash_handler() -> None:
+    """``1e400`` parses to ``inf``. A ``finite_number`` error echoes it in ``input``,
+    which survives the ``default=str`` round-trip as a float and made the strict
+    ``JSONResponse`` render raise ``ValueError`` — a 500 instead of the 422 (#2525)."""
+    exc = RequestValidationError(
+        errors=[
+            {"type": "finite_number", "loc": ("body", "a"), "msg": "finite", "input": v}
+            for v in (float("inf"), float("-inf"), float("nan"))
+        ]
+    )
+    request = Request(
+        {"type": "http", "method": "POST", "path": "/x", "headers": [], "query_string": b""}
+    )
+
+    response = await validation_error_handler(request, exc)
+
+    assert response.status_code == 422
+    body = json.loads(bytes(response.body))
+    assert [e["input"] for e in body["error"]["detail"]["errors"]] == ["inf", "-inf", "nan"]

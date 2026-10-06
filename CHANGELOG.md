@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- **Operator triggers show up in `list_account_triggers`; a non-finite
+  `budget_usd` is a 422 (#2525).** The account-wide trigger read INNER JOINed
+  `sessions`, so operator triggers (#2473, no owning session) never appeared
+  and every liveness monitor built on it was blind to them. It now LEFT JOINs
+  with the scheduler's own liveness predicate: session triggers on archived
+  sessions are still excluded, and operator triggers are listed. Each row now
+  carries `owner_kind` (`session` | `operator`); `owner_session_id` is `null`
+  for operator rows. Separately, `budget_usd` on trigger workflow actions
+  (session and operator, create and replace) rejects `inf`/`nan` (`1e400`
+  parses to `inf`), and the 422 handler no longer crashes rendering a
+  non-finite `input`, which had turned that 422 into a 500.
 - **Tool results carry a received time (#2282).** `build_messages` now renders
   every tool result with the same `[received=…]` envelope a user message gets,
   from the result event's own `created_at` (answer time, in the account's

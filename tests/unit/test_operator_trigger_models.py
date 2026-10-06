@@ -72,3 +72,35 @@ def test_an_update_keeps_the_operator_shapes() -> None:
                 }
             }
         )
+
+
+@pytest.mark.parametrize("bad", [float("inf"), float("-inf"), float("nan")], ids=str)
+def test_a_non_finite_budget_is_rejected_on_create_and_update(bad: float) -> None:
+    """``1e400`` parses to ``inf``; ``gt=0`` alone admits it and the JSONB insert
+    then fails with a 500 (#2525). ``allow_inf_nan=False`` makes it a 422."""
+    with pytest.raises(ValidationError, match="finite"):
+        OperatorTriggerCreate.model_validate(_body(action={**_ACTION, "budget_usd": bad}))
+    with pytest.raises(ValidationError, match="finite"):
+        OperatorTriggerUpdate.model_validate(
+            {
+                "action": {
+                    **_ACTION,
+                    "workflow_version": None,
+                    "version": None,
+                    "input_template": None,
+                    "vault_ids": [],
+                    "max_outstanding_runs": None,
+                    "budget_usd": bad,
+                }
+            }
+        )
+
+
+def test_a_huge_literal_budget_from_json_is_rejected() -> None:
+    raw = (
+        '{"name": "weekly", "source": {"kind": "cron", "schedule": "0 9 * * 1"}, '
+        '"action": {"kind": "workflow", "workflow_id": "wf_x", "budget_usd": 1e400}, '
+        '"environment_id": "env_x"}'
+    )
+    with pytest.raises(ValidationError, match="finite"):
+        OperatorTriggerCreate.model_validate_json(raw)
