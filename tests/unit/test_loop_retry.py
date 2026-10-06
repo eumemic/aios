@@ -34,6 +34,7 @@ from aios.harness.loop import (
     run_session_step,
 )
 from aios.harness.window import WindowedEvents
+from aios.models.agents import AgentBinding
 
 # These tests deliberately exercise downstream provider retry semantics.
 
@@ -189,6 +190,7 @@ def mock_step_dependencies() -> Any:
         skills=[],
         system="sys",
         litellm_extra={},
+        binding=AgentBinding(agent_id="agt_test", version=1),
         window_min=1000,
         window_max=10000,
         preempt_policy="wait",
@@ -258,6 +260,9 @@ def mock_step_dependencies() -> Any:
                     skill_versions=[],
                     reminders_written=(),
                     reminders_skipped=0,
+                    tz_name="UTC",
+                    reminder_seqs=(),
+                    workspace_path=None,
                 )
             ),
         ),
@@ -409,6 +414,7 @@ class TestRunSessionStepOnModelError:
             cache_creation_input_tokens=4,
             cost_microusd=1_250_000,
             account_id=ANY,
+            model="openrouter/x",
         )
         mock_step_dependencies.fail_all_open_requests.assert_awaited_once_with(
             ANY, "sess_x", account_id=ANY, error={"kind": "model_call_deadline"}

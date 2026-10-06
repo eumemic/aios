@@ -14,6 +14,7 @@ reuse the read views directly, the way ``Agent``/``Session`` do.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Literal, NamedTuple
 
@@ -38,6 +39,64 @@ WorkspaceMode = Literal["shared", "fresh"]
 
 RunPrincipal = Literal["operator", "session"]  # see ``WfRun.principal``
 RunVisibility = Literal["account", "session"]  # see ``WfRun.visibility``
+
+
+class AsAgent(BaseModel):
+    """An agent version whose surface an operator re-rooted a sub-run to
+    (``invoke_workflow``'s ``as_agent``), so an eval arm runs with the authority that
+    agent would give it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    agent_id: str
+    version: int = Field(ge=1, lt=2**31)
+
+
+class RequestRef(BaseModel):
+    """A reference to a request a session sent: the span that captured it (#2471),
+    named the way ``GET /v1/sessions/{session_id}/requests/{request_id}`` names it.
+
+    A ref means something only in a field typed as one. A run resolves only the ref
+    it was created with (``WfRun.request_ref``), never a ref-shaped value it finds
+    in its input or in a tool result."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    session_id: str
+    request_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class OperatorAuthority:
+    """A run launched through the operator API. Its workflow's surface binds as-is."""
+
+
+@dataclass(frozen=True, slots=True)
+class SessionAuthority:
+    """A run an agent session launched: ``call_workflow``, a workflow-as-model turn, or
+    a trigger fire. The session's current surface and vaults bound it.
+    ``parent_run_id`` is lineage only: it sets the depth budget, never the authority."""
+
+    session_id: str
+    parent_run_id: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class RunAuthority:
+    """A sub-run a run launched with ``invoke_workflow``. The parent run's frozen surface
+    and vaults bound it, and the parent is also its lineage parent.
+
+    ``as_agent`` (operator runs only) re-roots the surface bound at that agent version:
+    the bound becomes ``clamp(surface_of(agent_version), parent surface)``. The model
+    and vaults still come from the parent."""
+
+    run_id: str
+    as_agent: AsAgent | None = None
+
+
+# Who a new run acts under (``create_run``). It decides the run's principal, the
+# surface its snapshot is clamped to, the vaults it may bind and its lineage.
+type RunAuthoritySource = OperatorAuthority | SessionAuthority | RunAuthority
 
 WfRunStatus = Literal["pending", "running", "suspended", "completed", "errored", "cancelled"]
 WfRunEventType = Literal[
@@ -196,11 +255,32 @@ class WfRun(BaseModel):
             "session doesn't change it."
         )
     )
+    as_agent: AsAgent | None = Field(
+        default=None,
+        description=(
+            "Set when an operator run invoked this run with `as_agent`: the agent "
+            "version whose surface it was clamped to, within the parent run's. Only the "
+            "surface changes; the model and vaults still come from the parent run."
+        ),
+    )
+    request_ref: RequestRef | None = Field(
+        default=None,
+        description=(
+            "The request this run works on, when it was created with one: a "
+            "workflow-as-model turn's own request, or one handed to a sub-run. The run "
+            "can resolve this request and no other. Such a run's `input` is null: the "
+            "script's input (the request plus this ref) is the `run_started` event in its "
+            "journal, which is pruned a day after the run ends. A sub-run handed a ref "
+            "rebuilds the request on its first step."
+        ),
+    )
     visibility: RunVisibility = Field(
         description=(
             "Who may read the run through agent tools: `account` (any session in the "
             "account) or `session` (only its launching session). A workflow-as-model "
-            "run is `session`, and sub-runs inherit their parent's. The operator API "
+            "run is `session`, and so is a run that declares a replay tool "
+            "(`sample_requests`, `get_request`); it has no launching session, so no "
+            "agent can read it. Sub-runs inherit their parent's. The operator API "
             "reads every run."
         )
     )
@@ -328,11 +408,12 @@ WORKFLOW_SCRIPT_CONTRACT = """Workflow script contract:
   `main`.
 - Injected capability API, available without imports:
   - `agent(input, *, agent_id=None, output_schema=None, model=None, label=None)`: invoke a generic or named agent and await its result.
-  - `invoke_workflow(workflow_id, input, *, output_schema=None, label=None)`: invoke another workflow as a sub-run and await its result (the run dual of `agent`). The sub-run runs under this run's surface intersected with the target's; a failed or gone sub-run raises like a failed `agent`.
-  - `tool(name, input)`: invoke a declared tool; tool errors are returned, not raised.
-  - `call_llm(request)`: run one raw inference turn and await the assistant turn. `request` carries `model` (omit to use the run's default child model; a `workflow:` target is rejected), `messages` (required), optional `tools` (schemas OFFERED — the model may request a call, but call_llm never runs it), and optional `params` (provider knobs). The result is `{"content", "tool_calls", "finish_reason", "usage", "cost", "message"}`, or `{"error": ...}` — a model error is returned, not raised. Its cost is metered against this run's `budget_usd` ceiling, so a budget-exhausted run refuses further `call_llm`. Use it to route/judge/fact-check around inference; use `agent(...)` when you want the tool calls executed.
+  - `invoke_workflow(workflow_id, input, *, version=None, output_schema=None, label=None, as_agent=None, request_ref=None)`: invoke another workflow as a sub-run and await its result (the run dual of `agent`). `version` pins a registered version; omitted, the version current at launch runs. The sub-run runs under this run's surface intersected with the target's, and binds this run's vaults; a failed or gone sub-run raises like a failed `agent`. `as_agent={"agent_id": ..., "version": N}` also intersects the sub-run's surface with that agent version's; only a run an operator launched may pass it. `request_ref` (with `input=None`) hands the sub-run the request this run was created with: it starts with that request as a workflow-as-model run would.
+  - `tool(name, input)`: invoke a declared tool; tool errors are returned, not raised. An operator run that declares the replay tools can read an agent's past requests: `tool("sample_requests", {"agent_id", "start", "end", "n", "seed", "cluster_cap"})` returns `{"items": [...]}`, a seeded sample of the agent's answered requests in `[start, end)` (ISO-8601 times), each with a `request_ref`, its session, time, model, `response_event_id` and whether it is `missing`. `tool("get_request", {"request_ref", "model"})` rebuilds one as `{messages, tools, params, fidelity}`. A ref a sample returned can be passed to `call_llm(request_ref=)`, `invoke_workflow(request_ref=)` and `get_request`.
+  - `call_llm(request)`: run one raw inference turn and await the assistant turn. `request` carries `model` (omit to use the run's default child model; a `workflow:` target is rejected), `messages` (required), optional `tools` (schemas OFFERED — the model may request a call, but call_llm never runs it), and optional `params` (provider knobs). The result is `{"content", "tool_calls", "finish_reason", "usage", "cost", "message"}`, or `{"error": ...}` — a model error is returned, not raised. Its cost is metered against this run's `budget_usd` ceiling, so a budget-exhausted run refuses further `call_llm`. Use it to route/judge/fact-check around inference; use `agent(...)` when you want the tool calls executed. `call_llm(request_ref=input["request_ref"], model=None)` sends the request this run was created with instead, rendered for `model`; with the model it was captured for it keeps that request's provider params, with another it sends none. Any other ref resolves as an error value.
   - `gate()`: suspend until an external resume delivers a value.
   - `budget()`: read this run's shared child-spend budget, or None when unset.
+  - `sub_runs()`: read facts about every session and run this run created, directly or through descendants: `{"nodes": [...], "truncated": bool}`, each node with its kind, label, workflow or agent and the version that ran, status, timings, and usage per model. Metadata only.
   - `parallel(thunks)`: run zero-argument callables concurrently (for example,
     `lambda: agent(...)`). A failed agent branch yields `None` at the barrier instead
     of raising. Fan-out width is capped by `MAX_PARALLEL_FANOUT` (currently 1000).
@@ -533,6 +614,7 @@ class WfRunCreate(BaseModel):
     version: int | None = Field(
         default=None,
         ge=1,
+        lt=2**31,  # workflow_versions.version is int4: a larger value is a 422, not a 500
         description=(
             "Optional historical workflow version to run. `None` (default) launches the "
             "workflow's CURRENT version. An integer re-runs that specific version: the run "

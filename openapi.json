@@ -4351,6 +4351,105 @@
         }
       }
     },
+    "/v1/sessions/{session_id}/requests/{request_id}": {
+      "get": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "Get Request",
+        "description": "Rebuild a request the session sent (#2471).\n\n``request_id`` is the id of the span that opened the send: a\n``model_request_start`` event, or a ``model_workflow_park`` event for a\nworkflow-bound agent. The request is recomposed from its captured record,\nblobs and the event log, using today's renderer, and reported with its\nfidelity. ``?model=`` renders it for another model's vision and thinking gates\ninstead. 404 when the event isn't a captured request.\n\nAttachment files are read where the API runs: a request that inlined an image\nthis process can't read reports ``missing: attachment``.",
+        "operationId": "get_session_request",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          },
+          {
+            "name": "request_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Request Id"
+            }
+          },
+          {
+            "name": "model",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Model"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/RebuiltRequest"
+                    },
+                    {
+                      "$ref": "#/components/schemas/MissingRequest"
+                    }
+                  ],
+                  "discriminator": {
+                    "propertyName": "kind",
+                    "mapping": {
+                      "rebuilt": "#/components/schemas/RebuiltRequest",
+                      "missing": "#/components/schemas/MissingRequest"
+                    }
+                  },
+                  "title": "Response Get Session Request"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/sessions/{session_id}/context": {
       "get": {
         "tags": [
@@ -9185,6 +9284,366 @@
         }
       }
     },
+    "/v1/triggers": {
+      "post": {
+        "tags": [
+          "triggers"
+        ],
+        "summary": "Create Operator Trigger",
+        "description": "Create an operator trigger. Its source is ``cron`` or ``one_shot`` and its\naction a ``workflow`` with ``budget_usd``; each fire launches an operator run\nin ``environment_id``. ``warnings`` carries lint findings.",
+        "operationId": "create_operator_trigger",
+        "parameters": [
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OperatorTriggerCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OperatorTriggerEcho"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "triggers"
+        ],
+        "summary": "List Operator Triggers",
+        "description": "List the account's operator triggers.",
+        "operationId": "list_operator_triggers",
+        "parameters": [
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListResponse_OperatorTriggerEcho_"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/triggers/{name}": {
+      "get": {
+        "tags": [
+          "triggers"
+        ],
+        "summary": "Get Operator Trigger",
+        "description": "Get an operator trigger by name, with its last fire status and failure count.",
+        "operationId": "get_operator_trigger",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OperatorTriggerEcho"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "triggers"
+        ],
+        "summary": "Update Operator Trigger",
+        "description": "Replace an operator trigger's source/action/enabled/metadata by name. Omitted\nfields unchanged; ``source`` / ``action`` replace wholesale.",
+        "operationId": "update_operator_trigger",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OperatorTriggerUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OperatorTriggerEcho"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "triggers"
+        ],
+        "summary": "Delete Operator Trigger",
+        "description": "Delete an operator trigger by name. Runs it already launched keep running, and\nits fire history stays readable at ``/{name}/runs``.",
+        "operationId": "delete_operator_trigger",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "x-codegen": {
+          "mcp": {
+            "destructiveHint": true
+          }
+        }
+      }
+    },
+    "/v1/triggers/{name}/runs": {
+      "get": {
+        "tags": [
+          "triggers"
+        ],
+        "summary": "List Operator Trigger Runs",
+        "description": "List an operator trigger's fires (the per-fire audit), newest first. Keyed by\nname, so a deleted trigger's history stays readable until retention prunes it.",
+        "operationId": "list_operator_trigger_runs",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 200,
+              "minimum": 1,
+              "default": 50,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListResponse_TriggerRunEcho_"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/connectors/{connector}/tools_schema": {
       "put": {
         "tags": [
@@ -13204,6 +13663,28 @@
         "title": "AllowSenders",
         "description": "Admit only canonical connector-supplied sender identifiers."
       },
+      "AsAgent": {
+        "properties": {
+          "agent_id": {
+            "type": "string",
+            "title": "Agent Id"
+          },
+          "version": {
+            "type": "integer",
+            "exclusiveMaximum": 2147483648.0,
+            "minimum": 1.0,
+            "title": "Version"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "agent_id",
+          "version"
+        ],
+        "title": "AsAgent",
+        "description": "An agent version whose surface an operator re-rooted a sub-run to\n(``invoke_workflow``'s ``as_agent``), so an eval arm runs with the authority that\nagent would give it."
+      },
       "AttributedUsage": {
         "properties": {
           "own": {
@@ -15081,7 +15562,7 @@
           "script": {
             "type": "string",
             "title": "Script",
-            "description": "Workflow script contract:\n- Entry point: define `async def main(input)`. A run's output is the value returned by\n  `main`.\n- Injected capability API, available without imports:\n  - `agent(input, *, agent_id=None, output_schema=None, model=None, label=None)`: invoke a generic or named agent and await its result.\n  - `invoke_workflow(workflow_id, input, *, output_schema=None, label=None)`: invoke another workflow as a sub-run and await its result (the run dual of `agent`). The sub-run runs under this run's surface intersected with the target's; a failed or gone sub-run raises like a failed `agent`.\n  - `tool(name, input)`: invoke a declared tool; tool errors are returned, not raised.\n  - `call_llm(request)`: run one raw inference turn and await the assistant turn. `request` carries `model` (omit to use the run's default child model; a `workflow:` target is rejected), `messages` (required), optional `tools` (schemas OFFERED \u2014 the model may request a call, but call_llm never runs it), and optional `params` (provider knobs). The result is `{\"content\", \"tool_calls\", \"finish_reason\", \"usage\", \"cost\", \"message\"}`, or `{\"error\": ...}` \u2014 a model error is returned, not raised. Its cost is metered against this run's `budget_usd` ceiling, so a budget-exhausted run refuses further `call_llm`. Use it to route/judge/fact-check around inference; use `agent(...)` when you want the tool calls executed.\n  - `gate()`: suspend until an external resume delivers a value.\n  - `budget()`: read this run's shared child-spend budget, or None when unset.\n  - `parallel(thunks)`: run zero-argument callables concurrently (for example,\n    `lambda: agent(...)`). A failed agent branch yields `None` at the barrier instead\n    of raising. Fan-out width is capped by `MAX_PARALLEL_FANOUT` (currently 1000).\n  - `pipeline(items, *stages)`: run each item through staged transforms concurrently.\n  - `log(msg)`: record progress on the run journal.\n  - `phase(label)`: record a phase marker on the run journal.\n- Shell execution: `tool('bash', {\"command\": str, \"timeout_seconds\": float | None})` runs the\n  command in a per-run sandbox (provisioned lazily on first use, in the run's\n  environment). `bash` must be a member of the workflow's declared tools or the call\n  resolves to a `{\"error\": ...}` value. Result: `{exit_code, stdout, stderr, timed_out,\n  truncated}` \u2014 a nonzero exit or in-command timeout is a successful result to branch\n  on, not an error.\n- Crash semantics: at-least-once at the call boundary. A capability call interrupted by\n  a crash re-runs on resume; completed calls never re-run. The sandbox filesystem is\n  ephemeral scratch \u2014 write re-run-tolerant commands (e.g. `rm -rf dir && git clone ...`).\n- Irreversible external effects (a POST that charges, sends, or publishes): a per-call\n  idempotency token (stable across crash re-runs of the same call, distinct per call) is\n  available so you can have the external service drop a re-fired duplicate, or knowingly\n  accept at-least-once. Both deliveries opt in the same way with the same `$AIOS_IDEMPOTENCY_KEY`\n  ergonomic: in `tool('bash')` the environment exposes `$AIOS_IDEMPOTENCY_KEY`; in\n  `tool('http_request')` pass the sentinel string `\"$AIOS_IDEMPOTENCY_KEY\"` as an\n  `Idempotency-Key` header value and the worker substitutes the real token before dispatch.\n- Partition rule: put re-run-tolerant mechanical work in `tool('bash')`; put work whose\n  uncertain completion needs judgment to resolve inside `agent(...)`.\n- Environment: the SCRIPT runs in a deterministic, credential-free, isolated child\n  process \u2014 imports restricted to a curated stdlib allowlist, no network or filesystem\n  access from script code itself; all effects go through the capability API. The\n  `tool('bash')` sandbox is different: it has a filesystem (ephemeral scratch) and\n  network egress per the run's ENVIRONMENT network policy (Unrestricted, or Limited to\n  the environment's allowed hosts) \u2014 commands can curl, clone, and install within that\n  policy.\n\nMinimal example:\n```python\nasync def main(input):\n    result = await agent(\n        {\"task\": input[\"task\"]},\n        agent_id=input[\"agent_id\"],\n    )\n    return result\n```\n"
+            "description": "Workflow script contract:\n- Entry point: define `async def main(input)`. A run's output is the value returned by\n  `main`.\n- Injected capability API, available without imports:\n  - `agent(input, *, agent_id=None, output_schema=None, model=None, label=None)`: invoke a generic or named agent and await its result.\n  - `invoke_workflow(workflow_id, input, *, version=None, output_schema=None, label=None, as_agent=None, request_ref=None)`: invoke another workflow as a sub-run and await its result (the run dual of `agent`). `version` pins a registered version; omitted, the version current at launch runs. The sub-run runs under this run's surface intersected with the target's, and binds this run's vaults; a failed or gone sub-run raises like a failed `agent`. `as_agent={\"agent_id\": ..., \"version\": N}` also intersects the sub-run's surface with that agent version's; only a run an operator launched may pass it. `request_ref` (with `input=None`) hands the sub-run the request this run was created with: it starts with that request as a workflow-as-model run would.\n  - `tool(name, input)`: invoke a declared tool; tool errors are returned, not raised. An operator run that declares the replay tools can read an agent's past requests: `tool(\"sample_requests\", {\"agent_id\", \"start\", \"end\", \"n\", \"seed\", \"cluster_cap\"})` returns `{\"items\": [...]}`, a seeded sample of the agent's answered requests in `[start, end)` (ISO-8601 times), each with a `request_ref`, its session, time, model, `response_event_id` and whether it is `missing`. `tool(\"get_request\", {\"request_ref\", \"model\"})` rebuilds one as `{messages, tools, params, fidelity}`. A ref a sample returned can be passed to `call_llm(request_ref=)`, `invoke_workflow(request_ref=)` and `get_request`.\n  - `call_llm(request)`: run one raw inference turn and await the assistant turn. `request` carries `model` (omit to use the run's default child model; a `workflow:` target is rejected), `messages` (required), optional `tools` (schemas OFFERED \u2014 the model may request a call, but call_llm never runs it), and optional `params` (provider knobs). The result is `{\"content\", \"tool_calls\", \"finish_reason\", \"usage\", \"cost\", \"message\"}`, or `{\"error\": ...}` \u2014 a model error is returned, not raised. Its cost is metered against this run's `budget_usd` ceiling, so a budget-exhausted run refuses further `call_llm`. Use it to route/judge/fact-check around inference; use `agent(...)` when you want the tool calls executed. `call_llm(request_ref=input[\"request_ref\"], model=None)` sends the request this run was created with instead, rendered for `model`; with the model it was captured for it keeps that request's provider params, with another it sends none. Any other ref resolves as an error value.\n  - `gate()`: suspend until an external resume delivers a value.\n  - `budget()`: read this run's shared child-spend budget, or None when unset.\n  - `sub_runs()`: read facts about every session and run this run created, directly or through descendants: `{\"nodes\": [...], \"truncated\": bool}`, each node with its kind, label, workflow or agent and the version that ran, status, timings, and usage per model. Metadata only.\n  - `parallel(thunks)`: run zero-argument callables concurrently (for example,\n    `lambda: agent(...)`). A failed agent branch yields `None` at the barrier instead\n    of raising. Fan-out width is capped by `MAX_PARALLEL_FANOUT` (currently 1000).\n  - `pipeline(items, *stages)`: run each item through staged transforms concurrently.\n  - `log(msg)`: record progress on the run journal.\n  - `phase(label)`: record a phase marker on the run journal.\n- Shell execution: `tool('bash', {\"command\": str, \"timeout_seconds\": float | None})` runs the\n  command in a per-run sandbox (provisioned lazily on first use, in the run's\n  environment). `bash` must be a member of the workflow's declared tools or the call\n  resolves to a `{\"error\": ...}` value. Result: `{exit_code, stdout, stderr, timed_out,\n  truncated}` \u2014 a nonzero exit or in-command timeout is a successful result to branch\n  on, not an error.\n- Crash semantics: at-least-once at the call boundary. A capability call interrupted by\n  a crash re-runs on resume; completed calls never re-run. The sandbox filesystem is\n  ephemeral scratch \u2014 write re-run-tolerant commands (e.g. `rm -rf dir && git clone ...`).\n- Irreversible external effects (a POST that charges, sends, or publishes): a per-call\n  idempotency token (stable across crash re-runs of the same call, distinct per call) is\n  available so you can have the external service drop a re-fired duplicate, or knowingly\n  accept at-least-once. Both deliveries opt in the same way with the same `$AIOS_IDEMPOTENCY_KEY`\n  ergonomic: in `tool('bash')` the environment exposes `$AIOS_IDEMPOTENCY_KEY`; in\n  `tool('http_request')` pass the sentinel string `\"$AIOS_IDEMPOTENCY_KEY\"` as an\n  `Idempotency-Key` header value and the worker substitutes the real token before dispatch.\n- Partition rule: put re-run-tolerant mechanical work in `tool('bash')`; put work whose\n  uncertain completion needs judgment to resolve inside `agent(...)`.\n- Environment: the SCRIPT runs in a deterministic, credential-free, isolated child\n  process \u2014 imports restricted to a curated stdlib allowlist, no network or filesystem\n  access from script code itself; all effects go through the capability API. The\n  `tool('bash')` sandbox is different: it has a filesystem (ephemeral scratch) and\n  network egress per the run's ENVIRONMENT network policy (Unrestricted, or Limited to\n  the environment's allowed hosts) \u2014 commands can curl, clone, and install within that\n  policy.\n\nMinimal example:\n```python\nasync def main(input):\n    result = await agent(\n        {\"task\": input[\"task\"]},\n        agent_id=input[\"agent_id\"],\n    )\n    return result\n```\n"
           },
           "input_schema": {
             "anyOf": [
@@ -15703,6 +16184,38 @@
           "data"
         ],
         "title": "ListResponse[ModelProvider]"
+      },
+      "ListResponse_OperatorTriggerEcho_": {
+        "properties": {
+          "data": {
+            "items": {
+              "$ref": "#/components/schemas/OperatorTriggerEcho"
+            },
+            "type": "array",
+            "title": "Data"
+          },
+          "has_more": {
+            "type": "boolean",
+            "title": "Has More",
+            "default": false
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          }
+        },
+        "type": "object",
+        "required": [
+          "data"
+        ],
+        "title": "ListResponse[OperatorTriggerEcho]"
       },
       "ListResponse_RecentChat_": {
         "properties": {
@@ -16953,6 +17466,46 @@
         ],
         "title": "MintKeyResponse"
       },
+      "MissingRequest": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "const": "missing",
+            "title": "Kind",
+            "default": "missing"
+          },
+          "session_id": {
+            "type": "string",
+            "title": "Session Id"
+          },
+          "request_id": {
+            "type": "string",
+            "title": "Request Id"
+          },
+          "missing": {
+            "type": "string",
+            "enum": [
+              "blob",
+              "attachment"
+            ],
+            "title": "Missing"
+          },
+          "record": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Record"
+          }
+        },
+        "type": "object",
+        "required": [
+          "session_id",
+          "request_id",
+          "missing",
+          "record"
+        ],
+        "title": "MissingRequest",
+        "description": "A captured request that can't be rebuilt: ``blob`` (a captured part is gone)\nor ``attachment`` (an image file the request inlined is unreadable here)."
+      },
       "ModelProvider": {
         "properties": {
           "id": {
@@ -17308,6 +17861,486 @@
         "title": "OneShotSource",
         "description": "One-shot source: fires once at an absolute UTC time, then self-deletes."
       },
+      "OperatorTriggerCreate": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]*$",
+            "title": "Name",
+            "description": "Stable identifier; unique among the account's operator triggers."
+          },
+          "source": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/CronSource"
+              },
+              {
+                "$ref": "#/components/schemas/OneShotSource"
+              }
+            ],
+            "title": "Source",
+            "discriminator": {
+              "propertyName": "kind",
+              "mapping": {
+                "cron": "#/components/schemas/CronSource",
+                "one_shot": "#/components/schemas/OneShotSource"
+              }
+            }
+          },
+          "action": {
+            "$ref": "#/components/schemas/OperatorWorkflowAction"
+          },
+          "environment_id": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Environment Id"
+          },
+          "enabled": {
+            "type": "boolean",
+            "title": "Enabled",
+            "default": true
+          },
+          "metadata": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Metadata"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "name",
+          "source",
+          "action",
+          "environment_id"
+        ],
+        "title": "OperatorTriggerCreate",
+        "description": "Request body for ``POST /v1/triggers``. ``environment_id`` is the\nenvironment the trigger's runs bind to, named by the operator as on\n``POST /v1/runs``; it can't be changed later."
+      },
+      "OperatorTriggerEcho": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "source": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/CronSource"
+              },
+              {
+                "$ref": "#/components/schemas/OneShotSource"
+              },
+              {
+                "$ref": "#/components/schemas/RunCompletionSource"
+              },
+              {
+                "$ref": "#/components/schemas/ExternalEventSource"
+              }
+            ],
+            "title": "Source",
+            "discriminator": {
+              "propertyName": "kind",
+              "mapping": {
+                "cron": "#/components/schemas/CronSource",
+                "external_event": "#/components/schemas/ExternalEventSource",
+                "one_shot": "#/components/schemas/OneShotSource",
+                "run_completion": "#/components/schemas/RunCompletionSource"
+              }
+            }
+          },
+          "action": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/SandboxCommandAction"
+              },
+              {
+                "$ref": "#/components/schemas/WakeOwnerAction"
+              },
+              {
+                "$ref": "#/components/schemas/WakeSessionAction"
+              },
+              {
+                "$ref": "#/components/schemas/WorkflowAction"
+              }
+            ],
+            "title": "Action",
+            "discriminator": {
+              "propertyName": "kind",
+              "mapping": {
+                "sandbox_command": "#/components/schemas/SandboxCommandAction",
+                "wake_owner": "#/components/schemas/WakeOwnerAction",
+                "wake_session": "#/components/schemas/WakeSessionAction",
+                "workflow": "#/components/schemas/WorkflowAction"
+              }
+            }
+          },
+          "enabled": {
+            "type": "boolean",
+            "title": "Enabled"
+          },
+          "next_fire": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Fire"
+          },
+          "last_fire_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Fire At"
+          },
+          "last_fire_status": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "ok",
+                  "error",
+                  "timeout",
+                  "skipped"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Fire Status"
+          },
+          "consecutive_failures": {
+            "type": "integer",
+            "title": "Consecutive Failures"
+          },
+          "metadata": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Metadata"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          },
+          "environment_id": {
+            "type": "string",
+            "title": "Environment Id"
+          },
+          "warnings": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Warnings"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "source",
+          "action",
+          "enabled",
+          "next_fire",
+          "last_fire_at",
+          "last_fire_status",
+          "consecutive_failures",
+          "metadata",
+          "created_at",
+          "updated_at",
+          "environment_id"
+        ],
+        "title": "OperatorTriggerEcho",
+        "description": "Read view of an operator trigger: the trigger echo plus the environment its\nruns bind to. ``warnings`` carries the write path's lint findings; reads\nreturn none."
+      },
+      "OperatorTriggerUpdate": {
+        "properties": {
+          "source": {
+            "anyOf": [
+              {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/CronSourceReplace"
+                  },
+                  {
+                    "$ref": "#/components/schemas/OneShotSource"
+                  }
+                ],
+                "discriminator": {
+                  "propertyName": "kind",
+                  "mapping": {
+                    "cron": "#/components/schemas/CronSourceReplace",
+                    "one_shot": "#/components/schemas/OneShotSource"
+                  }
+                }
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source"
+          },
+          "action": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OperatorWorkflowActionReplace"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Enabled"
+          },
+          "metadata": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Metadata"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "OperatorTriggerUpdate",
+        "description": "Update body for ``PUT /v1/triggers/{name}``: the same Replace semantics as\n:class:`TriggerUpdate`, limited to the operator shapes."
+      },
+      "OperatorWorkflowAction": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "const": "workflow",
+            "title": "Kind",
+            "default": "workflow"
+          },
+          "workflow_id": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Workflow Id"
+          },
+          "workflow_version": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workflow Version"
+          },
+          "version": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version"
+          },
+          "input_template": {
+            "title": "Input Template"
+          },
+          "vault_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Vault Ids"
+          },
+          "max_outstanding_runs": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Outstanding Runs"
+          },
+          "budget_usd": {
+            "type": "number",
+            "exclusiveMinimum": 0.0,
+            "title": "Budget Usd"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "workflow_id",
+          "budget_usd"
+        ],
+        "title": "OperatorWorkflowAction",
+        "description": "The workflow action of an operator trigger: ``budget_usd`` is required,\nso every operator run it launches is bounded."
+      },
+      "OperatorWorkflowActionReplace": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "const": "workflow",
+            "title": "Kind",
+            "default": "workflow"
+          },
+          "workflow_id": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Workflow Id"
+          },
+          "workflow_version": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workflow Version"
+          },
+          "version": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version"
+          },
+          "input_template": {
+            "title": "Input Template"
+          },
+          "vault_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Vault Ids"
+          },
+          "max_outstanding_runs": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Outstanding Runs"
+          },
+          "budget_usd": {
+            "type": "number",
+            "exclusiveMinimum": 0.0,
+            "title": "Budget Usd"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "workflow_id",
+          "workflow_version",
+          "version",
+          "input_template",
+          "vault_ids",
+          "max_outstanding_runs",
+          "budget_usd"
+        ],
+        "title": "OperatorWorkflowActionReplace"
+      },
+      "RebuiltRequest": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "const": "rebuilt",
+            "title": "Kind",
+            "default": "rebuilt"
+          },
+          "session_id": {
+            "type": "string",
+            "title": "Session Id"
+          },
+          "request_id": {
+            "type": "string",
+            "title": "Request Id"
+          },
+          "fidelity": {
+            "type": "string",
+            "enum": [
+              "exact",
+              "inexact",
+              "rerendered"
+            ],
+            "title": "Fidelity"
+          },
+          "request": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Request"
+          },
+          "record": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Record"
+          }
+        },
+        "type": "object",
+        "required": [
+          "session_id",
+          "request_id",
+          "fidelity",
+          "request",
+          "record"
+        ],
+        "title": "RebuiltRequest",
+        "description": "A captured request, recomposed (#2471).\n\n``fidelity`` is ``exact`` when the rebuild hashes to the captured\n``payload_sha``: it is the request the session composed. ``inexact`` means\nthe renderer changed since (compare ``record.render_version``) or an image the\nrequest inlined changed on disk. ``rerendered`` means it was rendered for\nanother model (``?model=``), so there's no hash to compare. ``request`` is\n``{messages, tools, params}``; ``params`` never includes an ``api_key``."
+      },
       "RecentChat": {
         "properties": {
           "chat_id": {
@@ -17327,6 +18360,26 @@
         ],
         "title": "RecentChat",
         "description": "Distinct chat_id observed on a connection's account, with the\nmost-recent inbound timestamp.\n\nReturned by ``GET /v1/connections/{id}/recent-chats`` so operators\ncan find the chat_id for a specific peer without digging through\nevent logs before calling ``bind-chat`` or opening an ``AllowList``.\n\n``chat_id`` is the **authoritative, gate-relevant identifier** \u2014 it is\nexactly what the inbound-admission gate (``AllowList.chat_ids``) matches\non, so it is the value an operator copies into an allowlist. This view\ndeliberately does not present a connector-supplied ``display_name`` /\n``sender_name`` alongside it: that name is self-reported by the\nconnector and forgeable, never a verified identity."
+      },
+      "RequestRef": {
+        "properties": {
+          "session_id": {
+            "type": "string",
+            "title": "Session Id"
+          },
+          "request_id": {
+            "type": "string",
+            "title": "Request Id"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "session_id",
+          "request_id"
+        ],
+        "title": "RequestRef",
+        "description": "A reference to a request a session sent: the span that captured it (#2471),\nnamed the way ``GET /v1/sessions/{session_id}/requests/{request_id}`` names it.\n\nA ref means something only in a field typed as one. A run resolves only the ref\nit was created with (``WfRun.request_ref``), never a ref-shaped value it finds\nin its input or in a tool result."
       },
       "RequireApproval": {
         "properties": {
@@ -19671,6 +20724,13 @@
                   "custom",
                   "mcp_toolset"
                 ]
+              },
+              {
+                "type": "string",
+                "enum": [
+                  "sample_requests",
+                  "get_request"
+                ]
               }
             ],
             "title": "Type"
@@ -21827,6 +22887,28 @@
             "title": "Principal",
             "description": "Who the run acts for: `operator` (launched through the operator API, or a sub-run of an operator run) or `session` (launched by an agent session, directly or through its runs). Fixed at creation; deleting the launching session doesn't change it."
           },
+          "as_agent": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AsAgent"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Set when an operator run invoked this run with `as_agent`: the agent version whose surface it was clamped to, within the parent run's. Only the surface changes; the model and vaults still come from the parent run."
+          },
+          "request_ref": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RequestRef"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The request this run works on, when it was created with one: a workflow-as-model turn's own request, or one handed to a sub-run. The run can resolve this request and no other. Such a run's `input` is null: the script's input (the request plus this ref) is the `run_started` event in its journal, which is pruned a day after the run ends. A sub-run handed a ref rebuilds the request on its first step."
+          },
           "visibility": {
             "type": "string",
             "enum": [
@@ -21834,7 +22916,7 @@
               "session"
             ],
             "title": "Visibility",
-            "description": "Who may read the run through agent tools: `account` (any session in the account) or `session` (only its launching session). A workflow-as-model run is `session`, and sub-runs inherit their parent's. The operator API reads every run."
+            "description": "Who may read the run through agent tools: `account` (any session in the account) or `session` (only its launching session). A workflow-as-model run is `session`, and so is a run that declares a replay tool (`sample_requests`, `get_request`); it has no launching session, so no agent can read it. Sub-runs inherit their parent's. The operator API reads every run."
           },
           "depth": {
             "type": "integer",
@@ -22110,6 +23192,7 @@
             "anyOf": [
               {
                 "type": "integer",
+                "exclusiveMaximum": 2147483648.0,
                 "minimum": 1.0
               },
               {
@@ -22808,7 +23891,7 @@
           "script": {
             "type": "string",
             "title": "Script",
-            "description": "Workflow script contract:\n- Entry point: define `async def main(input)`. A run's output is the value returned by\n  `main`.\n- Injected capability API, available without imports:\n  - `agent(input, *, agent_id=None, output_schema=None, model=None, label=None)`: invoke a generic or named agent and await its result.\n  - `invoke_workflow(workflow_id, input, *, output_schema=None, label=None)`: invoke another workflow as a sub-run and await its result (the run dual of `agent`). The sub-run runs under this run's surface intersected with the target's; a failed or gone sub-run raises like a failed `agent`.\n  - `tool(name, input)`: invoke a declared tool; tool errors are returned, not raised.\n  - `call_llm(request)`: run one raw inference turn and await the assistant turn. `request` carries `model` (omit to use the run's default child model; a `workflow:` target is rejected), `messages` (required), optional `tools` (schemas OFFERED \u2014 the model may request a call, but call_llm never runs it), and optional `params` (provider knobs). The result is `{\"content\", \"tool_calls\", \"finish_reason\", \"usage\", \"cost\", \"message\"}`, or `{\"error\": ...}` \u2014 a model error is returned, not raised. Its cost is metered against this run's `budget_usd` ceiling, so a budget-exhausted run refuses further `call_llm`. Use it to route/judge/fact-check around inference; use `agent(...)` when you want the tool calls executed.\n  - `gate()`: suspend until an external resume delivers a value.\n  - `budget()`: read this run's shared child-spend budget, or None when unset.\n  - `parallel(thunks)`: run zero-argument callables concurrently (for example,\n    `lambda: agent(...)`). A failed agent branch yields `None` at the barrier instead\n    of raising. Fan-out width is capped by `MAX_PARALLEL_FANOUT` (currently 1000).\n  - `pipeline(items, *stages)`: run each item through staged transforms concurrently.\n  - `log(msg)`: record progress on the run journal.\n  - `phase(label)`: record a phase marker on the run journal.\n- Shell execution: `tool('bash', {\"command\": str, \"timeout_seconds\": float | None})` runs the\n  command in a per-run sandbox (provisioned lazily on first use, in the run's\n  environment). `bash` must be a member of the workflow's declared tools or the call\n  resolves to a `{\"error\": ...}` value. Result: `{exit_code, stdout, stderr, timed_out,\n  truncated}` \u2014 a nonzero exit or in-command timeout is a successful result to branch\n  on, not an error.\n- Crash semantics: at-least-once at the call boundary. A capability call interrupted by\n  a crash re-runs on resume; completed calls never re-run. The sandbox filesystem is\n  ephemeral scratch \u2014 write re-run-tolerant commands (e.g. `rm -rf dir && git clone ...`).\n- Irreversible external effects (a POST that charges, sends, or publishes): a per-call\n  idempotency token (stable across crash re-runs of the same call, distinct per call) is\n  available so you can have the external service drop a re-fired duplicate, or knowingly\n  accept at-least-once. Both deliveries opt in the same way with the same `$AIOS_IDEMPOTENCY_KEY`\n  ergonomic: in `tool('bash')` the environment exposes `$AIOS_IDEMPOTENCY_KEY`; in\n  `tool('http_request')` pass the sentinel string `\"$AIOS_IDEMPOTENCY_KEY\"` as an\n  `Idempotency-Key` header value and the worker substitutes the real token before dispatch.\n- Partition rule: put re-run-tolerant mechanical work in `tool('bash')`; put work whose\n  uncertain completion needs judgment to resolve inside `agent(...)`.\n- Environment: the SCRIPT runs in a deterministic, credential-free, isolated child\n  process \u2014 imports restricted to a curated stdlib allowlist, no network or filesystem\n  access from script code itself; all effects go through the capability API. The\n  `tool('bash')` sandbox is different: it has a filesystem (ephemeral scratch) and\n  network egress per the run's ENVIRONMENT network policy (Unrestricted, or Limited to\n  the environment's allowed hosts) \u2014 commands can curl, clone, and install within that\n  policy.\n\nMinimal example:\n```python\nasync def main(input):\n    result = await agent(\n        {\"task\": input[\"task\"]},\n        agent_id=input[\"agent_id\"],\n    )\n    return result\n```\n"
+            "description": "Workflow script contract:\n- Entry point: define `async def main(input)`. A run's output is the value returned by\n  `main`.\n- Injected capability API, available without imports:\n  - `agent(input, *, agent_id=None, output_schema=None, model=None, label=None)`: invoke a generic or named agent and await its result.\n  - `invoke_workflow(workflow_id, input, *, version=None, output_schema=None, label=None, as_agent=None, request_ref=None)`: invoke another workflow as a sub-run and await its result (the run dual of `agent`). `version` pins a registered version; omitted, the version current at launch runs. The sub-run runs under this run's surface intersected with the target's, and binds this run's vaults; a failed or gone sub-run raises like a failed `agent`. `as_agent={\"agent_id\": ..., \"version\": N}` also intersects the sub-run's surface with that agent version's; only a run an operator launched may pass it. `request_ref` (with `input=None`) hands the sub-run the request this run was created with: it starts with that request as a workflow-as-model run would.\n  - `tool(name, input)`: invoke a declared tool; tool errors are returned, not raised. An operator run that declares the replay tools can read an agent's past requests: `tool(\"sample_requests\", {\"agent_id\", \"start\", \"end\", \"n\", \"seed\", \"cluster_cap\"})` returns `{\"items\": [...]}`, a seeded sample of the agent's answered requests in `[start, end)` (ISO-8601 times), each with a `request_ref`, its session, time, model, `response_event_id` and whether it is `missing`. `tool(\"get_request\", {\"request_ref\", \"model\"})` rebuilds one as `{messages, tools, params, fidelity}`. A ref a sample returned can be passed to `call_llm(request_ref=)`, `invoke_workflow(request_ref=)` and `get_request`.\n  - `call_llm(request)`: run one raw inference turn and await the assistant turn. `request` carries `model` (omit to use the run's default child model; a `workflow:` target is rejected), `messages` (required), optional `tools` (schemas OFFERED \u2014 the model may request a call, but call_llm never runs it), and optional `params` (provider knobs). The result is `{\"content\", \"tool_calls\", \"finish_reason\", \"usage\", \"cost\", \"message\"}`, or `{\"error\": ...}` \u2014 a model error is returned, not raised. Its cost is metered against this run's `budget_usd` ceiling, so a budget-exhausted run refuses further `call_llm`. Use it to route/judge/fact-check around inference; use `agent(...)` when you want the tool calls executed. `call_llm(request_ref=input[\"request_ref\"], model=None)` sends the request this run was created with instead, rendered for `model`; with the model it was captured for it keeps that request's provider params, with another it sends none. Any other ref resolves as an error value.\n  - `gate()`: suspend until an external resume delivers a value.\n  - `budget()`: read this run's shared child-spend budget, or None when unset.\n  - `sub_runs()`: read facts about every session and run this run created, directly or through descendants: `{\"nodes\": [...], \"truncated\": bool}`, each node with its kind, label, workflow or agent and the version that ran, status, timings, and usage per model. Metadata only.\n  - `parallel(thunks)`: run zero-argument callables concurrently (for example,\n    `lambda: agent(...)`). A failed agent branch yields `None` at the barrier instead\n    of raising. Fan-out width is capped by `MAX_PARALLEL_FANOUT` (currently 1000).\n  - `pipeline(items, *stages)`: run each item through staged transforms concurrently.\n  - `log(msg)`: record progress on the run journal.\n  - `phase(label)`: record a phase marker on the run journal.\n- Shell execution: `tool('bash', {\"command\": str, \"timeout_seconds\": float | None})` runs the\n  command in a per-run sandbox (provisioned lazily on first use, in the run's\n  environment). `bash` must be a member of the workflow's declared tools or the call\n  resolves to a `{\"error\": ...}` value. Result: `{exit_code, stdout, stderr, timed_out,\n  truncated}` \u2014 a nonzero exit or in-command timeout is a successful result to branch\n  on, not an error.\n- Crash semantics: at-least-once at the call boundary. A capability call interrupted by\n  a crash re-runs on resume; completed calls never re-run. The sandbox filesystem is\n  ephemeral scratch \u2014 write re-run-tolerant commands (e.g. `rm -rf dir && git clone ...`).\n- Irreversible external effects (a POST that charges, sends, or publishes): a per-call\n  idempotency token (stable across crash re-runs of the same call, distinct per call) is\n  available so you can have the external service drop a re-fired duplicate, or knowingly\n  accept at-least-once. Both deliveries opt in the same way with the same `$AIOS_IDEMPOTENCY_KEY`\n  ergonomic: in `tool('bash')` the environment exposes `$AIOS_IDEMPOTENCY_KEY`; in\n  `tool('http_request')` pass the sentinel string `\"$AIOS_IDEMPOTENCY_KEY\"` as an\n  `Idempotency-Key` header value and the worker substitutes the real token before dispatch.\n- Partition rule: put re-run-tolerant mechanical work in `tool('bash')`; put work whose\n  uncertain completion needs judgment to resolve inside `agent(...)`.\n- Environment: the SCRIPT runs in a deterministic, credential-free, isolated child\n  process \u2014 imports restricted to a curated stdlib allowlist, no network or filesystem\n  access from script code itself; all effects go through the capability API. The\n  `tool('bash')` sandbox is different: it has a filesystem (ephemeral scratch) and\n  network egress per the run's ENVIRONMENT network policy (Unrestricted, or Limited to\n  the environment's allowed hosts) \u2014 commands can curl, clone, and install within that\n  policy.\n\nMinimal example:\n```python\nasync def main(input):\n    result = await agent(\n        {\"task\": input[\"task\"]},\n        agent_id=input[\"agent_id\"],\n    )\n    return result\n```\n"
           },
           "input_schema": {
             "anyOf": [
@@ -22938,7 +24021,7 @@
               }
             ],
             "title": "Script",
-            "description": "Workflow script contract:\n- Entry point: define `async def main(input)`. A run's output is the value returned by\n  `main`.\n- Injected capability API, available without imports:\n  - `agent(input, *, agent_id=None, output_schema=None, model=None, label=None)`: invoke a generic or named agent and await its result.\n  - `invoke_workflow(workflow_id, input, *, output_schema=None, label=None)`: invoke another workflow as a sub-run and await its result (the run dual of `agent`). The sub-run runs under this run's surface intersected with the target's; a failed or gone sub-run raises like a failed `agent`.\n  - `tool(name, input)`: invoke a declared tool; tool errors are returned, not raised.\n  - `call_llm(request)`: run one raw inference turn and await the assistant turn. `request` carries `model` (omit to use the run's default child model; a `workflow:` target is rejected), `messages` (required), optional `tools` (schemas OFFERED \u2014 the model may request a call, but call_llm never runs it), and optional `params` (provider knobs). The result is `{\"content\", \"tool_calls\", \"finish_reason\", \"usage\", \"cost\", \"message\"}`, or `{\"error\": ...}` \u2014 a model error is returned, not raised. Its cost is metered against this run's `budget_usd` ceiling, so a budget-exhausted run refuses further `call_llm`. Use it to route/judge/fact-check around inference; use `agent(...)` when you want the tool calls executed.\n  - `gate()`: suspend until an external resume delivers a value.\n  - `budget()`: read this run's shared child-spend budget, or None when unset.\n  - `parallel(thunks)`: run zero-argument callables concurrently (for example,\n    `lambda: agent(...)`). A failed agent branch yields `None` at the barrier instead\n    of raising. Fan-out width is capped by `MAX_PARALLEL_FANOUT` (currently 1000).\n  - `pipeline(items, *stages)`: run each item through staged transforms concurrently.\n  - `log(msg)`: record progress on the run journal.\n  - `phase(label)`: record a phase marker on the run journal.\n- Shell execution: `tool('bash', {\"command\": str, \"timeout_seconds\": float | None})` runs the\n  command in a per-run sandbox (provisioned lazily on first use, in the run's\n  environment). `bash` must be a member of the workflow's declared tools or the call\n  resolves to a `{\"error\": ...}` value. Result: `{exit_code, stdout, stderr, timed_out,\n  truncated}` \u2014 a nonzero exit or in-command timeout is a successful result to branch\n  on, not an error.\n- Crash semantics: at-least-once at the call boundary. A capability call interrupted by\n  a crash re-runs on resume; completed calls never re-run. The sandbox filesystem is\n  ephemeral scratch \u2014 write re-run-tolerant commands (e.g. `rm -rf dir && git clone ...`).\n- Irreversible external effects (a POST that charges, sends, or publishes): a per-call\n  idempotency token (stable across crash re-runs of the same call, distinct per call) is\n  available so you can have the external service drop a re-fired duplicate, or knowingly\n  accept at-least-once. Both deliveries opt in the same way with the same `$AIOS_IDEMPOTENCY_KEY`\n  ergonomic: in `tool('bash')` the environment exposes `$AIOS_IDEMPOTENCY_KEY`; in\n  `tool('http_request')` pass the sentinel string `\"$AIOS_IDEMPOTENCY_KEY\"` as an\n  `Idempotency-Key` header value and the worker substitutes the real token before dispatch.\n- Partition rule: put re-run-tolerant mechanical work in `tool('bash')`; put work whose\n  uncertain completion needs judgment to resolve inside `agent(...)`.\n- Environment: the SCRIPT runs in a deterministic, credential-free, isolated child\n  process \u2014 imports restricted to a curated stdlib allowlist, no network or filesystem\n  access from script code itself; all effects go through the capability API. The\n  `tool('bash')` sandbox is different: it has a filesystem (ephemeral scratch) and\n  network egress per the run's ENVIRONMENT network policy (Unrestricted, or Limited to\n  the environment's allowed hosts) \u2014 commands can curl, clone, and install within that\n  policy.\n\nMinimal example:\n```python\nasync def main(input):\n    result = await agent(\n        {\"task\": input[\"task\"]},\n        agent_id=input[\"agent_id\"],\n    )\n    return result\n```\n"
+            "description": "Workflow script contract:\n- Entry point: define `async def main(input)`. A run's output is the value returned by\n  `main`.\n- Injected capability API, available without imports:\n  - `agent(input, *, agent_id=None, output_schema=None, model=None, label=None)`: invoke a generic or named agent and await its result.\n  - `invoke_workflow(workflow_id, input, *, version=None, output_schema=None, label=None, as_agent=None, request_ref=None)`: invoke another workflow as a sub-run and await its result (the run dual of `agent`). `version` pins a registered version; omitted, the version current at launch runs. The sub-run runs under this run's surface intersected with the target's, and binds this run's vaults; a failed or gone sub-run raises like a failed `agent`. `as_agent={\"agent_id\": ..., \"version\": N}` also intersects the sub-run's surface with that agent version's; only a run an operator launched may pass it. `request_ref` (with `input=None`) hands the sub-run the request this run was created with: it starts with that request as a workflow-as-model run would.\n  - `tool(name, input)`: invoke a declared tool; tool errors are returned, not raised. An operator run that declares the replay tools can read an agent's past requests: `tool(\"sample_requests\", {\"agent_id\", \"start\", \"end\", \"n\", \"seed\", \"cluster_cap\"})` returns `{\"items\": [...]}`, a seeded sample of the agent's answered requests in `[start, end)` (ISO-8601 times), each with a `request_ref`, its session, time, model, `response_event_id` and whether it is `missing`. `tool(\"get_request\", {\"request_ref\", \"model\"})` rebuilds one as `{messages, tools, params, fidelity}`. A ref a sample returned can be passed to `call_llm(request_ref=)`, `invoke_workflow(request_ref=)` and `get_request`.\n  - `call_llm(request)`: run one raw inference turn and await the assistant turn. `request` carries `model` (omit to use the run's default child model; a `workflow:` target is rejected), `messages` (required), optional `tools` (schemas OFFERED \u2014 the model may request a call, but call_llm never runs it), and optional `params` (provider knobs). The result is `{\"content\", \"tool_calls\", \"finish_reason\", \"usage\", \"cost\", \"message\"}`, or `{\"error\": ...}` \u2014 a model error is returned, not raised. Its cost is metered against this run's `budget_usd` ceiling, so a budget-exhausted run refuses further `call_llm`. Use it to route/judge/fact-check around inference; use `agent(...)` when you want the tool calls executed. `call_llm(request_ref=input[\"request_ref\"], model=None)` sends the request this run was created with instead, rendered for `model`; with the model it was captured for it keeps that request's provider params, with another it sends none. Any other ref resolves as an error value.\n  - `gate()`: suspend until an external resume delivers a value.\n  - `budget()`: read this run's shared child-spend budget, or None when unset.\n  - `sub_runs()`: read facts about every session and run this run created, directly or through descendants: `{\"nodes\": [...], \"truncated\": bool}`, each node with its kind, label, workflow or agent and the version that ran, status, timings, and usage per model. Metadata only.\n  - `parallel(thunks)`: run zero-argument callables concurrently (for example,\n    `lambda: agent(...)`). A failed agent branch yields `None` at the barrier instead\n    of raising. Fan-out width is capped by `MAX_PARALLEL_FANOUT` (currently 1000).\n  - `pipeline(items, *stages)`: run each item through staged transforms concurrently.\n  - `log(msg)`: record progress on the run journal.\n  - `phase(label)`: record a phase marker on the run journal.\n- Shell execution: `tool('bash', {\"command\": str, \"timeout_seconds\": float | None})` runs the\n  command in a per-run sandbox (provisioned lazily on first use, in the run's\n  environment). `bash` must be a member of the workflow's declared tools or the call\n  resolves to a `{\"error\": ...}` value. Result: `{exit_code, stdout, stderr, timed_out,\n  truncated}` \u2014 a nonzero exit or in-command timeout is a successful result to branch\n  on, not an error.\n- Crash semantics: at-least-once at the call boundary. A capability call interrupted by\n  a crash re-runs on resume; completed calls never re-run. The sandbox filesystem is\n  ephemeral scratch \u2014 write re-run-tolerant commands (e.g. `rm -rf dir && git clone ...`).\n- Irreversible external effects (a POST that charges, sends, or publishes): a per-call\n  idempotency token (stable across crash re-runs of the same call, distinct per call) is\n  available so you can have the external service drop a re-fired duplicate, or knowingly\n  accept at-least-once. Both deliveries opt in the same way with the same `$AIOS_IDEMPOTENCY_KEY`\n  ergonomic: in `tool('bash')` the environment exposes `$AIOS_IDEMPOTENCY_KEY`; in\n  `tool('http_request')` pass the sentinel string `\"$AIOS_IDEMPOTENCY_KEY\"` as an\n  `Idempotency-Key` header value and the worker substitutes the real token before dispatch.\n- Partition rule: put re-run-tolerant mechanical work in `tool('bash')`; put work whose\n  uncertain completion needs judgment to resolve inside `agent(...)`.\n- Environment: the SCRIPT runs in a deterministic, credential-free, isolated child\n  process \u2014 imports restricted to a curated stdlib allowlist, no network or filesystem\n  access from script code itself; all effects go through the capability API. The\n  `tool('bash')` sandbox is different: it has a filesystem (ephemeral scratch) and\n  network egress per the run's ENVIRONMENT network policy (Unrestricted, or Limited to\n  the environment's allowed hosts) \u2014 commands can curl, clone, and install within that\n  policy.\n\nMinimal example:\n```python\nasync def main(input):\n    result = await agent(\n        {\"task\": input[\"task\"]},\n        agent_id=input[\"agent_id\"],\n    )\n    return result\n```\n"
           },
           "input_schema": {
             "anyOf": [

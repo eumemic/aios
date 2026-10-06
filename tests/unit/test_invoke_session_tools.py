@@ -279,7 +279,7 @@ async def test_invoke_workflow_create_run_then_await(monkeypatch: Any) -> None:
     kwargs = run_mock.await_args.kwargs
     assert kwargs["workflow_id"] == "wf_1"
     assert kwargs["environment_id"] == "env_1"
-    assert kwargs["launcher_session_id"] == _CALLER
+    assert kwargs["authority"].session_id == _CALLER
     # Stage-5b: the dropped create_run/await_run model tools' run-shaping args
     # (vault attenuation + spend ceiling) now ride on call_workflow itself.
     assert kwargs["vault_ids"] == ["vlt_1"]

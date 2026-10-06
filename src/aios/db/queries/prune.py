@@ -57,20 +57,64 @@ from typing import Any
 import asyncpg
 
 
+def _replay_tree(alias: str) -> str:
+    """A run in a replay tree (#2475): one that declares a replay tool, or a sub-run of
+    one. Exactly the runs that are operator-principal yet ``session``-visible: the
+    visibility trigger (0191) stamps a replay run ``session`` and its sub-runs inherit
+    it, while every other ``session`` run (a workflow-as-model turn, its sub-runs) acts
+    for a session. Any of them may hold requests it read, in its journal or, for a
+    sub-run handed one as plain input, on its row."""
+    return f"({alias}.principal = 'operator' AND {alias}.visibility = 'session')"
+
+
+def _request_copy(alias: str) -> str:
+    """A run whose journal holds a copy of a session's request (#2474): one with a
+    request ref (a workflow-as-model turn, or an arm handed a ref), a workflow-as-model
+    run from before refs, or a run in a replay tree. These get the short
+    ``wf_runs_request_copy_*`` grace and retention: the request is rebuildable from the
+    session log, and nothing reads their journal once they're terminal."""
+    return (
+        f"({alias}.request_ref_id IS NOT NULL"
+        f" OR {alias}.caller->>'purpose' = 'model_dispatch'"
+        f" OR {_replay_tree(alias)})"
+    )
+
+
+def _days(alias: str, default: str, request_copy: str) -> str:
+    """The run's own window: ``request_copy`` days for a request-copy run, else ``default``."""
+    return f"CASE WHEN {_request_copy(alias)} THEN {request_copy}::int ELSE {default}::int END"
+
+
 async def prune_archived_runs(
-    conn: asyncpg.Connection[Any], *, retention_days: int, row_limit: int = 500
+    conn: asyncpg.Connection[Any],
+    *,
+    retention_days: int,
+    request_copy_retention_days: int = 1,
+    row_limit: int = 500,
 ) -> int:
-    """Delete bounded terminal child detail while retaining durable run summaries."""
+    """Delete bounded terminal child detail while retaining durable run summaries.
+
+    A request-copy run (see :func:`_request_copy`) is pruned after
+    ``request_copy_retention_days``, every other run after ``retention_days``. Pruning
+    also clears the ``input`` of a run that may carry a full request there, since the
+    row is kept forever: a workflow-as-model run from before #2474, and a replay-tree
+    sub-run (an eval arm handed a request as plain input). A replay-tree root keeps
+    its input: the operator gave it, and it is the eval's own parameters.
+    """
     deleted = 0
+    # The LEAST bound is the index range (``wf_runs_prune_eligibility_idx``); the
+    # per-row window then filters inside it.
     rows = await conn.fetch(
-        """SELECT id FROM wf_runs
+        f"""SELECT id FROM wf_runs r
              WHERE archived_at IS NOT NULL
-               AND archived_at < now() - make_interval(days => $1)
+               AND archived_at < now() - make_interval(days => LEAST($1::int, $2::int))
+               AND archived_at < now() - make_interval(days => {_days("r", "$1", "$2")})
                AND terminal_summary IS NOT NULL
                AND journal_pruned_at IS NULL
                AND status IN ('completed','errored','cancelled')
-             ORDER BY archived_at, id LIMIT $2""",
+             ORDER BY archived_at, id LIMIT $3""",
         retention_days,
+        request_copy_retention_days,
         row_limit,
     )
     for row in rows:
@@ -81,10 +125,12 @@ async def prune_archived_runs(
                     SELECT child.ctid FROM {table} child JOIN wf_runs run ON run.id=child.run_id
                     WHERE child.run_id=$1 AND run.status IN ('completed','errored','cancelled')
                       AND run.terminal_summary IS NOT NULL
-                      AND run.archived_at < now() - make_interval(days => $2)
-                    ORDER BY child.{order} LIMIT $3)""",
+                      AND run.archived_at < now() - make_interval(
+                          days => {_days("run", "$2", "$3")})
+                    ORDER BY child.{order} LIMIT $4)""",
                 run_id,
                 retention_days,
+                request_copy_retention_days,
                 row_limit,
             )
             deleted += int(result.split()[-1])
@@ -95,24 +141,32 @@ async def prune_archived_runs(
         )
         if not remaining:
             await conn.execute(
-                "UPDATE wf_runs SET journal_pruned_at=now() WHERE id=$1 "
-                "AND status IN ('completed','errored','cancelled')",
+                "UPDATE wf_runs SET journal_pruned_at=now(), input = CASE "
+                "WHEN caller->>'purpose' = 'model_dispatch' "
+                f"OR (parent_run_id IS NOT NULL AND {_replay_tree('wf_runs')}) "
+                "THEN NULL ELSE input END "
+                "WHERE id=$1 AND status IN ('completed','errored','cancelled')",
                 run_id,
             )
     return deleted
 
 
 async def reconcile_terminal_archival_batch(
-    conn: asyncpg.Connection[Any], *, grace_days: int = 7, row_limit: int = 500
+    conn: asyncpg.Connection[Any],
+    *,
+    grace_days: int = 7,
+    request_copy_grace_days: int = 0,
+    row_limit: int = 500,
 ) -> int:
     """Archive a bounded batch of terminal runs older than the grace window.
 
     The terminal transition updates ``updated_at``, making it the age key for
-    historical rows that predate automatic archival. Already-archived legacy
+    historical rows that predate automatic archival. A request-copy run (see
+    :func:`_request_copy`) uses ``request_copy_grace_days``. Already-archived legacy
     rows missing their durable summary are also projected, irrespective of age.
     """
     result = await conn.execute(
-        """WITH candidates AS (
+        f"""WITH candidates AS (
                SELECT r.id, e.payload
                  FROM wf_runs r
                  LEFT JOIN LATERAL (
@@ -122,7 +176,9 @@ async def reconcile_terminal_archival_batch(
                  ) e ON true
                 WHERE r.status IN ('completed','errored','cancelled')
                   AND ((r.archived_at IS NULL
-                        AND r.updated_at < now() - make_interval(days => $1))
+                        AND r.updated_at < now() - make_interval(days => LEAST($1::int, $3::int))
+                        AND r.updated_at < now() - make_interval(
+                            days => {_days("r", "$1", "$3")}))
                        OR (r.archived_at IS NOT NULL AND r.terminal_summary IS NULL))
                 ORDER BY r.updated_at, r.id
                 LIMIT $2
@@ -142,6 +198,7 @@ async def reconcile_terminal_archival_batch(
                AND (r.archived_at IS NULL OR r.terminal_summary IS NULL)""",
         grace_days,
         row_limit,
+        request_copy_grace_days,
     )
     return int(result.split()[-1])
 

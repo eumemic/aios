@@ -37,6 +37,7 @@ from aios.harness import runtime
 from aios.jobs.app import defer_run_wake
 from aios.logging import get_logger
 from aios.mcp.client import resolve_auth_for_target_url_run
+from aios.models.agents import REPLAY_TOOL_TYPES
 from aios.models.workflows import RunReader, WfRun
 from aios.services import triggers as triggers_service
 from aios.services import workflows as wf_service
@@ -51,6 +52,7 @@ from aios.tools.workflow_management import (
     _GetRunArgs,
     _ListRunsArgs,
 )
+from aios.workflows import run_replay
 from aios.workflows.idempotency_key import (
     AIOS_IDEMPOTENCY_KEY_SENTINEL,
     idempotency_key,
@@ -92,6 +94,7 @@ def _substitute_idempotency_sentinel(
 # correlate the GitHub blackboard against which runs are live. The other sandbox builtins
 # (read/write/edit/glob/grep) and authed-MCP / search_events stay out of scope (later
 # slices), so a ``tool('read')`` is a recoverable not-callable value at the run frontier.
+# The replay tools (#2475, :mod:`aios.workflows.run_replay`) run on the worker too.
 RUN_TOOLS: frozenset[str] = frozenset(
     {
         "web_search",
@@ -101,6 +104,7 @@ RUN_TOOLS: frozenset[str] = frozenset(
         "list_runs",
         "get_run",
         "list_account_triggers",
+        *REPLAY_TOOL_TYPES,
     }
 )
 
@@ -187,7 +191,16 @@ def gate_run_tool(run: WfRun, tool_name: str) -> dict[str, Any] | None:
     Returns the recoverable ``{"error": …}`` value to surface to the script when
     either check fails (the script branches on it — gating is never run-terminal),
     or ``None`` when the call is admitted.
+
+    A replay tool (#2475) also needs the run to act for the operator: the #794 lattice
+    position is "operator principal AND a declared tool no agent can hold", never one
+    without the other.
     """
+    if tool_name in REPLAY_TOOL_TYPES:
+        if run.principal != "operator":
+            return {"error": f"tool {tool_name!r} is only callable from an operator run"}
+        if tool_name not in {t.type for t in run.tools if t.enabled}:
+            return {"error": f"tool {tool_name!r} is not in the workflow's declared tools"}
     if tool_name not in RUN_TOOLS:
         return {"error": f"tool {tool_name!r} is not callable from a workflow run"}
     if tool_name not in {t.type for t in run.tools if t.enabled}:
@@ -297,6 +310,9 @@ async def invoke_run_tool(
     the ``http_request`` branch substitutes for an author's sentinel header."""
     if (err := gate_run_tool(run, tool_name)) is not None:
         return err
+    if tool_name in REPLAY_TOOL_TYPES:
+        # Run-only tools: no session registry entry, so they validate their own args.
+        return await run_replay.invoke_replay_tool(run=run, tool_name=tool_name, args=tool_input)
 
     args = tool_input if isinstance(tool_input, dict) else {}
     schema_error = validate_arguments(args, registry.get(tool_name).parameters_schema)

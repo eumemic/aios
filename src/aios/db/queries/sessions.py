@@ -1793,8 +1793,11 @@ async def increment_session_usage(
     cache_read_input_tokens: int = 0,
     cache_creation_input_tokens: int = 0,
     cost_microusd: int = 0,
+    model: str | None,
 ) -> int:
-    """Atomically add token and spend counts; return the account spend total."""
+    """Atomically add token and spend counts; return the account spend total.
+
+    ``model`` is the model the inference called, recorded on its ledger row."""
     deltas = (
         max(0, input_tokens),
         max(0, output_tokens),
@@ -1821,11 +1824,12 @@ async def increment_session_usage(
             await conn.execute(
                 "INSERT INTO inference_usage_ledger "
                 "(account_id, session_id, input_tokens, output_tokens, "
-                " cache_read_input_tokens, cache_creation_input_tokens, cost_microusd) "
-                "VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                " cache_read_input_tokens, cache_creation_input_tokens, cost_microusd, model) "
+                "VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
                 account_id,
                 session_id,
                 *deltas,
+                model,
             )
         spent = await conn.fetchval(
             "UPDATE accounts SET spent_microusd = spent_microusd + $1 "

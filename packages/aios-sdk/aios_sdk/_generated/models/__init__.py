@@ -30,6 +30,7 @@ from .agent_version_preempt_policy import AgentVersionPreemptPolicy
 from .allow_all import AllowAll
 from .allow_list import AllowList
 from .allow_senders import AllowSenders
+from .as_agent import AsAgent
 from .attributed_usage import AttributedUsage
 from .await_response import AwaitResponse
 from .await_response_error_type_0 import AwaitResponseErrorType0
@@ -126,6 +127,7 @@ from .list_response_inbound_grant import ListResponseInboundGrant
 from .list_response_memory_store import ListResponseMemoryStore
 from .list_response_memory_version import ListResponseMemoryVersion
 from .list_response_model_provider import ListResponseModelProvider
+from .list_response_operator_trigger_echo import ListResponseOperatorTriggerEcho
 from .list_response_recent_chat import ListResponseRecentChat
 from .list_response_runtime_token import ListResponseRuntimeToken
 from .list_response_session import ListResponseSession
@@ -178,6 +180,9 @@ from .mint_account_request import MintAccountRequest
 from .mint_account_response import MintAccountResponse
 from .mint_key_request import MintKeyRequest
 from .mint_key_response import MintKeyResponse
+from .missing_request import MissingRequest
+from .missing_request_missing import MissingRequestMissing
+from .missing_request_record import MissingRequestRecord
 from .model_provider import ModelProvider
 from .model_provider_create import ModelProviderCreate
 from .model_provider_update import ModelProviderUpdate
@@ -191,6 +196,17 @@ from .o_auth_start_response import OAuthStartResponse
 from .obligation import Obligation
 from .obligation_output_schema_type_0 import ObligationOutputSchemaType0
 from .one_shot_source import OneShotSource
+from .operator_trigger_create import OperatorTriggerCreate
+from .operator_trigger_create_metadata import OperatorTriggerCreateMetadata
+from .operator_trigger_echo import OperatorTriggerEcho
+from .operator_trigger_echo_last_fire_status_type_0 import (
+    OperatorTriggerEchoLastFireStatusType0,
+)
+from .operator_trigger_echo_metadata import OperatorTriggerEchoMetadata
+from .operator_trigger_update import OperatorTriggerUpdate
+from .operator_trigger_update_metadata_type_0 import OperatorTriggerUpdateMetadataType0
+from .operator_workflow_action import OperatorWorkflowAction
+from .operator_workflow_action_replace import OperatorWorkflowActionReplace
 from .post_connector_runtime_chat_lifecycle_response_post_connector_runtime_chat_lifecycle import (
     PostConnectorRuntimeChatLifecycleResponsePostConnectorRuntimeChatLifecycle,
 )
@@ -200,7 +216,12 @@ from .post_connector_runtime_lifecycle_response_post_connector_runtime_lifecycle
 from .post_connector_runtime_session_lifecycle_response_post_connector_runtime_session_lifecycle import (
     PostConnectorRuntimeSessionLifecycleResponsePostConnectorRuntimeSessionLifecycle,
 )
+from .rebuilt_request import RebuiltRequest
+from .rebuilt_request_fidelity import RebuiltRequestFidelity
+from .rebuilt_request_record import RebuiltRequestRecord
+from .rebuilt_request_request import RebuiltRequestRequest
 from .recent_chat import RecentChat
+from .request_ref import RequestRef
 from .require_approval import RequireApproval
 from .run_completion_source import RunCompletionSource
 from .run_completion_source_replace import RunCompletionSourceReplace
@@ -302,6 +323,7 @@ from .tool_spec_permission_type_0 import ToolSpecPermissionType0
 from .tool_spec_transport_type_0 import ToolSpecTransportType0
 from .tool_spec_type_type_0 import ToolSpecTypeType0
 from .tool_spec_type_type_1 import ToolSpecTypeType1
+from .tool_spec_type_type_2 import ToolSpecTypeType2
 from .tools_schema_update import ToolsSchemaUpdate
 from .tools_schema_update_tools_item import ToolsSchemaUpdateToolsItem
 from .trace_entry import TraceEntry
@@ -426,6 +448,7 @@ __all__ = (
     "AllowAll",
     "AllowList",
     "AllowSenders",
+    "AsAgent",
     "AttributedUsage",
     "AwaitingToolCall",
     "AwaitingToolCallKind",
@@ -514,6 +537,7 @@ __all__ = (
     "ListResponseMemoryStore",
     "ListResponseMemoryVersion",
     "ListResponseModelProvider",
+    "ListResponseOperatorTriggerEcho",
     "ListResponseRecentChat",
     "ListResponseRuntimeToken",
     "ListResponseSession",
@@ -564,6 +588,9 @@ __all__ = (
     "MintAccountResponse",
     "MintKeyRequest",
     "MintKeyResponse",
+    "MissingRequest",
+    "MissingRequestMissing",
+    "MissingRequestRecord",
     "ModelProvider",
     "ModelProviderCreate",
     "ModelProviderUpdate",
@@ -575,10 +602,24 @@ __all__ = (
     "Obligation",
     "ObligationOutputSchemaType0",
     "OneShotSource",
+    "OperatorTriggerCreate",
+    "OperatorTriggerCreateMetadata",
+    "OperatorTriggerEcho",
+    "OperatorTriggerEchoLastFireStatusType0",
+    "OperatorTriggerEchoMetadata",
+    "OperatorTriggerUpdate",
+    "OperatorTriggerUpdateMetadataType0",
+    "OperatorWorkflowAction",
+    "OperatorWorkflowActionReplace",
     "PostConnectorRuntimeChatLifecycleResponsePostConnectorRuntimeChatLifecycle",
     "PostConnectorRuntimeLifecycleResponsePostConnectorRuntimeLifecycle",
     "PostConnectorRuntimeSessionLifecycleResponsePostConnectorRuntimeSessionLifecycle",
+    "RebuiltRequest",
+    "RebuiltRequestFidelity",
+    "RebuiltRequestRecord",
+    "RebuiltRequestRequest",
     "RecentChat",
+    "RequestRef",
     "RequireApproval",
     "RunCompletionSource",
     "RunCompletionSourceReplace",
@@ -668,6 +709,7 @@ __all__ = (
     "ToolSpecTransportType0",
     "ToolSpecTypeType0",
     "ToolSpecTypeType1",
+    "ToolSpecTypeType2",
     "ToolsSchemaUpdate",
     "ToolsSchemaUpdateToolsItem",
     "TraceEntry",

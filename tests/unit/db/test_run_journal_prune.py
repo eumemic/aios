@@ -18,6 +18,7 @@ class _Run:
     journal_pruned: bool = False
     events: int = 1
     signals: int = 0
+    request_copy: bool = False
 
 
 class _PruneConnection:
@@ -35,12 +36,14 @@ class _PruneConnection:
         self.delete_attempts: list[str] = []
 
     @staticmethod
-    def _eligible(sql: str, run: _Run, retention_days: int) -> bool:
+    def _eligible(sql: str, run: _Run, retention_days: int, request_copy_days: int) -> bool:
+        window = request_copy_days if run.request_copy else retention_days
         checks = (
             ("archived_at IS NOT NULL", run.archived_age_days is not None),
             (
-                "archived_at < now() - make_interval(days => $1)",
-                run.archived_age_days is not None and run.archived_age_days > retention_days,
+                # The run's own window: the request-copy retention ($2) or the default ($1).
+                "THEN $2::int ELSE $1::int END",
+                run.archived_age_days is not None and run.archived_age_days > window,
             ),
             ("terminal_summary IS NOT NULL", run.has_summary),
             ("journal_pruned_at IS NULL", not run.journal_pruned),
@@ -51,9 +54,13 @@ class _PruneConnection:
         )
         return all(value for predicate, value in checks if predicate in sql)
 
-    async def fetch(self, sql: str, retention_days: int, row_limit: int) -> list[dict[str, str]]:
+    async def fetch(
+        self, sql: str, retention_days: int, request_copy_days: int, row_limit: int
+    ) -> list[dict[str, str]]:
         self.candidates = [
-            run_id for run_id, run in self.runs.items() if self._eligible(sql, run, retention_days)
+            run_id
+            for run_id, run in self.runs.items()
+            if self._eligible(sql, run, retention_days, request_copy_days)
         ][:row_limit]
         if self.mutate_after_fetch:
             # Model rows becoming unsafe between candidate selection and child DELETE.
@@ -65,13 +72,15 @@ class _PruneConnection:
 
     async def execute(self, sql: str, *args: Any) -> str:
         if sql.startswith("DELETE"):
-            run_id, retention_days, row_limit = args
+            run_id, retention_days, request_copy_days, row_limit = args
             self.delete_attempts.append(run_id)
             run = self.runs[run_id]
-            # DELETE uses $2 for retention, while the candidate query uses $1.
-            normalized_sql = sql.replace("days => $2", "days => $1")
+            # DELETE numbers the windows $2/$3, the candidate query $1/$2.
+            normalized_sql = sql.replace(
+                "THEN $3::int ELSE $2::int END", "THEN $2::int ELSE $1::int END"
+            )
             deleted = 0
-            if self._eligible(normalized_sql, run, retention_days):
+            if self._eligible(normalized_sql, run, retention_days, request_copy_days):
                 field = "events" if "wf_run_events" in sql else "signals"
                 deleted = min(getattr(run, field), row_limit)
                 setattr(run, field, getattr(run, field) - deleted)
@@ -118,3 +127,19 @@ async def test_child_delete_rechecks_eligibility_if_candidates_become_unsafe() -
 
     assert set(conn.delete_attempts) == set(runs)
     assert all(run.events == 1 for run in runs.values())
+
+
+@pytest.mark.asyncio
+async def test_a_request_copy_run_takes_the_short_retention() -> None:
+    """A run whose journal holds a request copy (#2474) is pruned on its own window;
+    every other run of the same age keeps the default one."""
+    runs = {
+        "request-copy": _Run(2, "completed", True, request_copy=True),
+        "default": _Run(2, "completed", True),
+    }
+    conn = _PruneConnection(runs)
+
+    assert await prune_archived_runs(conn, retention_days=30, request_copy_retention_days=1) == 1
+
+    assert conn.candidates == ["request-copy"]
+    assert runs["default"].events == 1

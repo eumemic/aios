@@ -47,8 +47,10 @@ import asyncpg
 
 from aios.harness.completion import LlmRequest
 from aios.harness.model_binding import WorkflowModelRef
+from aios.harness.request_capture import captured_params
 from aios.ids import WORKFLOW_RUN, make_id
 from aios.logging import get_logger
+from aios.models.workflows import RequestRef, SessionAuthority
 from aios.services import sessions as sessions_service
 from aios.services import tasks as tasks_service
 from aios.services import workflows as wf_service
@@ -152,14 +154,16 @@ async def launch_model_workflow_park(
     request: LlmRequest,
     reacting_to: int,
     account_id: str,
+    request_record: dict[str, Any],
     run_id: str | None = None,
 ) -> str:
     """Open an awaited run of the bound workflow and park owing an assistant message.
 
-    Journals the ``model_workflow_park`` event (run id + sealed ``reacting_to``)
-    BEFORE launching the run under that pre-assigned id (#2469), then spawns the
-    fire-and-forget harvest task. Returns the bound run id. The caller ends the step
-    after this — the inner deliberation resolves async and a later wake harvests it.
+    Journals the ``model_workflow_park`` event (run id + sealed ``reacting_to`` +
+    the captured ``request_record``, #2471) BEFORE launching the run under that
+    pre-assigned id (#2469), then spawns the fire-and-forget harvest task. Returns
+    the bound run id. The caller ends the step after this — the inner deliberation
+    resolves async and a later wake harvests it.
 
     Record-then-launch is what makes a crash between the two writes safe: the next
     wake always finds the park, and either waits on its run or, if the run was never
@@ -171,7 +175,7 @@ async def launch_model_workflow_park(
     run_id = run_id or make_id(WORKFLOW_RUN)
     # Seal ``reacting_to`` at park: the harvest re-applies this exact watermark, so a
     # stimulus arriving mid-deliberation doesn't widen what the turn reacted to.
-    await sessions_service.append_event(
+    park = await sessions_service.append_event(
         pool,
         session_id,
         "span",
@@ -179,18 +183,25 @@ async def launch_model_workflow_park(
             "event": PARK_EVENT,
             "run_id": run_id,
             "reacting_to": reacting_to,
+            "request": request_record,
         },
         account_id=account_id,
     )
+    # The park span is the request's record (#2471), so it names the request: the run's
+    # ref and its grant (#2474), which the recipe can pass to ``call_llm`` or hand to a
+    # sub-run instead of the payload.
+    request_ref = RequestRef(session_id=session_id, request_id=park.id)
     session = await sessions_service.get_session_basic(pool, session_id, account_id=account_id)
     # The inference payload is delivered as the run's ``input`` — a bound workflow
     # receives the same named ``LlmRequest`` shape ``call_llm`` consumes, so it can
-    # forward it to its own ``call_llm`` leaf or deliberate over it.
+    # forward it to its own ``call_llm`` leaf or deliberate over it. ``params`` is the
+    # captured params: an inline ``api_key`` never reaches the run row or its journal.
     run_input = {
         "messages": request.messages,
         "tools": request.tools,
-        "params": request.params,
+        "params": captured_params(request.params),
         "session_id": request.session_id,
+        "request_ref": request_ref.model_dump(),
     }
     run, _request_id = await wf_service.launch_awaited_run(
         pool,
@@ -206,8 +217,7 @@ async def launch_model_workflow_park(
         # ``find_unharvested_model_dispatch_parks`` keys on so the crash-recovery sweep
         # can re-derive the park's run from the durable edge alone.
         caller={"kind": "session", "id": session_id, "purpose": "model_dispatch"},
-        launcher_session_id=session_id,
-        parent_run_id=session.parent_run_id,
+        authority=SessionAuthority(session_id, session.parent_run_id),
         # EXPLICIT: a model-dispatch run IS this session's own turn (its output becomes
         # the assistant message), so it deliberately deliberates over the session's live
         # workspace. This used to ride on ``launch_awaited_run``'s ``workspace`` default;
@@ -215,6 +225,7 @@ async def launch_model_workflow_park(
         # rather than inherited by silence.
         workspace="shared",
         run_id=run_id,
+        request_ref=request_ref,
     )
     _launch_harvest_task(pool, session_id, run_id=run.id, account_id=account_id)
     log.info(

@@ -40,7 +40,10 @@ from aios.models.agents import (
 from aios.models.attenuation import Surface, surface_diff, surface_of
 from aios.models.workflows import (
     TERMINAL_RUN_STATUSES,
+    OperatorAuthority,
+    RequestRef,
     RunReader,
+    SessionAuthority,
     WfRun,
     WfRunEvent,
     WfRunUsage,
@@ -92,13 +95,13 @@ async def launch_awaited_run(
     input: Any = None,
     caller: dict[str, Any],
     output_schema: dict[str, Any] | None = None,
-    launcher_session_id: str | None = None,
-    parent_run_id: str | None = None,
+    authority: OperatorAuthority | SessionAuthority,
     vault_ids: list[str] | None = None,
     budget_usd: float | None = None,
     workspace: str = "fresh",
     version: int | None = None,
     run_id: str | None = None,
+    request_ref: RequestRef | None = None,
 ) -> tuple[WfRun, str]:
     """Launch a run as an **awaited** servicer — the one place the run-as-Ask contract lives.
 
@@ -123,8 +126,7 @@ async def launch_awaited_run(
         environment_id=environment_id,
         input=input,
         vault_ids=vault_ids,
-        launcher_session_id=launcher_session_id,
-        parent_run_id=parent_run_id,
+        authority=authority,
         request_id=request_id,
         caller={**caller, "awaited": True},
         request_output_schema=output_schema,
@@ -132,6 +134,7 @@ async def launch_awaited_run(
         workspace=workspace,
         version=version,
         run_id=run_id,
+        request_ref=request_ref,
     )
     return run, request_id
 

@@ -38,15 +38,14 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 from aios.harness._text import join_blocks
 from aios.harness.context import (
     OMISSION_MARKER_UPPER_BOUND_LOCAL,
     build_messages,
-    merge_adjacent_user_messages,
-    reminder_message,
-    stub_missing_reasoning_content,
+    finalize_messages,
 )
 from aios.harness.context_persist import persist_clamped_image_parts, persist_reminder_rows
 from aios.harness.reminders import max_reminders_local, plan_reminders
@@ -254,6 +253,13 @@ class StepContext:
     # churning render, not a working gate.
     reminders_written: tuple[str, ...]
     reminders_skipped: int
+    # What request capture (#2471) records beyond the slate: the account
+    # timezone the envelopes rendered in, and the seqs of the reminder rows this
+    # compose persisted (empty when it persisted none).
+    tz_name: str
+    reminder_seqs: tuple[int, ...]
+    # The session's ``/workspace`` bind source the attachments resolved against.
+    workspace_path: Path | None
 
 
 async def _advance_open_request_scan_floor_best_effort(
@@ -610,32 +616,6 @@ def _build_ssh_servers_block(ssh_servers: list[SshServerSpec]) -> str:
     return "\n\n".join(sections)
 
 
-def _stub_reasoning_content_for_thinking_target(
-    messages: list[dict[str, Any]], model: str
-) -> list[dict[str, Any]]:
-    """Stub ``reasoning_content`` onto bare assistant turns **only** for a
-    thinking-capable target.
-
-    Gated on the same capability axis the message pipeline already computes
-    (``model_descriptor(model).supports_thinking``). For a non-thinking
-    target, ``_strip_to_spec`` (in ``build_messages``) has already removed
-    ``reasoning_content`` from assistant turns; re-adding an empty stub here
-    would contradict that strip pass, so we leave the list untouched. For a
-    thinking target (DeepSeek V4 Flash, Claude family, …), the provider
-    rejects replayed assistant turns lacking the field, so we stub it.
-
-    Mutates and returns the list (the stub pass is in-place); a no-op gate
-    returns the list unchanged.
-    """
-    # Function-local import mirrors context.build_messages to avoid an
-    # import cycle with completion.py.
-    from aios.harness.completion import model_descriptor
-
-    if model_descriptor(model).supports_thinking:
-        stub_missing_reasoning_content(messages)
-    return messages
-
-
 async def compose_step_context(
     *,
     pool: asyncpg.Pool[Any],
@@ -774,21 +754,16 @@ async def compose_step_context(
         tail_origin=ctx.tail_origin,
         needs_trailing_notice=ctx.needs_trailing_notice,
     )
-    if persist_reminders:
+    reminder_seqs = (
         await persist_reminder_rows(pool, plan, session_id=session.id, account_id=account_id)
-    ctx.messages.extend(reminder_message(item.content) for item in plan.writes)
-
-    # Merge consecutive user inbounds into one turn (Anthropic requires
-    # alternating roles). This replaces the old "." placeholder separator,
-    # which degenerate-poisoned literal models like claude-fable-5.
-    messages = merge_adjacent_user_messages(ctx.messages)
-
-    # Unblock thinking-mode targets only: DeepSeek V4 Flash and other
-    # reasoning models reject replayed assistant turns that lack
-    # reasoning_content.  Non-thinking targets had the field correctly
-    # stripped by _strip_to_spec (build_messages); do NOT re-add it for
-    # them — that re-introduces a field the strip pass just removed.
-    messages = _stub_reasoning_content_for_thinking_target(messages, gate_model)
+        if persist_reminders
+        else ()
+    )
+    messages = finalize_messages(
+        ctx.messages,
+        reminder_contents=tuple(item.content for item in plan.writes),
+        model=gate_model,
+    )
 
     return StepContext(
         model=agent.model,
@@ -798,4 +773,7 @@ async def compose_step_context(
         skill_versions=prelude.skill_versions,
         reminders_written=tuple(item.section for item in plan.writes),
         reminders_skipped=plan.skipped,
+        tz_name=tz_name,
+        reminder_seqs=reminder_seqs,
+        workspace_path=workspace_path,
     )

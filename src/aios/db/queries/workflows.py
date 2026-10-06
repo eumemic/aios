@@ -44,7 +44,8 @@ from aios.models.agents import (
 from aios.models.sessions import Err, Ok, Outcome
 from aios.models.workflows import (
     TERMINAL_RUN_STATUSES,
-    RunPrincipal,
+    AsAgent,
+    RequestRef,
     RunReader,
     WfRun,
     WfRunEvent,
@@ -117,6 +118,16 @@ def _row_to_wf_run(row: asyncpg.Record) -> WfRun:
         parent_run_id=row["parent_run_id"],
         launcher_session_id=row["launcher_session_id"],
         principal=row["principal"],
+        as_agent=(
+            AsAgent(agent_id=row["as_agent_id"], version=row["as_agent_version"])
+            if row.get("as_agent_id") is not None
+            else None
+        ),
+        request_ref=(
+            RequestRef(session_id=row["request_ref_session_id"], request_id=row["request_ref_id"])
+            if row.get("request_ref_id") is not None
+            else None
+        ),
         visibility=row["visibility"],
         depth=row["depth"],
         request_id=row.get("request_id"),
@@ -577,33 +588,23 @@ async def get_visible_run(
     return run
 
 
-class RunLineage(NamedTuple):
-    """What a sub-launch reads off its parent run: the DOWN-counting trusted
-    invoke-depth (#1124) and the principal (#2467)."""
+async def get_run_depth(conn: asyncpg.Connection[Any], run_id: str, *, account_id: str) -> int:
+    """Read a run's DOWN-counting trusted invoke-depth (#1124), account-scoped.
 
-    depth: int
-    principal: RunPrincipal
-
-
-async def get_run_lineage(
-    conn: asyncpg.Connection[Any], run_id: str, *, account_id: str
-) -> RunLineage:
-    """Read a run's :class:`RunLineage`, account-scoped.
-
-    ``depth`` is the remaining trusted-edge budget on ``run_id`` — what a sub-launch
-    off this run may carry as ``depth - 1``. ACCOUNT-SCOPED: a foreign or missing parent
-    raises ``NotFoundError`` (the same-account trust the deleted ``run_ancestor_depth``
-    CTE enforced per hop, now a single point read). Both columns are immutable once
-    written, so the read is race-free without locking.
+    The remaining trusted-edge budget on ``run_id`` — what a sub-launch off this run
+    may carry as ``depth - 1``. ACCOUNT-SCOPED: a foreign or missing parent raises
+    ``NotFoundError`` (the same-account trust the deleted ``run_ancestor_depth`` CTE
+    enforced per hop, now a single point read). The depth is immutable once written,
+    so the read is race-free without locking.
     """
-    row = await conn.fetchrow(
-        "SELECT depth, principal FROM wf_runs WHERE id = $1 AND account_id = $2",
+    depth: int | None = await conn.fetchval(
+        "SELECT depth FROM wf_runs WHERE id = $1 AND account_id = $2",
         run_id,
         account_id,
     )
-    if row is None:
+    if depth is None:
         raise NotFoundError(f"workflow run {run_id} not found", detail={"id": run_id})
-    return RunLineage(depth=row["depth"], principal=row["principal"])
+    return depth
 
 
 async def list_wf_runs(
@@ -744,6 +745,8 @@ async def insert_wf_run(
     workspace: str = "fresh",
     workspace_path: str | None = None,
     trigger_id: str | None = None,
+    as_agent: AsAgent | None = None,
+    request_ref: RequestRef | None = None,
 ) -> WfRun:
     """Insert a fresh ``pending`` run that snapshots ``script`` (+ ``script_sha``) and the
     declared tool surface (``tools``/``mcp_servers``/``http_servers``) — pinned at launch.
@@ -796,11 +799,12 @@ async def insert_wf_run(
                  script, script_sha, source_version, host_semantics_epoch, status, input,
                  tools, mcp_servers, http_servers, budget_total_microusd, default_child_model,
                  depth, tools_vocab_epoch, creator_session_id, creator_run_id, ssh_servers,
-                 trigger_id)
+                 trigger_id, as_agent_id, as_agent_version,
+                 request_ref_session_id, request_ref_id)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10, $11, $12, $13, $14, $15,
                     'pending', $16::jsonb,
                     $17::jsonb, $18::jsonb, $19::jsonb, $20, $21, $22, $23, $24, $25, $26::jsonb,
-                    $27)
+                    $27, $28, $29, $30, $31)
             ON CONFLICT (id) DO NOTHING
             RETURNING *
             """,
@@ -831,6 +835,10 @@ async def insert_wf_run(
             creator_run_id,
             json.dumps([s.model_dump() for s in (ssh_servers or [])]),
             trigger_id,
+            as_agent.agent_id if as_agent is not None else None,
+            as_agent.version if as_agent is not None else None,
+            request_ref.session_id if request_ref is not None else None,
+            request_ref.request_id if request_ref is not None else None,
         )
     except asyncpg.ForeignKeyViolationError as exc:
         raise NotFoundError(
@@ -964,6 +972,7 @@ async def add_run_call_llm_cost_microusd(
     output_tokens: int = 0,
     cache_read_input_tokens: int = 0,
     cache_creation_input_tokens: int = 0,
+    model: str | None,
 ) -> None:
     """Charge one raw ``call_llm`` inference to its run-level meters.
 
@@ -999,11 +1008,12 @@ async def add_run_call_llm_cost_microusd(
         await conn.execute(
             "INSERT INTO inference_usage_ledger "
             "(account_id, run_id, input_tokens, output_tokens, "
-            " cache_read_input_tokens, cache_creation_input_tokens, cost_microusd) "
-            "VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            " cache_read_input_tokens, cache_creation_input_tokens, cost_microusd, model) "
+            "VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
             account_id,
             run_id,
             *deltas,
+            model,
         )
         # Migration 0168's wf_runs trigger projects the cost delta into the
         # canonical account meter in this transaction. Keeping that projection
@@ -1955,3 +1965,201 @@ async def read_run_signal(
         "SELECT * FROM wf_run_signals WHERE run_id = $1 AND call_key = $2", run_id, call_key
     )
     return _row_to_wf_run_signal(row) if row is not None else None
+
+
+# The creation subtree of a run (#2151's creator edges): every session and run it,
+# or one of its descendants, created. Creator edges are single-parented and never
+# self-referential, so the walk is a tree; the depth guard bounds a corrupt cycle.
+_SUB_RUN_TREE_SQL = """
+WITH RECURSIVE tree(kind, id, parent_kind, parent_id, depth) AS (
+    SELECT 'run'::text, $1::text, NULL::text, NULL::text, 0
+    UNION ALL
+    SELECT child.kind, child.id, t.kind, t.id, t.depth + 1
+      FROM tree t
+      JOIN LATERAL (
+           SELECT 'session'::text AS kind, s.id
+             FROM sessions s
+            WHERE s.account_id = $2
+              AND ((t.kind = 'session' AND s.creator_session_id = t.id)
+                OR (t.kind = 'run' AND s.creator_run_id = t.id))
+           UNION ALL
+           SELECT 'run'::text, w.id
+             FROM wf_runs w
+            WHERE w.account_id = $2
+              AND ((t.kind = 'session' AND w.creator_session_id = t.id)
+                OR (t.kind = 'run' AND w.creator_run_id = t.id))
+      ) child ON TRUE
+     WHERE t.depth < 64
+)
+SELECT kind, id, parent_kind, parent_id FROM tree WHERE depth > 0 LIMIT $3
+"""
+
+
+async def call_started_labels(
+    conn: asyncpg.Connection[Any], run_ids: list[str], *, account_id: str
+) -> dict[str, str]:
+    """Child id → the ``label`` its parent's ``agent()``/``invoke_workflow()`` call gave
+    it, read from the ``call_started`` events of ``run_ids``. A pruned journal has no
+    labels. ``wf_run_events`` carries no ``account_id``, so the runs are scoped by join.
+    """
+    rows = await conn.fetch(
+        "SELECT COALESCE(e.payload->>'child_session_id', e.payload->>'child_run_id') AS child, "
+        "e.payload->>'label' AS label FROM wf_run_events e "
+        "JOIN wf_runs r ON r.id = e.run_id AND r.account_id = $2 "
+        "WHERE e.run_id = ANY($1) AND e.type = 'call_started' AND e.payload ? 'label'",
+        run_ids,
+        account_id,
+    )
+    return {r["child"]: r["label"] for r in rows if r["child"] is not None}
+
+
+async def request_ref_minted(
+    conn: asyncpg.Connection[Any],
+    run_id: str,
+    ref: dict[str, str],
+    *,
+    account_id: str,
+    minting_tools: list[str],
+) -> bool:
+    """Whether ``ref`` is an item's ``request_ref`` in the result of one of the run's own
+    ``tool()`` calls to a tool in ``minting_tools`` (#2475). Keyed on the call that
+    produced the value, never its shape: a ref-shaped value in a gate resume or any other
+    call's result doesn't count. Reads this run's journal only."""
+    minted: bool = await conn.fetchval(
+        """
+        SELECT EXISTS (
+            SELECT 1
+              FROM wf_runs w
+              JOIN wf_run_events s ON s.run_id = w.id AND s.type = 'call_started'
+              JOIN wf_run_events r
+                ON r.run_id = s.run_id AND r.call_key = s.call_key AND r.type = 'call_result'
+             CROSS JOIN LATERAL jsonb_array_elements(
+                 CASE WHEN jsonb_typeof(r.payload->'result'->'items') = 'array'
+                      THEN r.payload->'result'->'items' ELSE '[]'::jsonb END
+             ) AS item
+             WHERE w.id = $1 AND w.account_id = $2
+               AND s.payload->>'capability' = 'tool'
+               AND s.payload->>'tool_name' = ANY($3)
+               AND item->'request_ref' = $4::jsonb
+        )
+        """,
+        run_id,
+        account_id,
+        minting_tools,
+        json.dumps(ref),
+    )
+    return minted
+
+
+def _iso(value: Any) -> str | None:
+    return None if value is None else value.isoformat()
+
+
+async def sub_run_facts(
+    conn: asyncpg.Connection[Any], run_id: str, *, account_id: str, max_nodes: int
+) -> dict[str, Any]:
+    """Facts about every session and run ``run_id`` created, directly or through its
+    descendants: what each was, how it ended, when, and what it spent per model.
+
+    Metadata only, never inputs, outputs or journals. ``nodes`` is in spawn order and
+    capped at ``max_nodes``; ``truncated`` says the subtree had more. Each node's
+    ``label`` is the one its parent run's ``agent()``/``invoke_workflow()`` call gave it
+    (absent once the parent's journal is pruned). A run's ``duration_ms`` comes from its
+    terminal summary (``None`` until it ends). ``usage`` is the node's own inference
+    charges, one entry per model; ``model`` is ``None`` for charges recorded before the
+    ledger carried it. All reads share one snapshot.
+    """
+    async with conn.transaction(isolation="repeatable_read", readonly=True):
+        rows = await conn.fetch(_SUB_RUN_TREE_SQL, run_id, account_id, max_nodes + 1)
+        truncated = len(rows) > max_nodes
+        rows = rows[:max_nodes]
+        run_ids = [r["id"] for r in rows if r["kind"] == "run"]
+        session_ids = [r["id"] for r in rows if r["kind"] == "session"]
+        runs = {
+            r["id"]: r
+            for r in await conn.fetch(
+                "SELECT id, workflow_id, source_version, as_agent_id, as_agent_version, status, "
+                "terminal_summary, created_at "
+                "FROM wf_runs WHERE account_id = $1 AND id = ANY($2)",
+                account_id,
+                run_ids,
+            )
+        }
+        sessions = {
+            r["id"]: r
+            for r in await conn.fetch(
+                "SELECT id, agent_id, agent_version, model, stop_reason, archived_at, "
+                "created_at, updated_at FROM sessions WHERE account_id = $1 AND id = ANY($2)",
+                account_id,
+                session_ids,
+            )
+        }
+        labels = await call_started_labels(conn, [run_id, *run_ids], account_id=account_id)
+        usage: dict[str, list[dict[str, Any]]] = {}
+        for r in await conn.fetch(
+            "SELECT COALESCE(session_id, run_id) AS node, model, "
+            "SUM(input_tokens)::bigint AS input_tokens, "
+            "SUM(output_tokens)::bigint AS output_tokens, "
+            "SUM(cache_read_input_tokens)::bigint AS cache_read_input_tokens, "
+            "SUM(cache_creation_input_tokens)::bigint AS cache_creation_input_tokens, "
+            "SUM(cost_microusd)::bigint AS cost_microusd "
+            "FROM inference_usage_ledger "
+            "WHERE account_id = $1 AND (session_id = ANY($2) OR run_id = ANY($3)) "
+            "GROUP BY 1, 2 ORDER BY 1, 2",
+            account_id,
+            session_ids,
+            run_ids,
+        ):
+            usage.setdefault(r["node"], []).append(
+                {
+                    "model": r["model"],
+                    "input_tokens": r["input_tokens"],
+                    "output_tokens": r["output_tokens"],
+                    "cache_read_input_tokens": r["cache_read_input_tokens"],
+                    "cache_creation_input_tokens": r["cache_creation_input_tokens"],
+                    "cost_microusd": r["cost_microusd"],
+                }
+            )
+
+    def spawned(r: asyncpg.Record) -> tuple[Any, str]:
+        meta = runs[r["id"]] if r["kind"] == "run" else sessions[r["id"]]
+        return meta["created_at"], r["id"]
+
+    nodes: list[dict[str, Any]] = []
+    for r in sorted(rows, key=spawned):
+        node: dict[str, Any] = {
+            "kind": r["kind"],
+            "id": r["id"],
+            "parent": {"kind": r["parent_kind"], "id": r["parent_id"]},
+            "label": labels.get(r["id"]),
+            "usage": usage.get(r["id"], []),
+        }
+        if r["kind"] == "run":
+            run = runs[r["id"]]
+            summary = run["terminal_summary"]
+            node |= {
+                "workflow_id": run["workflow_id"],
+                "workflow_version": run["source_version"],
+                "as_agent": (
+                    {"agent_id": run["as_agent_id"], "version": run["as_agent_version"]}
+                    if run["as_agent_id"] is not None
+                    else None
+                ),
+                "status": run["status"],
+                "started_at": _iso(run["created_at"]),
+                "duration_ms": summary.get("duration_ms") if summary is not None else None,
+            }
+        else:
+            session = sessions[r["id"]]
+            stop_reason = session["stop_reason"]
+            node |= {
+                "agent_id": session["agent_id"],
+                "agent_version": session["agent_version"],
+                "model": session["model"],
+                "stop_reason": stop_reason.get("type") if isinstance(stop_reason, dict) else None,
+                "archived": session["archived_at"] is not None,
+                "started_at": _iso(session["created_at"]),
+                "last_active_at": _iso(session["updated_at"]),
+            }
+        nodes.append(node)
+    return {"nodes": nodes, "truncated": truncated}

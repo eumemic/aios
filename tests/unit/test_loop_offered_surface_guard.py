@@ -40,7 +40,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from aios.harness.completion import LlmResponse
 from aios.harness.loop import _run_session_step_body
 from aios.harness.window import WindowedEvents
-from aios.models.agents import ToolSpec
+from aios.models.agents import AgentBinding, ToolSpec
 from aios.models.model_providers import ProviderAuth
 
 _AUTH = ProviderAuth(api_key="sk-test", api_base=None, owner_account_id="acc_x")
@@ -65,6 +65,7 @@ def _agent(tools: list[Any]) -> SimpleNamespace:
         skills=[],
         system="sys",
         litellm_extra={},
+        binding=AgentBinding(agent_id="agt_test", version=1),
         window_min=1000,
         window_max=10000,
         preempt_policy="wait",
@@ -95,6 +96,9 @@ def _drive(
         reacting_to=0,
         reminders_written=(),
         reminders_skipped=0,
+        tz_name="UTC",
+        reminder_seqs=(),
+        workspace_path=None,
     )
     assistant_msg = {
         "role": "assistant",
@@ -116,7 +120,10 @@ def _drive(
         ),
         ("aios.services.channels.list_session_channels", AsyncMock(return_value=[])),
         ("aios.harness.loop.refresh_session_mount_state", AsyncMock(return_value=[])),
-        ("aios.harness.loop.compute_step_prelude", AsyncMock(return_value=SimpleNamespace())),
+        (
+            "aios.harness.loop.compute_step_prelude",
+            AsyncMock(return_value=SimpleNamespace(system_prompt="")),
+        ),
         (
             "aios.harness.loop.sessions_service.read_windowed_events",
             AsyncMock(return_value=WindowedEvents(events=[], omission=None)),

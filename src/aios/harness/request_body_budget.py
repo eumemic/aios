@@ -129,9 +129,13 @@ def _media_locations(messages: list[dict[str, Any]]) -> list[tuple[int, int, int
 
 
 def _omit(messages: list[dict[str, Any]], location: tuple[int, int, int]) -> None:
+    """Replace one media part with the omission text, copy-on-write: the message
+    and its content list can alias event data, which must not change."""
     message_index, part_index, _ = location
-    content = messages[message_index]["content"]
+    message = messages[message_index]
+    content = list(message["content"])
     content[part_index] = {"type": "text", "text": MEDIA_OMITTED_TEXT}
+    messages[message_index] = {**message, "content": content}
 
 
 def enforce_request_body_budget(

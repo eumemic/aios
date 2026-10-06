@@ -9,6 +9,7 @@ from ..models.tool_spec_permission_type_0 import ToolSpecPermissionType0
 from ..models.tool_spec_transport_type_0 import ToolSpecTransportType0
 from ..models.tool_spec_type_type_0 import ToolSpecTypeType0
 from ..models.tool_spec_type_type_1 import ToolSpecTypeType1
+from ..models.tool_spec_type_type_2 import ToolSpecTypeType2
 from ..types import UNSET, Unset
 
 if TYPE_CHECKING:
@@ -41,7 +42,7 @@ class ToolSpec:
     ``Session.awaiting`` so clients can list what they need to act on.
 
         Attributes:
-            type_ (ToolSpecTypeType0 | ToolSpecTypeType1):
+            type_ (ToolSpecTypeType0 | ToolSpecTypeType1 | ToolSpecTypeType2):
             name (None | str | Unset):
             description (None | str | Unset):
             input_schema (None | ToolSpecInputSchemaType0 | Unset):
@@ -53,7 +54,7 @@ class ToolSpec:
             configs (list[McpToolConfig] | None | Unset):
     """
 
-    type_: ToolSpecTypeType0 | ToolSpecTypeType1
+    type_: ToolSpecTypeType0 | ToolSpecTypeType1 | ToolSpecTypeType2
     name: None | str | Unset = UNSET
     description: None | str | Unset = UNSET
     input_schema: None | ToolSpecInputSchemaType0 | Unset = UNSET
@@ -70,6 +71,8 @@ class ToolSpec:
 
         type_: str
         if isinstance(self.type_, ToolSpecTypeType0):
+            type_ = self.type_.value
+        elif isinstance(self.type_, ToolSpecTypeType1):
             type_ = self.type_.value
         else:
             type_ = self.type_.value
@@ -174,7 +177,9 @@ class ToolSpec:
 
         d = dict(src_dict)
 
-        def _parse_type_(data: object) -> ToolSpecTypeType0 | ToolSpecTypeType1:
+        def _parse_type_(
+            data: object,
+        ) -> ToolSpecTypeType0 | ToolSpecTypeType1 | ToolSpecTypeType2:
             try:
                 if not isinstance(data, str):
                     raise TypeError()
@@ -183,11 +188,19 @@ class ToolSpec:
                 return type_type_0
             except (TypeError, ValueError, AttributeError, KeyError):
                 pass
+            try:
+                if not isinstance(data, str):
+                    raise TypeError()
+                type_type_1 = ToolSpecTypeType1(data)
+
+                return type_type_1
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
             if not isinstance(data, str):
                 raise TypeError()
-            type_type_1 = ToolSpecTypeType1(data)
+            type_type_2 = ToolSpecTypeType2(data)
 
-            return type_type_1
+            return type_type_2
 
         type_ = _parse_type_(d.pop("type"))
 

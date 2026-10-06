@@ -59,6 +59,7 @@ from aios.harness.model_workflow import (
     launch_model_workflow_park,
     take_pending_harvest,
 )
+from aios.harness.request_capture import capture_request, store_capture
 from aios.harness.step_context import (
     compose_step_context,
     compute_step_prelude,
@@ -908,8 +909,7 @@ async def _run_session_step_body(
     # row-locked UPDATE+INSERT+NOTIFY apiece. The question they instrumented
     # (#1658/#1659) is now answered, so they default OFF; a live env read
     # (not ``get_settings()``, which is ``lru_cache``d) re-arms them for a
-    # single-session/short-window re-profile with no redeploy — same idiom as
-    # ``AIOS_DUMP_CONTEXT`` (see ``_dump_context_if_enabled`` below). Read
+    # single-session/short-window re-profile with no redeploy. Read
     # ONCE at guard entry so every call this step sees the same value (the
     # all-or-nothing bracket is automatic, not per-call). ``_span`` closes
     # over ``pool``/``session_id``/``account_id``/``debug`` and is a pure
@@ -1222,6 +1222,29 @@ async def _run_session_step_body(
         )
         return _model_error_step_result(None, archive_when_idle=session.archive_when_idle)
 
+    # A workflow-model turn (#1634) parks on a run and is harvested on a later
+    # step. Take the disposition BEFORE composing: a step whose park is still
+    # pending sends nothing, so it must neither compose nor persist reminder rows
+    # (a row persisted between a park and its harvested assistant turn would
+    # replay ahead of that turn — a monotonicity break). A harvest step sent its
+    # request at park time; it composes only for the token stamp below, without
+    # persisting reminders.
+    workflow_ref = parse_workflow_model(agent.model)
+    disposition: HarvestedInference | UnlaunchedPark | ParkState | None = None
+    if workflow_ref is not None:
+        disposition = await take_pending_harvest(pool, session_id, account_id=account_id)
+        if disposition is ParkState.PARK_PENDING:
+            # A park is OPEN and its run has not resolved yet. The park wrote a
+            # ``span`` event, which does not advance ``last_stimulus_seq`` /
+            # ``last_reacted_seq`` — so the unreacted-stimulus inequality that caused
+            # the park still holds and the sweep keeps re-waking this session every
+            # tick while the inner run deliberates. End the step WITHOUT launching a
+            # second run (re-parking on nothing): exactly ONE inner awaited run runs
+            # per turn regardless of how many sweep ticks elapse. The harvest task's
+            # ``defer_wake`` (or a later sweep re-wake) re-enters and harvests.
+            return _StepResult()
+    persist_reminders = not isinstance(disposition, HarvestedInference)
+
     # Span the remainder of the prologue so "why is the step slow?"
     # can separate context-build cost from model-call cost (issue #78).
     # Bracketing starts AFTER the dispatch early-return so every start
@@ -1236,6 +1259,7 @@ async def _run_session_step_body(
         account_id=account_id,
     )
 
+    in_flight_tool_call_ids = frozenset(inflight_tool_registry.in_flight_tool_call_ids(session_id))
     try:
         step_ctx = await compose_step_context(
             pool=pool,
@@ -1245,13 +1269,11 @@ async def _run_session_step_body(
             channels=channels,
             prelude=prelude,
             events=events,
-            in_flight_tool_call_ids=frozenset(
-                inflight_tool_registry.in_flight_tool_call_ids(session_id)
-            ),
+            in_flight_tool_call_ids=in_flight_tool_call_ids,
             omission=windowed.omission,
             capability_model=capability_model,
             persist_image_rewrites=True,
-            persist_reminders=True,
+            persist_reminders=persist_reminders,
         )
     except Exception:
         await sessions_service.append_event(
@@ -1289,16 +1311,12 @@ async def _run_session_step_body(
             "event_count_read": len(events),
             "message_count": len(messages),
             "tools_count": len(tools),
-            "reminders_written": list(step_ctx.reminders_written),
+            # A harvest step persists no reminder rows; don't report its plan as written.
+            "reminders_written": list(step_ctx.reminders_written) if persist_reminders else [],
             "reminders_skipped": step_ctx.reminders_skipped,
         },
         account_id=account_id,
     )
-
-    # Dump the exact chat-completions payload we're about to send to LiteLLM
-    # when AIOS_DUMP_CONTEXT is set — useful for debugging prompt construction
-    # (header inlining, system-prompt augmentation, tool list shape).
-    await _dump_context_if_enabled(session_id, agent.model, messages, tools)
 
     llm_request = LlmRequest(
         messages=messages,
@@ -1306,6 +1324,28 @@ async def _run_session_step_body(
         params=agent.litellm_extra or None,
         session_id=session_id,
     )
+
+    async def _capture() -> dict[str, Any]:
+        """Record this request (#2471) just before it is sent: hash it off the event
+        loop, store its blobs, and return the ``request`` record for the span that
+        opens the send (``model_request_start``, or the workflow-model park)."""
+        capture = await asyncio.to_thread(
+            capture_request,
+            llm_request,
+            system_prompt=prelude.system_prompt,
+            model=agent.model,
+            capability_model=capability_model,
+            binding=agent.binding,
+            after_seq=windowed.after_seq,
+            through_seq=events[-1].seq if events else None,
+            omission=windowed.omission,
+            reminder_seqs=step_ctx.reminder_seqs,
+            in_flight_tool_call_ids=in_flight_tool_call_ids,
+            tz_name=step_ctx.tz_name,
+            workspace_path=step_ctx.workspace_path,
+        )
+        await store_capture(pool, capture, account_id=account_id)
+        return capture.record
 
     # ── workflow: model binding — async two-step model-dispatch + harvest (#1634) ──
     #
@@ -1322,7 +1362,6 @@ async def _run_session_step_body(
     #   * PARK (step N): no harvest pending → open an awaited run, journal the park (sealing
     #     ``reacting_to``), and end the step owing an assistant message. The run resolves
     #     async; its completion wakes the session, which lands on the harvest branch above.
-    workflow_ref = parse_workflow_model(agent.model)
     # ``no_recharge`` / ``reacting_to_override`` are the two ways the harvest path
     # differs from the inline-model tail it shares: the inner inference already
     # charged at its own ``call_llm`` site (record a span, do NOT re-charge), and
@@ -1332,17 +1371,6 @@ async def _run_session_step_body(
     reacting_to_override: int | None = None
     harvested: HarvestedInference | None = None
     if workflow_ref is not None:
-        disposition = await take_pending_harvest(pool, session_id, account_id=account_id)
-        if disposition is ParkState.PARK_PENDING:
-            # A park is OPEN and its run has not resolved yet. The park wrote a
-            # ``span`` event, which does not advance ``last_stimulus_seq`` /
-            # ``last_reacted_seq`` — so the unreacted-stimulus inequality that caused
-            # the park still holds and the sweep keeps re-waking this session every
-            # tick while the inner run deliberates. End the step WITHOUT launching a
-            # second run (re-parking on nothing): exactly ONE inner awaited run runs
-            # per turn regardless of how many sweep ticks elapse. The harvest task's
-            # ``defer_wake`` (or a later sweep re-wake) re-enters and harvests.
-            return _StepResult()
         if disposition is ParkState.NO_PARK or isinstance(disposition, UnlaunchedPark):
             # Mint the id here (not inside the launch) so a refusal knows which park
             # record to consume. A crash left a park record whose run was never created:
@@ -1360,6 +1388,7 @@ async def _run_session_step_body(
                     request=llm_request,
                     reacting_to=step_ctx.reacting_to,
                     account_id=account_id,
+                    request_record=await _capture(),
                     run_id=park_run_id,
                 )
             except RateLimitedError as exc:
@@ -1448,6 +1477,7 @@ async def _run_session_step_body(
             # async resolution wakes the session for the harvest; no inference ran here, so
             # no model_request span, no charge, no assistant turn.
             return _StepResult()
+        assert isinstance(disposition, HarvestedInference)  # PARK_PENDING returned above
         harvested = disposition
 
     # The shared post-inference tail records truncation telemetry for both inline
@@ -1587,12 +1617,13 @@ async def _run_session_step_body(
             )
             return _StepResult()
 
-        # Emit span start so consumers can measure inference latency.
+        # Emit span start so consumers can measure inference latency. It carries the
+        # request record, so the request is recoverable from durable state (#2471).
         start_event = await sessions_service.append_event(
             pool,
             session_id,
             "span",
-            {"event": "model_request_start"},
+            {"event": "model_request_start", "request": await _capture()},
             account_id=account_id,
         )
 
@@ -1843,6 +1874,7 @@ async def _run_session_step_body(
             cache_creation_input_tokens=cache_c,
             cost_microusd=charge,
             account_id=account_id,
+            model=agent.model,
         )
 
     # A refusal bricks the turn: the assistant message is partial/empty and its
@@ -2150,43 +2182,6 @@ def _switch_channel_tool_spec() -> dict[str, Any]:
     from aios.tools.registry import registry as tool_registry
 
     return openai_tool_entry(tool_registry.get("switch_channel"))
-
-
-async def _dump_context_if_enabled(
-    session_id: str,
-    model: str,
-    messages: list[dict[str, Any]],
-    tools: list[dict[str, Any]] | None,
-) -> None:
-    """Write the chat-completions payload to disk when ``AIOS_DUMP_CONTEXT`` is set.
-
-    Debug aid: inspect exactly what reaches LiteLLM (post header-inlining,
-    post system-prompt augmentation, with the full tool list).
-    """
-    if not _os.environ.get("AIOS_DUMP_CONTEXT"):
-        return
-    import asyncio as _asyncio
-    import json as _json
-    import time as _time
-    from pathlib import Path as _Path
-
-    dump_dir = _Path(_os.environ.get("AIOS_DUMP_CONTEXT_DIR", "/tmp/aios-context-dumps"))
-    ts = int(_time.time() * 1000)
-    path = dump_dir / f"{ts}_{session_id}.json"
-    payload = {
-        "session_id": session_id,
-        "model": model,
-        "messages": messages,
-        "tools": tools,
-    }
-
-    def _write() -> None:
-        dump_dir.mkdir(parents=True, exist_ok=True)
-        with open(path, "w") as f:
-            _json.dump(payload, f, indent=2)
-
-    await _asyncio.to_thread(_write)
-    log.info("step.context_dumped", path=str(path))
 
 
 def _tc_name(tc: dict[str, Any]) -> str:
@@ -2791,6 +2786,7 @@ async def _handle_streaming_model_deadline(
         cache_creation_input_tokens=usage.get("cache_creation_input_tokens", 0),
         cost_microusd=cost_microusd,
         account_id=account_id,
+        model=model,
     )
     deadline_s = get_settings().model_call_deadline_s
     await _latch_errored_turn(

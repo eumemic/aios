@@ -1386,7 +1386,9 @@ class TestLiveAttachToLiveSession:
         now = datetime.now(UTC)
         async with pool.acquire() as conn, conn.transaction():
             claimed = await queries.fetch_and_claim_due_triggers(conn, now_utc=now)
-        claimed_for_session = [c for c in claimed if c.owner_session_id == sid]
+        claimed_for_session = [
+            c for c in claimed if c.owner == queries.SessionOwner(sid, None, None)
+        ]
         assert claimed_for_session, "scheduler did not claim the runtime-added trigger"
         echo_id = claimed_for_session[0].id
 
@@ -1502,7 +1504,7 @@ class TestLiveAttachToLiveSession:
         future = datetime.now(UTC) + timedelta(hours=1)
         async with pool.acquire() as conn, conn.transaction():
             claimed = await queries.fetch_and_claim_due_triggers(conn, now_utc=future)
-        assert all(c.owner_session_id != sid for c in claimed)
+        assert all(c.owner != queries.SessionOwner(sid, None, None) for c in claimed)
 
     async def test_post_cross_account_session_404(
         self, pool: Any, http_client: httpx.AsyncClient
@@ -1668,7 +1670,8 @@ class TestArchiveRacePrevention:
 
         async with pool.acquire() as conn:
             row = await queries.unscoped_get_trigger_row(conn, echo.id)
-        assert row.session_archived_at is not None
+        assert isinstance(row.owner, queries.SessionOwner)
+        assert row.owner.archived_at is not None
 
     async def test_handler_skips_archived_session(
         self, pool: Any, env_and_agent: tuple[str, str]

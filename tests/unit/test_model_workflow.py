@@ -174,7 +174,9 @@ async def test_model_workflow_launch_inherits_session_vaults(
         "get_session_basic",
         AsyncMock(return_value=SimpleNamespace(environment_id="env_1", parent_run_id=None)),
     )
-    monkeypatch.setattr(sessions_service, "append_event", AsyncMock())
+    monkeypatch.setattr(
+        sessions_service, "append_event", AsyncMock(return_value=SimpleNamespace(id="evt_park"))
+    )
     monkeypatch.setattr(model_workflow, "_launch_harvest_task", lambda *args, **kwargs: None)
 
     await model_workflow.launch_model_workflow_park(
@@ -183,9 +185,10 @@ async def test_model_workflow_launch_inherits_session_vaults(
         ref=WorkflowModelRef("wf_1"),
         request=LlmRequest(messages=[]),
         reacting_to=1,
+        request_record={},
         account_id="acc_1",
     )
 
     assert launch.await_args is not None
-    assert launch.await_args.kwargs["launcher_session_id"] == "ses_1"
+    assert launch.await_args.kwargs["authority"].session_id == "ses_1"
     assert launch.await_args.kwargs.get("vault_ids") is None

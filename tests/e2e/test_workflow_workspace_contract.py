@@ -14,6 +14,7 @@ from aios.db import queries as db_queries
 from aios.db.queries import workflows as wf_queries
 from aios.harness import runtime
 from aios.models.agents import ToolSpec
+from aios.models.workflows import OperatorAuthority
 from aios.services import workflows as workflows_service
 from aios.tools import workflow_completion
 from aios.workflows import run_tools
@@ -75,6 +76,7 @@ async def test_real_workflow_agent_spawn_shares_workspace_and_fresh_isolates(
     run = await workflows_service.create_run(
         docker_harness._pool,
         account_id="acc_test_stub",
+        authority=OperatorAuthority(),
         workflow_id=workflow.id,
         environment_id=launcher.environment_id,
         input=None,

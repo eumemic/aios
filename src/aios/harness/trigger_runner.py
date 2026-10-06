@@ -26,14 +26,21 @@ trigger by id, then dispatches on two orthogonal axes:
   session's sandbox; ``wake_owner`` delivers ``content`` as a user-role
   message to the OWNING session (the ``wake_self`` primitive — content is
   delivered VERBATIM even for event fires; the workflow action is the
-  event-consuming action); ``workflow`` launches a run of a workflow via the
-  unmodified ``create_run`` with ``launcher_session_id = owner`` — so EVERY
-  fire re-clamps the run's surface to the owner's current agent, re-checks
-  ``vault_ids`` against the owner's current vaults, and counts against the
-  owner's outstanding-run cap. ``parent_run_id`` threads the completing run's
-  id (event fires) or the owner session's own lineage (timer fires), so the
+  event-consuming action); ``workflow`` launches a run of a workflow via
+  ``create_run`` under the owner session's authority — so EVERY fire re-clamps
+  the run's surface to the owner's current agent, re-checks ``vault_ids``
+  against the owner's current vaults, and counts against the owner's
+  outstanding-run cap. ``parent_run_id`` threads the completing run's id
+  (event fires) or the owner session's own lineage (timer fires), so the
   existing depth cap bounds reactive cascades and self-fire loops by
   construction.
+
+- **Operator-owned triggers** (#2473) have no session. The
+  ``triggers_owner_kind_shape`` CHECK limits them to timer sources and a
+  budgeted ``workflow`` action, whose run launches under operator authority as
+  a lineage root. Nothing is appended to a session log or surfaced to a
+  session for them: their fire outcomes live on the trigger row, in
+  ``trigger_runs``, and in the logs, all readable through ``/v1/triggers``.
 
 One ``started_at`` per fire: the carrier claim stamp, the composed input's
 ``fired_at``, and ``record_trigger_fire``'s stamp are the same value, so the
@@ -53,6 +60,7 @@ import asyncpg
 from aios.config import get_settings
 from aios.db import queries
 from aios.db.queries import workflows as wf_queries
+from aios.db.queries.triggers import OperatorOwner, SessionOwner
 from aios.errors import NotFoundError
 from aios.harness import runtime
 from aios.jobs.app import defer_trigger_fire
@@ -64,7 +72,7 @@ from aios.models.triggers import (
     WakeSessionAction,
     WorkflowAction,
 )
-from aios.models.workflows import WfRun
+from aios.models.workflows import OperatorAuthority, SessionAuthority, WfRun
 from aios.services import sessions as sessions_service
 from aios.services.trigger_lint import OBSERVED_WAKE_WARNING, observed_wake_is_noisy
 from aios.services.wake import (
@@ -79,6 +87,21 @@ from aios.services.wake import (
 log = get_logger("aios.harness.trigger_runner")
 
 MAX_CONSECUTIVE_FAILURES = 5
+
+
+def _owner_fields(trigger: queries.TriggerRow) -> dict[str, str]:
+    """The trigger's owner for a log line: its session, or the operator kind."""
+    if isinstance(trigger.owner, SessionOwner):
+        return {"session_id": trigger.owner.session_id}
+    return {"owner_kind": "operator"}
+
+
+def _session_owner(trigger: queries.TriggerRow) -> SessionOwner:
+    """The owner of a trigger whose source or action only a session can own. The
+    ``triggers_owner_kind_shape`` CHECK limits operator triggers to timer sources
+    and the workflow action, so these paths never see one."""
+    assert isinstance(trigger.owner, SessionOwner), trigger.id
+    return trigger.owner
 
 
 def compose_workflow_run_input(
@@ -181,13 +204,25 @@ async def run_trigger_step(trigger_id: str, trigger_run_id: str | None = None) -
     # source identity was fixed at match time, stamped on the carrier row).
     is_one_shot = trigger_run_id is None and trigger.source == "one_shot"
 
-    if trigger.session_archived_at is not None:
+    if trigger.account_archived_at is not None:
+        # The account was archived between claim and execute (or after an event
+        # fire's carrier row was written). Nothing fires on its behalf.
+        log.info("trigger.skip_account_archived", trigger_id=trigger_id, name=trigger.name)
+        await _skip_claimed_fire(
+            trigger,
+            trigger_run_id=trigger_run_id,
+            reason="account archived",
+            fired_at=started_at,
+        )
+        return
+
+    if isinstance(trigger.owner, SessionOwner) and trigger.owner.archived_at is not None:
         # Session was archived between claim and execute. Archive is the
         # lifecycle boundary: stop firing.
         log.info(
             "trigger.skip_archived",
             trigger_id=trigger_id,
-            session_id=trigger.owner_session_id,
+            session_id=trigger.owner.session_id,
             name=trigger.name,
         )
         await _skip_claimed_fire(
@@ -220,7 +255,7 @@ async def run_trigger_step(trigger_id: str, trigger_run_id: str | None = None) -
         log.info(
             "trigger.one_shot_deleted",
             trigger_id=trigger_id,
-            session_id=trigger.owner_session_id,
+            **_owner_fields(trigger),
             name=trigger.name,
         )
 
@@ -251,25 +286,26 @@ async def run_trigger_step(trigger_id: str, trigger_run_id: str | None = None) -
         # (nothing was a "wake" and nothing was being "delivered"). A failed
         # wake_owner means the append ITSELF failed (DB-level) — surfacing
         # through the same append path would fail identically; logged in
-        # _run_wake_owner. _surface_failure is best-effort (swallows).
-        if status != "ok":
+        # _run_wake_owner. _surface_failure is best-effort (swallows). An
+        # operator trigger has no session to tell.
+        if status != "ok" and isinstance(trigger.owner, SessionOwner):
             if isinstance(action, SandboxCommandAction):
                 await _surface_failure(
-                    trigger.owner_session_id,
+                    trigger.owner.session_id,
                     trigger.account_id,
                     f"[Scheduled wake '{trigger.name}' failed to deliver: "
                     f"{error_summary or status}]",
                 )
             elif isinstance(action, WakeSessionAction):
                 await _surface_failure(
-                    trigger.owner_session_id,
+                    trigger.owner.session_id,
                     trigger.account_id,
                     f"[Trigger '{trigger.name}' failed to wake "
                     f"{action.target_session_id}: {error_summary or status}]",
                 )
             elif isinstance(action, WorkflowAction):
                 await _surface_failure(
-                    trigger.owner_session_id,
+                    trigger.owner.session_id,
                     trigger.account_id,
                     f"[Trigger '{trigger.name}' failed to launch its workflow run: "
                     f"{error_summary or status}]",
@@ -351,33 +387,36 @@ async def run_trigger_step(trigger_id: str, trigger_run_id: str | None = None) -
         auto_disable = failures is not None and failures == MAX_CONSECUTIVE_FAILURES
         if auto_disable:
             await queries.disable_trigger(conn, trigger_id)
-            await queries.append_event(
-                conn,
-                account_id=trigger.account_id,
-                session_id=trigger.owner_session_id,
-                kind="lifecycle",
-                data={
-                    "event": "trigger_disabled",
-                    "trigger_id": trigger.id,
-                    "trigger_name": trigger.name,
-                    "reason": "breaker",
-                    "source": {"kind": trigger.source, **trigger.source_spec},
-                    "schedule": trigger.source_spec,
-                    "action_kind": trigger.action.kind,
-                },
-            )
+            if isinstance(trigger.owner, SessionOwner):
+                await queries.append_event(
+                    conn,
+                    account_id=trigger.account_id,
+                    session_id=trigger.owner.session_id,
+                    kind="lifecycle",
+                    data={
+                        "event": "trigger_disabled",
+                        "trigger_id": trigger.id,
+                        "trigger_name": trigger.name,
+                        "reason": "breaker",
+                        "source": {"kind": trigger.source, **trigger.source_spec},
+                        "schedule": trigger.source_spec,
+                        "action_kind": trigger.action.kind,
+                    },
+                )
             log.warning(
                 "trigger.auto_disabled",
                 trigger_id=trigger_id,
-                session_id=trigger.owner_session_id,
+                **_owner_fields(trigger),
                 name=trigger.name,
                 consecutive_failures=failures,
             )
 
     # Observation history is optional telemetry. Read it only after the fire's
     # audit transaction commits, and never turn a completed action into a
-    # failed/retriable job when the telemetry reader is unavailable.
-    if trigger.source == "cron":
+    # failed/retriable job when the telemetry reader is unavailable. Wake
+    # observation warns a session about its own trigger; an operator trigger has
+    # none.
+    if trigger.source == "cron" and isinstance(trigger.owner, SessionOwner):
         try:
             async with pool.acquire() as conn:
                 outcomes = await queries.list_recent_trigger_wake_outcomes(conn, trigger.id)
@@ -390,7 +429,7 @@ async def run_trigger_step(trigger_id: str, trigger_run_id: str | None = None) -
     if observed_warning:
         try:
             await _surface_failure(
-                trigger.owner_session_id,
+                _session_owner(trigger).session_id,
                 trigger.account_id,
                 f"[Trigger '{trigger.name}' warning: {OBSERVED_WAKE_WARNING}]",
             )
@@ -403,14 +442,15 @@ async def run_trigger_step(trigger_id: str, trigger_run_id: str | None = None) -
 
     # Surface the auto-disable AFTER the transaction commits — _surface_failure
     # re-acquires the pool, so nesting it inside the open transaction connection
-    # risks deadlock on the small pool.
-    if auto_disable:
+    # risks deadlock on the small pool. An operator trigger's auto-disable is on its
+    # row and in the log; there is no session to tell.
+    if auto_disable and isinstance(trigger.owner, SessionOwner):
         content = (
             f"[Trigger '{trigger.name}' auto-disabled after "
             f"{MAX_CONSECUTIVE_FAILURES} consecutive failures: "
             f"{error_summary or status}]"
         )
-        await _surface_failure(trigger.owner_session_id, trigger.account_id, content)
+        await _surface_failure(trigger.owner.session_id, trigger.account_id, content)
 
 
 async def _skip_claimed_fire(
@@ -508,13 +548,16 @@ async def _append_fire_event(
     result_id: str | None,
     started_at: datetime,
 ) -> None:
-    """Append atomically when possible; an archive race must never abort finalization."""
+    """Append atomically when possible; an archive race must never abort finalization.
+    An operator trigger has no session log to append to."""
+    if not isinstance(trigger.owner, SessionOwner):
+        return
     try:
         async with conn.transaction():
             await queries.append_event(
                 conn,
                 account_id=trigger.account_id,
-                session_id=trigger.owner_session_id,
+                session_id=trigger.owner.session_id,
                 kind="lifecycle",
                 data=_trigger_lifecycle_payload(
                     trigger,
@@ -548,7 +591,9 @@ async def _record_timer_audit(
         conn,
         trigger_id=trigger.id,
         account_id=trigger.account_id,
-        owner_session_id=trigger.owner_session_id,
+        owner_session_id=(
+            trigger.owner.session_id if isinstance(trigger.owner, SessionOwner) else None
+        ),
         trigger_name=trigger.name,
         trigger_context=trigger_context,
         status=status,
@@ -577,7 +622,9 @@ async def _run_sandbox_command(
     tool_broker = runtime.require_tool_broker()
     tool_broker.begin_trigger_observation(observation_token)
     try:
-        handle = await sandbox_registry.get_or_provision(trigger.owner_session_id, pool=pool)
+        handle = await sandbox_registry.get_or_provision(
+            _session_owner(trigger).session_id, pool=pool
+        )
         # Export only for this command process. The tool CLI forwards the
         # unguessable token to the broker, which observes successful attempts
         # even when static syntax says the call is guarded.
@@ -608,7 +655,7 @@ async def _run_sandbox_command(
         log.info(
             "trigger.fired",
             trigger_id=trigger.id,
-            session_id=trigger.owner_session_id,
+            **_owner_fields(trigger),
             name=trigger.name,
             kind="sandbox_command",
             status=status,
@@ -618,7 +665,7 @@ async def _run_sandbox_command(
         log.exception(
             "trigger.run_error",
             trigger_id=trigger.id,
-            session_id=trigger.owner_session_id,
+            **_owner_fields(trigger),
             name=trigger.name,
         )
         status = "error"
@@ -657,7 +704,7 @@ async def _run_wake_owner(
         await sessions_service.stimulate(
             pool,
             sessions_service.TellExistingSession(
-                session_id=trigger.owner_session_id,
+                session_id=_session_owner(trigger).session_id,
                 content=action.content,
                 cause="message",
                 metadata={"trigger": {"id": trigger.id, "name": trigger.name}},
@@ -667,7 +714,7 @@ async def _run_wake_owner(
         log.info(
             "trigger.fired",
             trigger_id=trigger.id,
-            session_id=trigger.owner_session_id,
+            **_owner_fields(trigger),
             name=trigger.name,
             kind="wake_owner",
             status="ok",
@@ -677,7 +724,7 @@ async def _run_wake_owner(
         log.exception(
             "trigger.wake_owner_error",
             trigger_id=trigger.id,
-            session_id=trigger.owner_session_id,
+            **_owner_fields(trigger),
             name=trigger.name,
         )
         return "error", f"wake delivery failed: {type(e).__name__}: {e!s:.200}", None
@@ -715,7 +762,7 @@ async def _run_wake_session(
         log.info(
             "trigger.fired",
             trigger_id=trigger.id,
-            session_id=trigger.owner_session_id,
+            **_owner_fields(trigger),
             name=trigger.name,
             kind="wake_session",
             status="ok",
@@ -754,7 +801,7 @@ async def _run_workflow(
     ``run_completion`` watcher is for. Statuses: ok/error (timeout N/A — the
     launch is one DB transaction).
 
-    All owner authority flows from ``launcher_session_id``: every fire
+    A session owner's authority applies at every fire: every fire
     re-clamps the surface, re-checks the vault subset against the owner's
     CURRENT vaults, asserts the version pin at the script-snapshot consistency
     point, and counts against the owner's outstanding-run cap. Every launch
@@ -767,6 +814,9 @@ async def _run_workflow(
     (workflow version drift or an archived target workflow), and ``NotFoundError``
     (a vault in ``action.vault_ids`` was deleted, or the owner session was
     deleted mid-fire; workflows and environments have no hard-delete path).
+
+    An operator trigger's run launches under operator authority as a lineage
+    root, bounded by the action's required ``budget_usd`` (#2473).
     """
     # Lazy: aios.workflows.service transitively imports the tools package,
     # which imports services.workflows, which imports back into
@@ -777,6 +827,9 @@ async def _run_workflow(
     pool = runtime.require_pool()
     # The iff CHECK guarantees workflow-kind rows carry the column.
     assert trigger.environment_id is not None
+    if isinstance(trigger.owner, OperatorOwner):
+        # The owner-kind CHECK admits only timer sources on operator rows.
+        assert trigger_context in ("cron", "one_shot"), trigger_context
     try:
         completed_run: WfRun | None = None
         completed_error: dict[str, Any] | None = None
@@ -818,8 +871,10 @@ async def _run_workflow(
             # projected onto the TriggerRow off its sessions JOIN. None for
             # normal sessions (root run); for a workflow-child owner this closes
             # the depth-laundering bypass (a past-fire_at one-shot is a run-launch
-            # with a 0s delay).
-            parent_run_id = trigger.session_parent_run_id
+            # with a 0s delay). An operator trigger's run is a lineage root.
+            parent_run_id = (
+                trigger.owner.parent_run_id if isinstance(trigger.owner, SessionOwner) else None
+            )
         composed = compose_workflow_run_input(
             trigger_id=trigger.id,
             trigger_name=trigger.name,
@@ -843,8 +898,11 @@ async def _run_workflow(
             environment_id=trigger.environment_id,
             input=composed,
             vault_ids=action.vault_ids,
-            launcher_session_id=trigger.owner_session_id,
-            parent_run_id=parent_run_id,
+            authority=(
+                SessionAuthority(trigger.owner.session_id, parent_run_id)
+                if isinstance(trigger.owner, SessionOwner)
+                else OperatorAuthority()
+            ),
             expected_version=action.workflow_version,
             version=action.version,
             trigger_id=trigger.id,
@@ -854,7 +912,7 @@ async def _run_workflow(
         log.info(
             "trigger.fired",
             trigger_id=trigger.id,
-            session_id=trigger.owner_session_id,
+            **_owner_fields(trigger),
             name=trigger.name,
             kind="workflow",
             status="ok",
@@ -869,7 +927,7 @@ async def _run_workflow(
         log.info(
             "trigger.skip_outstanding_runs_cap",
             trigger_id=trigger.id,
-            session_id=trigger.owner_session_id,
+            **_owner_fields(trigger),
             name=trigger.name,
             outstanding=e.detail.get("outstanding"),
             max_outstanding_runs=e.detail.get("max"),
@@ -879,7 +937,7 @@ async def _run_workflow(
         log.exception(
             "trigger.workflow_error",
             trigger_id=trigger.id,
-            session_id=trigger.owner_session_id,
+            **_owner_fields(trigger),
             name=trigger.name,
         )
         return "error", f"run launch failed: {type(e).__name__}: {e!s:.200}", None

@@ -38,6 +38,7 @@ from aios.harness import runtime
 from aios.harness.trigger_runner import run_trigger_step
 from aios.models.agents import ToolSpec
 from aios.models.triggers import TriggerCreate
+from aios.models.workflows import OperatorAuthority
 from aios.services import triggers as trig_service
 from aios.services import workflows as wf_service
 from aios.workflows import run_tools, service
@@ -112,7 +113,11 @@ async def _add_trigger(pool: asyncpg.Pool[Any], session_id: str, body: dict[str,
 async def _complete_run_of(pool: asyncpg.Pool[Any], workflow_id: str, env_id: str) -> str:
     """Create + drive one run of ``workflow_id`` to completion; return its id."""
     run = await service.create_run(
-        pool, account_id=ACC, workflow_id=workflow_id, environment_id=env_id
+        pool,
+        account_id=ACC,
+        authority=OperatorAuthority(),
+        workflow_id=workflow_id,
+        environment_id=env_id,
     )
     await run_workflow_step(run.id)
     async with pool.acquire() as conn:
@@ -286,7 +291,11 @@ async def test_timer_fire_threads_owner_lineage(trig_runtime: asyncpg.Pool[Any])
     parent_wf = await _make_workflow(pool)
     target = await _make_workflow(pool)
     parent_run = await service.create_run(
-        pool, account_id=ACC, workflow_id=parent_wf, environment_id=env.id
+        pool,
+        account_id=ACC,
+        authority=OperatorAuthority(),
+        workflow_id=parent_wf,
+        environment_id=env.id,
     )
     child_id = "sess_" + "0" * 22 + "TRIG"
     await sessions_service.create_child_session(
@@ -1454,7 +1463,11 @@ async def test_outstanding_cap_counts_only_this_triggers_runs(
     pool = trig_runtime
     tid, target, env_id = await _capped_cron_trigger(pool, "capscope", cap=1)
     other = await service.create_run(
-        pool, account_id=ACC, workflow_id=target, environment_id=env_id
+        pool,
+        account_id=ACC,
+        authority=OperatorAuthority(),
+        workflow_id=target,
+        environment_id=env_id,
     )
     assert other.status == "pending"
 

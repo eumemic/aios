@@ -45,6 +45,7 @@ def raw_single(
     path: str,
     *,
     json_body: dict[str, Any] | None = None,
+    params: dict[str, Any] | None = None,
 ) -> None:
     """Send a raw-dict request over the SDK client and render the result.
 
@@ -53,7 +54,7 @@ def raw_single(
     validator of schema-fluid payloads. A 204/empty body prints nothing.
     """
     with get_state(ctx).sdk_client() as client:
-        obj = raw_request(client, method, path, json_body=json_body)
+        obj = raw_request(client, method, path, json_body=json_body, params=params)
     if obj is not None:
         render_single(obj)
 

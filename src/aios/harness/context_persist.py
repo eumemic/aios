@@ -49,8 +49,9 @@ async def persist_reminder_rows(
     *,
     session_id: str,
     account_id: str,
-) -> None:
-    """Write a step's planned reminder rows to the session log, in plan order.
+) -> tuple[int, ...]:
+    """Write a step's planned reminder rows to the session log, in plan order,
+    returning their seqs (request capture records them, #2471).
 
     The composer's ``persist_reminders=True`` arm (``compose_step_context``):
     the rows land BEFORE ``model_request_start``, so the next build replays
@@ -62,19 +63,22 @@ async def persist_reminder_rows(
     harmless — the next step's plan sees the rows that landed.
     """
     if not plan.writes:
-        return
+        return ()
     from aios.db import queries
     from aios.harness.reminders import reminder_event_data
 
+    seqs: list[int] = []
     async with pool.acquire() as conn:
         for item in plan.writes:
-            await queries.append_event(
+            event = await queries.append_event(
                 conn,
                 session_id=session_id,
                 kind="message",
                 data=reminder_event_data(item.section, item.content),
                 account_id=account_id,
             )
+            seqs.append(event.seq)
+    return tuple(seqs)
 
 
 async def persist_clamped_image_parts(

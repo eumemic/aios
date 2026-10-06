@@ -34,6 +34,7 @@ via ``repark_stranded_model_dispatch``.
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
 from typing import Any, cast
 from unittest import mock
@@ -45,6 +46,7 @@ import pytest
 from aios.db import queries as db_queries
 from aios.db.pool import create_pool
 from aios.db.queries import workflows as wf_queries
+from aios.db.queries.prune import prune_archived_runs, reconcile_terminal_archival_batch
 from aios.harness import model_workflow as mwf
 from aios.harness import runtime
 from aios.harness.completion import LlmRequest
@@ -52,12 +54,16 @@ from aios.harness.inflight_tool_registry import InflightToolRegistry
 from aios.harness.loop import run_session_step
 from aios.harness.model_binding import WorkflowModelRef, parse_workflow_model
 from aios.harness.model_workflow import write_harvest_event
+from aios.harness.request_capture import forget_stored_blobs
 from aios.harness.sweep import repark_stranded_model_dispatch
+from aios.models.workflows import OperatorAuthority, RequestRef, SessionAuthority
 from aios.services import agents as agents_service
 from aios.services import environments as environments_service
 from aios.services import sessions as sessions_service
 from aios.services import workflows as wf_service
+from aios.services.requests import Rebuilt, rebuild_request
 from aios.workflows import run_tools
+from aios.workflows import service as wf_run_service
 from aios.workflows.step import run_workflow_step
 
 pytestmark = pytest.mark.integration
@@ -142,11 +148,22 @@ async def mwf_runtime(
         await pool.close()
 
 
-async def _make_bound_session(pool: asyncpg.Pool[Any], *, finish_reason: str = "stop") -> str:
-    script = _INNER_SCRIPT.replace("{finish_reason}", finish_reason)
+async def _make_bound_session(
+    pool: asyncpg.Pool[Any],
+    *,
+    finish_reason: str = "stop",
+    output_model: str | None = None,
+    script: str | None = None,
+    litellm_extra: dict[str, Any] | None = None,
+) -> str:
+    script = script or _INNER_SCRIPT.replace("{finish_reason}", finish_reason)
     async with pool.acquire() as conn:
         wf = await wf_queries.insert_workflow(
-            conn, account_id=_ACCOUNT, name="inner-model", script=script
+            conn,
+            account_id=_ACCOUNT,
+            name="inner-model",
+            script=script,
+            output_model=output_model,
         )
     agent = await agents_service.create_agent(
         pool,
@@ -159,6 +176,7 @@ async def _make_bound_session(pool: asyncpg.Pool[Any], *, finish_reason: str = "
         metadata={},
         window_min=50_000,
         window_max=150_000,
+        litellm_extra=litellm_extra,
     )
     env = await environments_service.get_environment(pool, _ENV, account_id=_ACCOUNT)
     session = await sessions_service.create_session(
@@ -250,7 +268,7 @@ async def _resolve_inner_run(pool: asyncpg.Pool[Any], run_id: str) -> Any:
         assert run is not None
         assert run.status == "completed", f"inner run not completed: {run.status}"
         await wf_queries.add_run_call_llm_cost_microusd(
-            conn, run_id, _INNER_COST_MICROUSD, account_id=_ACCOUNT
+            conn, run_id, _INNER_COST_MICROUSD, account_id=_ACCOUNT, model="test/model"
         )
     return run.output
 
@@ -507,6 +525,7 @@ async def test_crash_after_launch_does_not_launch_a_second_run(
             ref=await _bound_ref(pool, session_id),
             request=_request(),
             reacting_to=1,
+            request_record={},
             account_id=_ACCOUNT,
         )
     await run_session_step(session_id)
@@ -536,6 +555,7 @@ async def test_crash_after_record_before_launch_launches_the_recorded_run(
             ref=await _bound_ref(pool, session_id),
             request=_request(),
             reacting_to=1,
+            request_record={},
             account_id=_ACCOUNT,
         )
     async with pool.acquire() as conn:
@@ -552,6 +572,22 @@ async def test_crash_after_record_before_launch_launches_the_recorded_run(
     await run_session_step(session_id)
 
     assert await _inner_run_ids(pool, session_id) == [park["run_id"]]
+    # The relaunch appended a fresh park record for the request it actually sent, and
+    # the run it created refers to that record, not the crashed attempt's (#2474).
+    async with pool.acquire() as conn:
+        park_ids = [
+            r["id"]
+            for r in await conn.fetch(
+                "SELECT id FROM events WHERE session_id = $1 AND kind = 'span' "
+                "AND data->>'event' = 'model_workflow_park' ORDER BY seq",
+                session_id,
+            )
+        ]
+        relaunched = await wf_queries.get_run_for_step(conn, park["run_id"])
+    assert len(park_ids) == 2
+    assert relaunched is not None and relaunched.request_ref == RequestRef(
+        session_id=session_id, request_id=park_ids[-1]
+    )
     run_output = await _resolve_inner_run(pool, park["run_id"])
     await write_harvest_event(
         pool,
@@ -787,3 +823,667 @@ async def test_capacity_backoff_keeps_the_park_live_and_relaunches_the_same_id(
     await run_session_step(session_id)
     assert await _inner_run_ids(pool, session_id) == [first_id]
     assert set(await _park_run_ids(pool, session_id)) == {first_id}
+
+
+# ── #2471: the park record carries the captured request ───────────────────────
+
+
+async def test_a_parked_turn_rebuilds_exactly_for_its_capability_model(
+    mwf_runtime: asyncpg.Pool[Any],
+) -> None:
+    """The bound workflow declares an output model, so the turn's capability model
+    (which drives the window and the vision and thinking gates) differs from its
+    ``workflow:`` model. The park record's request rebuilds byte for byte; rendered
+    for another model it reports ``rerendered``."""
+    forget_stored_blobs()
+    pool = mwf_runtime
+    session_id = await _make_bound_session(pool, output_model="openrouter/declared-out")
+    await run_session_step(session_id)
+
+    async with pool.acquire() as conn:
+        park = await conn.fetchrow(
+            "SELECT id, data FROM events WHERE session_id = $1 AND kind = 'span' "
+            "AND data->>'event' = 'model_workflow_park'",
+            session_id,
+        )
+    assert park is not None
+    record = park["data"]["request"]
+    assert record["model"].startswith("workflow:")
+    assert record["capability_model"] == "openrouter/declared-out"
+
+    rebuilt = await rebuild_request(
+        pool, account_id=_ACCOUNT, session_id=session_id, request_event_id=park["id"]
+    )
+    assert isinstance(rebuilt, Rebuilt) and rebuilt.fidelity == "exact"
+    other = await rebuild_request(
+        pool,
+        account_id=_ACCOUNT,
+        session_id=session_id,
+        request_event_id=park["id"],
+        target_model="openrouter/other-model",
+    )
+    assert isinstance(other, Rebuilt) and other.fidelity == "rerendered"
+
+
+# ── #2474: a run created with a request ref ───────────────────────────────────
+
+# Suspends once (``budget()`` journals inline and re-drives), so the run takes two
+# wakes, and returns the input the script started with.
+_ECHO_AFTER_A_WAKE = "async def main(input):\n    await budget()\n    return input\n"
+
+
+async def _parked_turn(pool: asyncpg.Pool[Any]) -> tuple[str, str, dict[str, Any]]:
+    """A workflow-as-model turn's park: ``(session_id, park span id, the run's input)``."""
+    forget_stored_blobs()
+    session_id = await _make_bound_session(pool)
+    await run_session_step(session_id)
+    async with pool.acquire() as conn:
+        park_id = await conn.fetchval(
+            "SELECT id FROM events WHERE session_id = $1 AND kind = 'span' "
+            "AND data->>'event' = 'model_workflow_park'",
+            session_id,
+        )
+        # The row holds no input (#2474 B4): the turn's input is its run_started.
+        run_input = await conn.fetchval(
+            "SELECT e.payload->'input' FROM wf_run_events e "
+            "JOIN wf_runs r ON r.id = e.run_id "
+            "WHERE r.launcher_session_id = $1 AND e.type = 'run_started'",
+            session_id,
+        )
+    return session_id, park_id, run_input
+
+
+async def _echo_workflow(pool: asyncpg.Pool[Any]) -> str:
+    async with pool.acquire() as conn:
+        wf = await wf_queries.insert_workflow(
+            conn, account_id=_ACCOUNT, name="echo", script=_ECHO_AFTER_A_WAKE
+        )
+    return wf.id
+
+
+async def _drive(run_id: str, wakes: int) -> None:
+    for _ in range(wakes):
+        await run_workflow_step(run_id)
+
+
+async def test_a_ref_run_starts_with_its_rebuilt_request_and_rebuilds_it_once(
+    mwf_runtime: asyncpg.Pool[Any],
+) -> None:
+    """A run created with a ref and no input starts its script with the request the
+    ref names: the input a workflow-as-model run gets, plus the ref. It is rebuilt on
+    the first wake only. An operator run gets its own prompt-cache key."""
+    pool = mwf_runtime
+    session_id, park_id, wam_input = await _parked_turn(pool)
+    ref = RequestRef(session_id=session_id, request_id=park_id)
+    run = await wf_run_service.create_run(
+        pool,
+        account_id=_ACCOUNT,
+        authority=OperatorAuthority(),
+        workflow_id=await _echo_workflow(pool),
+        environment_id=_ENV,
+        request_ref=ref,
+    )
+    assert run.input is None and run.request_ref == ref
+
+    with mock.patch("aios.workflows.step.rebuild_request", wraps=rebuild_request) as rebuild_spy:
+        await _drive(run.id, 3)
+
+    assert rebuild_spy.await_count == 1
+    async with pool.acquire() as conn:
+        done = await wf_queries.get_run_for_step(conn, run.id)
+    assert done is not None and done.status == "completed"
+    output = done.output
+    assert output["messages"] == wam_input["messages"]
+    assert output["tools"] == wam_input["tools"]
+    assert output["session_id"] == run.id
+    assert output["request_ref"] == {"session_id": session_id, "request_id": park_id}
+
+
+async def test_a_ref_run_for_a_session_shares_its_prompt_cache_key(
+    mwf_runtime: asyncpg.Pool[Any],
+) -> None:
+    pool = mwf_runtime
+    session_id, park_id, _ = await _parked_turn(pool)
+    run = await wf_run_service.create_run(
+        pool,
+        account_id=_ACCOUNT,
+        authority=SessionAuthority(session_id, None),
+        workflow_id=await _echo_workflow(pool),
+        environment_id=_ENV,
+        request_ref=RequestRef(session_id=session_id, request_id=park_id),
+    )
+
+    await _drive(run.id, 2)
+
+    async with pool.acquire() as conn:
+        done = await wf_queries.get_run_for_step(conn, run.id)
+    assert done is not None and done.output["session_id"] == session_id
+
+
+async def test_a_ref_run_whose_request_is_gone_errors(
+    mwf_runtime: asyncpg.Pool[Any],
+) -> None:
+    pool = mwf_runtime
+    session_id, _, _ = await _parked_turn(pool)
+    run = await wf_run_service.create_run(
+        pool,
+        account_id=_ACCOUNT,
+        authority=OperatorAuthority(),
+        workflow_id=await _echo_workflow(pool),
+        environment_id=_ENV,
+        request_ref=RequestRef(session_id=session_id, request_id="evt_missing"),
+    )
+
+    await run_workflow_step(run.id)
+
+    async with pool.acquire() as conn:
+        done = await wf_queries.get_run_for_step(conn, run.id)
+        events = await wf_queries.list_run_events(conn, run.id)
+    assert done is not None and done.status == "errored"
+    assert [e.type for e in events] == ["run_completed"]
+    assert events[-1].payload["error"]["kind"] == "request_unavailable"
+
+
+async def test_a_ref_to_another_accounts_request_does_not_resolve(
+    mwf_runtime: asyncpg.Pool[Any],
+) -> None:
+    """The rebuild is scoped to the run's own account: a run in another account
+    holding a ref to this session's request errors instead of reading it."""
+    pool = mwf_runtime
+    session_id, park_id, _ = await _parked_turn(pool)
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO accounts (id, parent_account_id, can_mint_children, display_name) "
+            "VALUES ('acc_other', $1, TRUE, 'other')",
+            _ACCOUNT,
+        )
+        await conn.execute(
+            "INSERT INTO environments (id, name, config, account_id) "
+            "VALUES ('env_other', 'other-env', '{}'::jsonb, 'acc_other')"
+        )
+        wf = await wf_queries.insert_workflow(
+            conn, account_id="acc_other", name="echo", script=_ECHO_AFTER_A_WAKE
+        )
+    run = await wf_run_service.create_run(
+        pool,
+        account_id="acc_other",
+        authority=OperatorAuthority(),
+        workflow_id=wf.id,
+        environment_id="env_other",
+        request_ref=RequestRef(session_id=session_id, request_id=park_id),
+    )
+
+    await run_workflow_step(run.id)
+
+    async with pool.acquire() as conn:
+        events = await wf_queries.list_run_events(conn, run.id)
+    assert [e.payload["error"]["kind"] for e in events] == ["request_unavailable"]
+
+
+async def test_a_ref_run_cancelled_before_it_starts_skips_the_rebuild(
+    mwf_runtime: asyncpg.Pool[Any],
+) -> None:
+    """A cancel lands even when the rebuild would crash: the first wake doesn't
+    rebuild a request for a run it is about to cancel."""
+    pool = mwf_runtime
+    session_id, park_id, _ = await _parked_turn(pool)
+    run = await wf_run_service.create_run(
+        pool,
+        account_id=_ACCOUNT,
+        authority=OperatorAuthority(),
+        workflow_id=await _echo_workflow(pool),
+        environment_id=_ENV,
+        request_ref=RequestRef(session_id=session_id, request_id=park_id),
+    )
+    async with pool.acquire() as conn:
+        await wf_queries.insert_run_signal(
+            conn, run_id=run.id, call_key=wf_queries.CANCEL_SIGNAL_CALL_KEY, kind="cancel"
+        )
+
+    with mock.patch(
+        "aios.workflows.step.rebuild_request", side_effect=RuntimeError("boom")
+    ) as rebuild:
+        await run_workflow_step(run.id)
+
+    rebuild.assert_not_called()
+    async with pool.acquire() as conn:
+        done = await wf_queries.get_run_for_step(conn, run.id)
+    assert done is not None and done.status == "cancelled"
+
+
+async def test_the_script_input_is_what_run_started_recorded(
+    mwf_runtime: asyncpg.Pool[Any],
+) -> None:
+    """Every wake starts the script with the input ``run_started`` recorded, not the
+    row's, so a run whose row holds no input still replays the same input."""
+    pool = mwf_runtime
+    run = await wf_run_service.create_run(
+        pool,
+        account_id=_ACCOUNT,
+        authority=OperatorAuthority(),
+        workflow_id=await _echo_workflow(pool),
+        environment_id=_ENV,
+        input={"n": 1},
+    )
+    await run_workflow_step(run.id)
+    async with pool.acquire() as conn:
+        await conn.execute("UPDATE wf_runs SET input = NULL WHERE id = $1", run.id)
+
+    await run_workflow_step(run.id)
+
+    async with pool.acquire() as conn:
+        done = await wf_queries.get_run_for_step(conn, run.id)
+    assert done is not None and done.output == {"n": 1}
+
+
+# ── #2474 B2: a run resolves only the ref it was created with ─────────────────
+
+
+async def _workflow(pool: asyncpg.Pool[Any], name: str, script: str) -> str:
+    async with pool.acquire() as conn:
+        wf = await wf_queries.insert_workflow(conn, account_id=_ACCOUNT, name=name, script=script)
+    return wf.id
+
+
+async def _operator_run(
+    pool: asyncpg.Pool[Any], workflow_id: str, *, input: Any, request_ref: RequestRef | None
+) -> str:
+    run = await wf_run_service.create_run(
+        pool,
+        account_id=_ACCOUNT,
+        authority=OperatorAuthority(),
+        workflow_id=workflow_id,
+        environment_id=_ENV,
+        input=input,
+        request_ref=request_ref,
+    )
+    return run.id
+
+
+async def _results(pool: asyncpg.Pool[Any], run_id: str) -> list[Any]:
+    async with pool.acquire() as conn:
+        events = await wf_queries.list_run_events(conn, run_id)
+    return [e.payload.get("result", e.payload) for e in events if e.type == "call_result"]
+
+
+async def test_a_ref_in_plain_input_grants_nothing(mwf_runtime: asyncpg.Pool[Any]) -> None:
+    """A ref-shaped value in a run's input is just data: ``call_llm`` refuses it, and
+    nothing is sent."""
+    pool = mwf_runtime
+    session_id, park_id, _ = await _parked_turn(pool)
+    wf = await _workflow(
+        pool,
+        "smuggle",
+        "async def main(input):\n    return await call_llm(request_ref=input['ref'])\n",
+    )
+    run_id = await _operator_run(
+        pool,
+        wf,
+        input={"ref": {"session_id": session_id, "request_id": park_id}},
+        request_ref=None,
+    )
+
+    with mock.patch("aios.workflows.run_llm.launch_call_llm_task") as launch:
+        await _drive(run_id, 2)
+
+    launch.assert_not_called()
+    [result] = await _results(pool, run_id)
+    assert result["error_kind"] == "request_ref_not_granted"
+
+
+async def test_a_run_hands_its_ref_to_a_sub_run_which_starts_from_it(
+    mwf_runtime: asyncpg.Pool[Any],
+) -> None:
+    """``invoke_workflow(request_ref=)`` hands on the parent's own ref: the sub-run's
+    row holds it as its grant and it starts from the rebuilt request."""
+    pool = mwf_runtime
+    session_id, park_id, wam_input = await _parked_turn(pool)
+    ref = RequestRef(session_id=session_id, request_id=park_id)
+    child = await _echo_workflow(pool)
+    parent = await _workflow(
+        pool,
+        "hand-on",
+        "async def main(input):\n"
+        "    return await invoke_workflow(input['wf'], None, request_ref=input['request_ref'])\n",
+    )
+    parent_id = await _operator_run(
+        pool, parent, input={"wf": child, "request_ref": ref.model_dump()}, request_ref=ref
+    )
+
+    await run_workflow_step(parent_id)
+
+    async with pool.acquire() as conn:
+        started = next(
+            e for e in await wf_queries.list_run_events(conn, parent_id) if e.type == "call_started"
+        )
+    sub_id = started.payload["child_run_id"]
+    await _drive(sub_id, 2)
+    async with pool.acquire() as conn:
+        sub = await wf_queries.get_run_for_step(conn, sub_id)
+    assert sub is not None and sub.request_ref == ref and sub.input is None
+    assert sub.status == "completed"
+    assert sub.output["messages"] == wam_input["messages"]
+    assert sub.output["session_id"] == sub_id
+
+
+async def test_a_run_cannot_hand_on_a_ref_it_was_not_given(
+    mwf_runtime: asyncpg.Pool[Any],
+) -> None:
+    pool = mwf_runtime
+    session_id, park_id, _ = await _parked_turn(pool)
+    parent = await _workflow(
+        pool,
+        "launder",
+        "async def main(input):\n"
+        "    return await invoke_workflow(input['wf'], None, request_ref=input['ref'])\n",
+    )
+    parent_id = await _operator_run(
+        pool,
+        parent,
+        input={
+            "wf": await _echo_workflow(pool),
+            "ref": {"session_id": session_id, "request_id": park_id},
+        },
+        request_ref=None,
+    )
+
+    await run_workflow_step(parent_id)
+
+    async with pool.acquire() as conn:
+        events = await wf_queries.list_run_events(conn, parent_id)
+    refusals = [e.payload["error"]["kind"] for e in events if e.type == "call_result"]
+    assert refusals == ["invoke_workflow_refused"]
+    async with pool.acquire() as conn:
+        subs = await conn.fetchval(
+            "SELECT count(*) FROM wf_runs WHERE parent_run_id = $1", parent_id
+        )
+    assert subs == 0
+
+
+async def _only_sub_run(pool: asyncpg.Pool[Any], parent_id: str) -> str:
+    async with pool.acquire() as conn:
+        started = next(
+            e for e in await wf_queries.list_run_events(conn, parent_id) if e.type == "call_started"
+        )
+    return str(started.payload["child_run_id"])
+
+
+async def test_a_sub_run_hands_its_ref_on_to_its_own_sub_run(
+    mwf_runtime: asyncpg.Pool[Any],
+) -> None:
+    """A sub-run handed a ref holds it as its own grant, so it can hand it on again,
+    and its sub-run starts from the same request."""
+    pool = mwf_runtime
+    session_id, park_id, wam_input = await _parked_turn(pool)
+    ref = RequestRef(session_id=session_id, request_id=park_id)
+    leaf = await _echo_workflow(pool)
+    hand_on = (
+        "async def main(input):\n"
+        f"    return await invoke_workflow({leaf!r}, None, request_ref=input['request_ref'])\n"
+    )
+    middle = await _workflow(pool, "middle", hand_on)
+    root = await _workflow(
+        pool,
+        "root",
+        "async def main(input):\n"
+        "    return await invoke_workflow(input['wf'], None, request_ref=input['request_ref'])\n",
+    )
+    root_id = await _operator_run(
+        pool, root, input={"wf": middle, "request_ref": ref.model_dump()}, request_ref=ref
+    )
+
+    await run_workflow_step(root_id)
+    middle_id = await _only_sub_run(pool, root_id)
+    await run_workflow_step(middle_id)
+    leaf_id = await _only_sub_run(pool, middle_id)
+    await _drive(leaf_id, 2)
+
+    async with pool.acquire() as conn:
+        leaf_run = await wf_queries.get_run_for_step(conn, leaf_id)
+    assert leaf_run is not None and leaf_run.request_ref == ref
+    assert leaf_run.status == "completed"
+    assert leaf_run.output["messages"] == wam_input["messages"]
+    assert leaf_run.output["session_id"] == leaf_id
+
+
+# A run holding ref A may name only A: a ref to another session's request in the same
+# account (B) is refused, whatever the run holds. Without these, a gate that granted
+# any ref to a run holding some ref (`run.request_ref is not None`) passed every test.
+
+
+async def _two_sessions_refs(pool: asyncpg.Pool[Any]) -> tuple[RequestRef, RequestRef]:
+    """Refs to two different sessions' captured requests in the same account."""
+    s1, park_1, _ = await _parked_turn(pool)
+    # S2: a second session on S1's agent, so its turn parks on the same workflow.
+    async with pool.acquire() as conn:
+        agent_id = await conn.fetchval("SELECT agent_id FROM sessions WHERE id = $1", s1)
+    s2 = (
+        await sessions_service.create_session(
+            pool,
+            agent_id=agent_id,
+            environment_id=_ENV,
+            title="mwfcr-2",
+            metadata={},
+            account_id=_ACCOUNT,
+        )
+    ).id
+    await sessions_service.append_user_message(pool, s2, "answer that", account_id=_ACCOUNT)
+    await run_session_step(s2)
+    async with pool.acquire() as conn:
+        park_2 = await conn.fetchval(
+            "SELECT id FROM events WHERE session_id = $1 AND kind = 'span' "
+            "AND data->>'event' = 'model_workflow_park'",
+            s2,
+        )
+    assert s1 != s2 and park_2 is not None and park_1 != park_2
+    return (
+        RequestRef(session_id=s1, request_id=park_1),
+        RequestRef(session_id=s2, request_id=park_2),
+    )
+
+
+async def _call_llm_spend(pool: asyncpg.Pool[Any], run_id: str) -> int:
+    async with pool.acquire() as conn:
+        return await wf_queries.get_run_call_llm_cost_microusd(conn, run_id, account_id=_ACCOUNT)
+
+
+async def _sub_run_count(pool: asyncpg.Pool[Any], parent_id: str) -> int:
+    async with pool.acquire() as conn:
+        return await conn.fetchval(  # type: ignore[no-any-return]
+            "SELECT count(*) FROM wf_runs WHERE parent_run_id = $1", parent_id
+        )
+
+
+_CALL_LLM_REF = "async def main(input):\n    return await call_llm(request_ref=input['ref'], model='test/model')\n"
+_HAND_ON_REF = (
+    "async def main(input):\n"
+    "    return await invoke_workflow(input['wf'], None, request_ref=input['ref'])\n"
+)
+
+
+@pytest.mark.parametrize("own", [False, True], ids=["other_sessions_ref", "own_ref"])
+async def test_a_run_holding_a_ref_calls_llm_only_with_that_ref(
+    mwf_runtime: asyncpg.Pool[Any], own: bool
+) -> None:
+    """A run created with S1's ref A: ``call_llm(request_ref=A)`` dispatches, while
+    ``call_llm(request_ref=B)`` (S2's request, same account) is refused with
+    ``request_ref_not_granted`` and nothing is sent or charged."""
+    pool = mwf_runtime
+    ref_a, ref_b = await _two_sessions_refs(pool)
+    named = ref_a if own else ref_b
+    wf = await _workflow(pool, "call-ref", _CALL_LLM_REF)
+    run_id = await _operator_run(pool, wf, input={"ref": named.model_dump()}, request_ref=ref_a)
+    spent_before = await _account_spent(pool)
+
+    with mock.patch("aios.workflows.run_llm.launch_call_llm_task") as launch:
+        await _drive(run_id, 2)
+
+    if own:
+        # Dispatched past the gate (each wake re-dispatches the open call while the
+        # patched launch never resolves it), always for A, and nothing was refused.
+        assert launch.call_count >= 1
+        assert all(
+            c.kwargs["spec"]["request_ref"] == ref_a.model_dump() for c in launch.call_args_list
+        )
+        assert await _results(pool, run_id) == []
+    else:
+        launch.assert_not_called()
+        [result] = await _results(pool, run_id)
+        assert result["error_kind"] == "request_ref_not_granted"
+        assert await _call_llm_spend(pool, run_id) == 0
+        assert await _account_spent(pool) == spent_before
+
+
+@pytest.mark.parametrize("own", [False, True], ids=["other_sessions_ref", "own_ref"])
+async def test_a_run_holding_a_ref_hands_on_only_that_ref(
+    mwf_runtime: asyncpg.Pool[Any], own: bool
+) -> None:
+    """A run created with S1's ref A: ``invoke_workflow(request_ref=A)`` spawns a
+    sub-run holding A, while handing on B (S2's request, same account) is refused with
+    ``invoke_workflow_refused`` and no sub-run row is written."""
+    pool = mwf_runtime
+    ref_a, ref_b = await _two_sessions_refs(pool)
+    named = ref_a if own else ref_b
+    parent = await _workflow(pool, "hand-on-ref", _HAND_ON_REF)
+    parent_id = await _operator_run(
+        pool,
+        parent,
+        input={"wf": await _echo_workflow(pool), "ref": named.model_dump()},
+        request_ref=ref_a,
+    )
+
+    await run_workflow_step(parent_id)
+
+    if own:
+        assert await _sub_run_count(pool, parent_id) == 1
+        async with pool.acquire() as conn:
+            sub = await wf_queries.get_run_for_step(conn, await _only_sub_run(pool, parent_id))
+        assert sub is not None and sub.request_ref == ref_a
+    else:
+        async with pool.acquire() as conn:
+            events = await wf_queries.list_run_events(conn, parent_id)
+        refusals = [e.payload["error"]["kind"] for e in events if e.type == "call_result"]
+        assert refusals == ["invoke_workflow_refused"]
+        assert await _sub_run_count(pool, parent_id) == 0
+
+
+# ── #2474 B3: the park writes a ref to its own request ────────────────────────
+
+
+async def test_a_parked_turn_holds_a_ref_to_its_own_request(
+    mwf_runtime: asyncpg.Pool[Any],
+) -> None:
+    """The turn's run holds a ref to the park span (its grant) and no input: the input,
+    today's payload plus the ref, is only in its prunable ``run_started`` (#2474 B4),
+    and an inline ``api_key`` never reaches the run."""
+    forget_stored_blobs()
+    pool = mwf_runtime
+    session_id = await _make_bound_session(
+        pool,
+        litellm_extra={"api_key": "sk-inline-secret", "temperature": 0.2},
+        script=_ECHO_AFTER_A_WAKE,
+    )
+    await run_session_step(session_id)
+
+    async with pool.acquire() as conn:
+        park_id = await conn.fetchval(
+            "SELECT id FROM events WHERE session_id = $1 AND kind = 'span' "
+            "AND data->>'event' = 'model_workflow_park'",
+            session_id,
+        )
+    [run_id] = await _inner_run_ids(pool, session_id)
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_run_for_step(conn, run_id)
+        events = await wf_queries.list_run_events(conn, run_id)
+    assert run is not None
+    assert run.request_ref == RequestRef(session_id=session_id, request_id=park_id)
+    assert run.input is None
+    assert run.visibility == "session"
+    [started] = events
+    assert started.type == "run_started"
+    run_input = started.payload["input"]
+    assert run_input["request_ref"] == {"session_id": session_id, "request_id": park_id}
+    assert run_input["params"] == {"temperature": 0.2}
+    assert run_input["session_id"] == session_id
+
+    # No wake rebuilds the request: every one starts from run_started.
+    with mock.patch("aios.workflows.step.rebuild_request", wraps=rebuild_request) as rebuild_spy:
+        for _ in range(3):
+            await run_workflow_step(run_id)
+    rebuild_spy.assert_not_awaited()
+    async with pool.acquire() as conn:
+        done = await wf_queries.get_run_for_step(conn, run_id)
+        events = await wf_queries.list_run_events(conn, run_id)
+    assert done is not None and done.status == "completed"
+    assert done.output == run_input
+    assert [e.type for e in events].count("run_started") == 1
+    assert "sk-inline-secret" not in json.dumps([e.payload for e in events])
+
+
+async def test_a_parked_turns_recipe_can_send_its_request_by_ref(
+    mwf_runtime: asyncpg.Pool[Any],
+) -> None:
+    """A recipe forwards its own request by ref: the call is granted and launched."""
+    forget_stored_blobs()
+    pool = mwf_runtime
+    session_id = await _make_bound_session(
+        pool,
+        script=(
+            "async def main(input):\n"
+            "    return await call_llm(request_ref=input['request_ref'], model='openrouter/x')\n"
+        ),
+    )
+    await run_session_step(session_id)
+    [run_id] = await _inner_run_ids(pool, session_id)
+
+    with mock.patch("aios.workflows.step.run_llm.launch_call_llm_task") as launch:
+        await run_workflow_step(run_id)
+
+    launch.assert_called_once()
+    assert launch.call_args.kwargs["spec"]["kind"] == "ref"
+    assert await _results(pool, run_id) == []  # nothing refused
+
+
+async def test_a_finished_turns_run_still_answers_after_its_journal_is_pruned(
+    mwf_runtime: asyncpg.Pool[Any],
+) -> None:
+    """#2474 B4: a workflow-as-model run is archived with no grace and its journal is
+    pruned on the short schedule. The harvest reads its answer from the run row, so it
+    answers the same after the prune, and then the turn completes."""
+    pool = mwf_runtime
+    session_id = await _make_bound_session(pool)
+    await run_session_step(session_id)
+    [run_id] = await _inner_run_ids(pool, session_id)
+    run_output = await _resolve_inner_run(pool, run_id)
+
+    async with pool.acquire() as conn:
+        before = await wf_queries.derive_run_response(conn, run_id, account_id=_ACCOUNT)
+        archived = await reconcile_terminal_archival_batch(
+            conn, grace_days=7, request_copy_grace_days=0
+        )
+        await prune_archived_runs(conn, retention_days=30, request_copy_retention_days=0)
+        run = await wf_queries.get_run_for_step(conn, run_id)
+        after = await wf_queries.derive_run_response(conn, run_id, account_id=_ACCOUNT)
+        events = await wf_queries.list_run_events(conn, run_id)
+    assert archived == 1
+    assert run is not None and run.archived_at is not None
+    assert run.journal_pruned_at is not None and events == []
+    assert before is not None and after == before
+
+    await write_harvest_event(
+        pool,
+        session_id,
+        run_id=run_id,
+        outcome="ok",
+        output=run_output,
+        error=None,
+        account_id=_ACCOUNT,
+    )
+    await run_session_step(session_id, cause="model_workflow_harvest")
+    async with pool.acquire() as conn:
+        assistant = await conn.fetchval(
+            "SELECT count(*) FROM events WHERE session_id = $1 AND kind = 'message' "
+            "AND data->>'role' = 'assistant'",
+            session_id,
+        )
+    assert assistant == 1

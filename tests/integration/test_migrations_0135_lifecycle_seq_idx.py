@@ -9,7 +9,7 @@ non-partial index that only seeks ``session_id`` (``events_session_created_at_id
 from migration 0022, or the ``(session_id, seq)`` unique index) and heap-filters
 ``kind = 'lifecycle'`` across the whole session slate. These tests pin the fix
 two ways: the index exists in ``pg_indexes`` after ``alembic upgrade head``, and
-an ``EXPLAIN (FORMAT JSON)`` of the exact ``drop=None`` lifecycle-arm query
+an ``EXPLAIN (FORMAT JSON)`` of the exact ``after_seq=None`` lifecycle-arm query
 (with real bind values) shows an ``events`` scan carrying no residual
 ``Filter: (kind = 'lifecycle')`` — i.e. the partial index's own predicate
 absorbed it. On master (no index) the plan heap-filters kind, so this is the
@@ -105,7 +105,7 @@ SELECT
 FROM generate_series(1, {_N_EVENTS}) AS g;
 """
 
-# The exact ``drop=None`` lifecycle arm of ``read_windowed_context_events``
+# The exact ``after_seq=None`` lifecycle arm of ``read_windowed_context_events``
 # (query text copied verbatim from ``src/aios/db/queries/events.py``).
 _LIFECYCLE_ARM_SQL = """
 SELECT * FROM events

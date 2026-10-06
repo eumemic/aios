@@ -23,6 +23,7 @@ from aios.harness.context import (
     _is_degenerate_empty_assistant,
     _quarantine_placeholder,
     build_messages,
+    finalize_messages,
     merge_adjacent_user_messages,
     reminder_message,
     render_user_event,
@@ -74,16 +75,12 @@ def _full_pipeline_for_model(
     strips reasoning fields for non-thinking targets) -> adjacent-user merge
     -> the production ``supports_thinking``-gated reasoning-stub helper.
 
-    The stub step calls the real
-    ``step_context._stub_reasoning_content_for_thinking_target`` — the exact
-    seam the composer uses — so a regression that ungates it (re-adding the
+    The tail is the real :func:`finalize_messages` — the exact seam the
+    composer uses — so a regression that ungates the stub (re-adding the
     field for non-thinking targets) is caught here without a DB-backed
     ``compose_step_context`` round-trip."""
-    from aios.harness.step_context import _stub_reasoning_content_for_thinking_target
-
     ctx = build_messages(events, system_prompt=None, model=model)
-    messages = merge_adjacent_user_messages(ctx.messages)
-    return _stub_reasoning_content_for_thinking_target(messages, model)
+    return finalize_messages(ctx.messages, reminder_contents=(), model=model)
 
 
 # Fixed receipt time so the per-message ``received=`` envelope field

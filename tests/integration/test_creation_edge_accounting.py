@@ -91,6 +91,7 @@ async def _charge_known_chain(
             input_tokens=10,
             output_tokens=1,
             cost_microusd=100,
+            model="test/model",
         )
         await wf_queries.add_run_call_llm_cost_microusd(
             conn,
@@ -99,6 +100,7 @@ async def _charge_known_chain(
             account_id=ACCOUNT,
             input_tokens=20,
             output_tokens=2,
+            model="test/model",
         )
         await queries.increment_session_usage(
             conn,
@@ -107,6 +109,7 @@ async def _charge_known_chain(
             input_tokens=30,
             output_tokens=3,
             cost_microusd=300,
+            model="test/model",
         )
 
 
@@ -174,6 +177,7 @@ async def test_agent_workflow_agent_rolls_up_exact_own_sum_live_and_after_archiv
             input_tokens=4,
             output_tokens=0,
             cost_microusd=40,
+            model="test/model",
         )
         after_archive = await accounting_queries.usage_for_node(
             conn,
@@ -225,6 +229,7 @@ async def test_descendant_mutation_moves_root_by_exact_amount_and_peer_invocatio
             input_tokens=5,
             output_tokens=1,
             cost_microusd=55,
+            model="test/model",
         )
 
         # This is the persisted shape of call_session against an existing peer.
@@ -375,6 +380,7 @@ async def test_ranked_view_fingers_known_hot_root_in_one_query(
             input_tokens=1_000,
             output_tokens=100,
             cost_microusd=10_000,
+            model="test/model",
         )
         coverage, total_rate, consumers = await accounting_queries.ranked_consumers(
             conn,

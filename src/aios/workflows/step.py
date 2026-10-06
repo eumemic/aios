@@ -35,6 +35,7 @@ from typing import Any, Literal, NamedTuple
 
 import asyncpg
 import jsonschema
+from pydantic import ValidationError as PydanticValidationError
 from referencing import Registry, Resource
 from referencing.exceptions import Unresolvable
 from referencing.jsonschema import DRAFT202012
@@ -49,9 +50,18 @@ from aios.jobs.app import defer_run_wake, defer_trigger_fire, defer_wake
 from aios.logging import get_logger
 from aios.models.attenuation import api_base_of, surface_of
 from aios.models.sessions import Err, Outcome
-from aios.models.workflows import TERMINAL_RUN_STATUSES, WfRun, WfRunEvent, WfRunStatus
+from aios.models.workflows import (
+    TERMINAL_RUN_STATUSES,
+    AsAgent,
+    RequestRef,
+    RunAuthority,
+    WfRun,
+    WfRunEvent,
+    WfRunStatus,
+)
 from aios.services import attenuation as attenuation_service
 from aios.services.model_binding_authz import is_workflow_binding
+from aios.services.requests import Missing, rebuild_request
 from aios.services.sessions import (
     AskNewSession,
     create_child_session,
@@ -63,7 +73,7 @@ from aios.services.sessions import (
 )
 from aios.tools.registry import tool_executes_class
 from aios.tools.schema_errors import normalize_and_format_schema_violation
-from aios.workflows import run_llm, run_sandbox, run_tools
+from aios.workflows import run_llm, run_replay, run_sandbox, run_tools
 from aios.workflows.child_id import child_session_id
 from aios.workflows.child_run_id import child_run_id
 from aios.workflows.determinism import HOST_SEMANTICS_EPOCH
@@ -355,6 +365,38 @@ async def _enrich_agent_result(
     }
 
 
+async def _materialize_request(
+    pool: asyncpg.Pool[Any], run: WfRun, ref: RequestRef
+) -> dict[str, Any] | str:
+    """Rebuild the request ``ref`` names as the input a workflow-as-model run gets:
+    ``{messages, tools, params, session_id, request_ref}``. Returns why it can't when
+    the request is gone (its session or span deleted, or a blob or attachment missing).
+
+    ``session_id`` is the prompt-cache key a recipe forwards to ``call_llm``. A run
+    that acts for a session shares that session's key; an operator run (an eval arm)
+    gets its own, so its calls never share a cache key with production or each other.
+    """
+    try:
+        rebuilt = await rebuild_request(
+            pool,
+            account_id=run.account_id,
+            session_id=ref.session_id,
+            request_event_id=ref.request_id,
+        )
+    except NotFoundError as exc:
+        return f"the request this run was created with is unavailable: {exc}"
+    if isinstance(rebuilt, Missing):
+        return (
+            "the request this run was created with is unavailable: "
+            f"a {rebuilt.what} it needs is gone"
+        )
+    return {
+        **rebuilt.request,
+        "session_id": ref.session_id if run.principal == "session" else run.id,
+        "request_ref": ref.model_dump(),
+    }
+
+
 async def run_workflow_step(run_id: str) -> None:
     pool = runtime.require_pool()
 
@@ -380,6 +422,27 @@ async def run_workflow_step(run_id: str) -> None:
 async def _run_workflow_step_body(
     pool: asyncpg.Pool[Any], run_id: str, run: WfRun, account_id: str
 ) -> None:
+    # A run created with a request ref and no input (#2474) starts the script with the
+    # rebuilt request. Rebuild it before taking the step's connection: the rebuild
+    # reads on its own connection and renders off the event loop. ``last_event_seq``
+    # is read under the run's lock, so 0 means this is the wake that starts the run.
+    # A run that is about to be cancelled, or to fail on the engine epoch, never needs
+    # its request: skip the rebuild, so a rebuild that crashes can't keep a cancel
+    # from landing.
+    materialized: dict[str, Any] | str | None = None
+    if (
+        run.request_ref is not None
+        and run.input is None
+        and run.last_event_seq == 0
+        and run.host_semantics_epoch == HOST_SEMANTICS_EPOCH
+    ):
+        async with pool.acquire() as conn:
+            cancelling = any(
+                s.call_key == wf_queries.CANCEL_SIGNAL_CALL_KEY
+                for s in await wf_queries.list_run_signals(conn, run_id)
+            )
+        if not cancelling:
+            materialized = await _materialize_request(pool, run, run.request_ref)
     async with pool.acquire() as conn:
         # ``running`` is the step's LEASE (#780): flipped on EVERY wake before any
         # journal write — not just the first — so a crash anywhere mid-step
@@ -435,14 +498,37 @@ async def _run_workflow_step_body(
             if e.type == "call_started" and e.call_key is not None and e.call_key not in memo
         }
 
-        if not events:
-            await wf_queries.append_run_event(
+        # The script's input is what ``run_started`` recorded, never the row: a run
+        # created with a request ref and no input (#2474) has none on its row, and its
+        # request is rebuilt once, here, rather than on every wake.
+        if events:
+            assert events[0].type == "run_started", events[0].type
+            script_input = events[0].payload["input"]
+        else:
+            if materialized is not None:
+                if isinstance(materialized, str):
+                    await _complete_run(
+                        conn,
+                        run,
+                        output=materialized,
+                        is_error=True,
+                        error_kind="request_unavailable",
+                    )
+                    return
+                script_input = materialized
+            else:
+                script_input = run.input
+            started = await wf_queries.append_run_event(
                 conn,
                 account_id=account_id,
                 run_id=run_id,
                 type="run_started",
-                payload={"input": run.input},
+                payload={"input": script_input},
             )
+            # Start from the stored copy, so this wake sees the same input (key order
+            # included, after the jsonb round trip) as every later wake.
+            if started is not None:
+                script_input = started.payload["input"]
 
         # Pre-replay harvest: resolve any inflight capability that is now done — a
         # gate with a delivered resume signal, or an agent child with a response (or a
@@ -631,7 +717,7 @@ async def _run_workflow_step_body(
             return
 
     # Drive one wake in the credential-free subprocess (no DB conn held).
-    outcome = await run_script_host(source=run.script, input=run.input, memo=memo)
+    outcome = await run_script_host(source=run.script, input=script_input, memo=memo)
 
     # Post-replay step disposition (#1548). A same-wake call_result journaled this wake
     # (budget read or catchable agent error) owes one more drive so the replay throws the
@@ -921,6 +1007,24 @@ async def _run_workflow_step_body(
                     },
                 )
                 disposition = _escalate(disposition, "owed_drive")
+            elif cap.capability_id == "sub_runs":
+                # Metadata about the run's own creation subtree (#2472 D3): no
+                # declaration needed, like budget(); never inputs, outputs or journals.
+                facts = await wf_queries.sub_run_facts(
+                    conn,
+                    run_id,
+                    account_id=account_id,
+                    max_nodes=get_settings().trace_max_nodes,
+                )
+                await wf_queries.append_run_event(
+                    conn,
+                    account_id=account_id,
+                    run_id=run_id,
+                    type="call_result",
+                    call_key=cap.call_key,
+                    payload={"result": facts, "is_error": False},
+                )
+                disposition = _escalate(disposition, "owed_drive")
             elif cap.capability_id == "tool":
                 spec = cap.spec if isinstance(cap.spec, dict) else {}
                 tool_name = spec.get("tool_name")
@@ -1005,8 +1109,24 @@ async def _run_workflow_step_body(
                 # resolve" contract). The call_started/result pair fully resolves it —
                 # no worker task launches, so no inference (and no spend) occurs.
                 llm_spec = cap.spec if isinstance(cap.spec, dict) else {}
+                refusal: dict[str, Any] | None = None
                 if over_budget:
                     assert run.budget_usd is not None
+                    refusal = {
+                        "error": (
+                            f"run budget exhausted: spent "
+                            f"${budget_spent_microusd / 1_000_000:.2f} of "
+                            f"${run.budget_usd:.2f} — call_llm is refused"
+                        )
+                    }
+                elif llm_spec.get("kind") == "ref" and not await run_replay.request_ref_granted(
+                    conn, run, llm_spec.get("request_ref")
+                ):
+                    refusal = {
+                        "error": "call_llm can send only a request this run was given or sampled",
+                        "error_kind": "request_ref_not_granted",
+                    }
+                if refusal is not None:
                     await wf_queries.append_run_event(
                         conn,
                         account_id=account_id,
@@ -1021,16 +1141,7 @@ async def _run_workflow_step_body(
                         run_id=run_id,
                         type="call_result",
                         call_key=cap.call_key,
-                        payload={
-                            "result": {
-                                "error": (
-                                    f"run budget exhausted: spent "
-                                    f"${budget_spent_microusd / 1_000_000:.2f} of "
-                                    f"${run.budget_usd:.2f} — call_llm is refused"
-                                )
-                            },
-                            "is_error": False,
-                        },
+                        payload={"result": refusal, "is_error": False},
                     )
                     disposition = _escalate(disposition, "owed_drive")
                     continue
@@ -1420,6 +1531,40 @@ async def _open_invoke_workflow_capability(
             "bad_invoke_workflow",
             f"invoke_workflow() requires workflow_id to be a string, got {workflow_id!r}",
         )
+    version = spec.get("version")
+    # Upper bound: ``workflow_versions.version`` is int4, and an out-of-range value
+    # would raise a DataError at the query instead of a catchable rejection.
+    if version is not None and (
+        isinstance(version, bool) or not isinstance(version, int) or not 1 <= version < 2**31
+    ):
+        return await _reject(
+            "bad_invoke_workflow",
+            f"invoke_workflow() requires version to be a positive integer, got {version!r}",
+        )
+    as_agent_spec = spec.get("as_agent")
+    try:
+        as_agent = (
+            AsAgent.model_validate(as_agent_spec, strict=True)
+            if as_agent_spec is not None
+            else None
+        )
+    except PydanticValidationError:
+        return await _reject(
+            "bad_invoke_workflow",
+            "invoke_workflow() requires as_agent to be {'agent_id': str, 'version': int >= 1}, "
+            f"got {as_agent_spec!r}",
+        )
+    # The script host checked the ref's shape; this run may hand on only a ref it can
+    # resolve itself (#2474). The sub-run's row then holds it as its own grant.
+    request_ref_spec = spec.get("request_ref")
+    request_ref: RequestRef | None = None
+    if request_ref_spec is not None:
+        if not await run_replay.request_ref_granted(conn, run, request_ref_spec):
+            return await _reject(
+                "invoke_workflow_refused",
+                "invoke_workflow() can hand on only a request this run was given or sampled",
+            )
+        request_ref = RequestRef.model_validate(request_ref_spec)
     # output_schema rides the wire as a canonical JSON *string* (mirror agent());
     # reconstruct the dict and apply the SAME author-facing validity gates.
     output_schema_raw = spec.get("output_schema")
@@ -1441,7 +1586,6 @@ async def _open_invoke_workflow_capability(
         return rejected
 
     sub_run_id = child_run_id(run.id, cap.call_key)
-    run_vaults = await wf_queries.get_run_vault_ids(conn, run.id, account_id=account_id)
     # Spawn (or idempotently re-attach) the sub-run. ``create_run`` owns its own
     # transaction on a separate pooled connection (like ``create_child_session``);
     # its create-or-reattach + caps are all internal. A 404 (workflow gone /
@@ -1453,20 +1597,25 @@ async def _open_invoke_workflow_capability(
             workflow_id=workflow_id,
             environment_id=run.environment_id,
             input=spec.get("input"),
-            vault_ids=run_vaults,
             run_id=sub_run_id,
-            parent_run_id=run.id,
-            # #1653: propagate the originating launcher down the ``parent_run_id``
-            # lineage, so ``create_run`` clamps the sub-run to that session's surface
-            # (#794) and the insert trigger stamps the sub-run's principal from it. NULL
-            # for an operator chain, and also once the launching session is deleted —
-            # ``create_run`` refuses that case (#2467), since nothing is left to clamp to.
-            launcher_session_id=run.launcher_session_id,
+            version=version,
+            # The sub-run acts within this run's frozen surface and inherits its vaults
+            # (#2472); ``as_agent`` re-roots the surface at an agent version.
+            authority=RunAuthority(run.id, as_agent),
+            request_ref=request_ref,
             request_id=cap.call_key,  # the invoke_workflow() call IS the request
             caller={"kind": "run", "id": run.id, "awaited": True},
             request_output_schema=output_schema,
         )
-    except NotFoundError:
+    except NotFoundError as exc:
+        # The exact shapes ``get_workflow_version`` and ``get_agent_version`` raise.
+        if exc.detail == {"workflow_id": workflow_id, "version": version}:
+            return await _reject("workflow_version_not_found", str(exc))
+        if as_agent is not None and exc.detail == {
+            "agent_id": as_agent.agent_id,
+            "version": as_agent.version,
+        }:
+            return await _reject("agent_version_not_found", str(exc))
         return await _reject("workflow_not_found", f"workflow {workflow_id!r} not found")
     except ConflictError as exc:
         return await _reject("bad_invoke_workflow", str(exc))

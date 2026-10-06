@@ -48,6 +48,9 @@ from aios.models.triggers import (
     CronSource,
     ExternalEventSource,
     OneShotSource,
+    OperatorTriggerCreate,
+    OperatorTriggerEcho,
+    OperatorTriggerUpdate,
     RunCompletionSource,
     SandboxCommandAction,
     TriggerCreate,
@@ -132,6 +135,25 @@ async def validate_trigger_spec(
         # just inserted under this account); a misaimed session would silently
         # skip the cross-tenant check this helper was built to enforce.
         assert session.id == session_id
+    await _validate_trigger_references(conn, source, action, account_id=account_id)
+    if not isinstance(action, WorkflowAction):
+        return None
+    # Sessions' environment is immutable, so resolving it at write time equals
+    # fire-time resolution; environment_id is deliberately NOT a wire field (a
+    # caller-chosen env would bypass the call_workflow builtin's same refusal).
+    return session.environment_id
+
+
+async def _validate_trigger_references(
+    conn: asyncpg.Connection[Any],
+    source: CronSource | OneShotSource | RunCompletionSource | ExternalEventSource | None,
+    action: SandboxCommandAction | WakeOwnerAction | WakeSessionAction | WorkflowAction | None,
+    *,
+    account_id: str,
+) -> None:
+    """The reference checks every trigger write path shares (see
+    :func:`validate_trigger_spec`): a watched workflow exists, and an action's
+    workflow exists with any ``workflow_version`` pin equal to its current version."""
     if isinstance(source, RunCompletionSource):
         await wf_queries.get_workflow(conn, source.workflow_id, account_id=account_id)
     if isinstance(source, ExternalEventSource):
@@ -140,7 +162,7 @@ async def validate_trigger_spec(
         # branch so a future reviewer sees the case was considered, not missed.
         pass
     if not isinstance(action, WorkflowAction):
-        return None
+        return
     workflow = await wf_queries.get_workflow(conn, action.workflow_id, account_id=account_id)
     if action.workflow_version is not None and action.workflow_version != workflow.version:
         raise ConflictError(
@@ -149,10 +171,6 @@ async def validate_trigger_spec(
             "you reviewed",
             detail={"pinned": action.workflow_version, "current": workflow.version},
         )
-    # Sessions' environment is immutable, so resolving it at write time equals
-    # fire-time resolution; environment_id is deliberately NOT a wire field (a
-    # caller-chosen env would bypass the call_workflow builtin's same refusal).
-    return session.environment_id
 
 
 def _lifecycle_snapshot(trigger: TriggerEcho, reason: str) -> dict[str, Any]:
@@ -374,54 +392,20 @@ async def update_trigger(
             )
             if update.action is not None:
                 environment_id = resolved
-        now = datetime.now(UTC)
         new_enabled = update.enabled if update.enabled is not None else current.enabled
         merged_source = update.source if update.source is not None else current.source
         merged_action = update.action if update.action is not None else current.action
         warnings = await _lint_trigger(conn, merged_source, merged_action, account_id=account_id)
 
-        next_fire: datetime | EllipsisType | None = ...  # ... = leave alone
+        next_fire = await _rearm(
+            conn,
+            current_enabled=current.enabled,
+            new_enabled=new_enabled,
+            source_provided=source_provided,
+            merged_source=merged_source,
+            account_id=account_id,
+        )
         reenabled = new_enabled and not current.enabled
-        # The arming invariant ("an enabled schedulable trigger always has
-        # non-NULL next_fire") is enforced by the triggers_schedulable_enabled_armed
-        # CHECK (migration 0130), so there is no heal disjunct here: the only
-        # producers of a NULL-next_fire-on-enabled row (the #925 manual
-        # `UPDATE … SET enabled=true`) are now rejected at write time. We recompute
-        # next_fire only on a genuine re-enable (false->true) or a source replace
-        # on an already-enabled row; the per-account cap re-check and the
-        # consecutive-failures reset are gated on `not current.enabled` / `reenabled`
-        # below, so they apply only to a genuine re-enable.
-        if not new_enabled and current.enabled:
-            # Disabling: clear next_fire.
-            next_fire = None
-        elif new_enabled and (source_provided or not current.enabled):
-            # Re-enabling, or replacing the source on a row whose final
-            # state is enabled: recompute next_fire from the merged source.
-            if not current.enabled:
-                # Re-enable consumes a per-account active-trigger slot (a
-                # disabled row didn't); take the lock + cap check so this
-                # can't race past the cap against concurrent adds.
-                await queries.acquire_account_triggers_lock(conn, account_id)
-                cap = get_settings().triggers_per_account_max
-                existing = await queries.count_account_triggers(
-                    conn, account_id=account_id, enabled_only=True
-                )
-                if existing >= cap:
-                    raise RateLimitedError(
-                        f"account at active-trigger cap ({existing}/{cap}); remove "
-                        "or disable another trigger before re-enabling this one"
-                    )
-            # Reject a one-shot whose merged fire_at is already in the past:
-            # silently firing immediately with a stale wake reason is the
-            # worse failure mode. Applies to re-enable AND source-replace on
-            # an already-enabled row (today's behavior).
-            if isinstance(merged_source, OneShotSource) and merged_source.fire_at <= now:
-                raise ValidationError(
-                    f"one-shot fire_at {merged_source.fire_at.isoformat()} is not in the "
-                    "future; set a fresh fire_at before enabling (or send a new fire_at "
-                    "in this same request)"
-                )
-            next_fire = compute_initial_next_fire(merged_source, now)
 
         # Ingest-secret lifecycle keyed on a PROVIDED source replacement only
         # (a no-op or action/metadata/enabled-only update leaves the column
@@ -460,6 +444,60 @@ async def update_trigger(
                 conn, echo, "api", account_id=account_id, session_id=session_id
             )
         return TriggerCreated(**echo.model_dump(), ingest_token=ingest_plaintext, warnings=warnings)
+
+
+async def _rearm(
+    conn: asyncpg.Connection[Any],
+    *,
+    current_enabled: bool,
+    new_enabled: bool,
+    source_provided: bool,
+    merged_source: CronSource | OneShotSource | RunCompletionSource | ExternalEventSource,
+    account_id: str,
+) -> datetime | EllipsisType | None:
+    """The ``next_fire`` an update writes (``...`` = leave alone), shared by the
+    session and operator update paths.
+
+    The arming invariant ("an enabled schedulable trigger always has non-NULL
+    next_fire") is enforced by the triggers_schedulable_enabled_armed CHECK
+    (migration 0130), so there is no heal disjunct here: the only producers of a
+    NULL-next_fire-on-enabled row (the #925 manual `UPDATE … SET enabled=true`)
+    are now rejected at write time. next_fire is recomputed only on a genuine
+    re-enable (false->true) or a source replace on an already-enabled row; the
+    per-account cap re-check applies only to a genuine re-enable.
+    """
+    if not new_enabled and current_enabled:
+        # Disabling: clear next_fire.
+        return None
+    if not (new_enabled and (source_provided or not current_enabled)):
+        return ...
+    # Re-enabling, or replacing the source on a row whose final state is
+    # enabled: recompute next_fire from the merged source.
+    if not current_enabled:
+        # Re-enable consumes a per-account active-trigger slot (a disabled row
+        # didn't); take the lock + cap check so this can't race past the cap
+        # against concurrent adds.
+        await queries.acquire_account_triggers_lock(conn, account_id)
+        cap = get_settings().triggers_per_account_max
+        existing = await queries.count_account_triggers(
+            conn, account_id=account_id, enabled_only=True
+        )
+        if existing >= cap:
+            raise RateLimitedError(
+                f"account at active-trigger cap ({existing}/{cap}); remove "
+                "or disable another trigger before re-enabling this one"
+            )
+    # Reject a one-shot whose merged fire_at is already in the past: silently
+    # firing immediately with a stale wake reason is the worse failure mode.
+    # Applies to re-enable AND source-replace on an already-enabled row.
+    now = datetime.now(UTC)
+    if isinstance(merged_source, OneShotSource) and merged_source.fire_at <= now:
+        raise ValidationError(
+            f"one-shot fire_at {merged_source.fire_at.isoformat()} is not in the "
+            "future; set a fresh fire_at before enabling (or send a new fire_at "
+            "in this same request)"
+        )
+    return compute_initial_next_fire(merged_source, now)
 
 
 async def list_triggers(
@@ -507,4 +545,120 @@ async def list_trigger_runs(
     async with pool.acquire() as conn:
         return await queries.list_trigger_runs(
             conn, account_id=account_id, session_id=session_id, trigger_name=name, limit=limit
+        )
+
+
+# ─── operator-owned triggers (#2473) ─────────────────────────────────────────
+#
+# The ``/v1/triggers`` surface. An operator trigger has no session: nothing is
+# appended to a session log on write or fire, and its runs are operator runs.
+# Its request models admit only timer sources and a budgeted workflow action;
+# the ``triggers_owner_kind_shape`` CHECK enforces the same on the row. It
+# shares the per-account active-trigger cap with session triggers.
+
+
+async def add_operator_trigger(
+    pool: asyncpg.Pool[Any], spec: OperatorTriggerCreate, *, account_id: str
+) -> OperatorTriggerEcho:
+    """Create an operator trigger. Its environment and its action's workflow must
+    exist in the account; ``action.vault_ids`` are bound as-is at each fire, where a
+    missing vault fails that fire."""
+    next_fire = compute_initial_next_fire(spec.source, datetime.now(UTC)) if spec.enabled else None
+    async with pool.acquire() as conn, conn.transaction():
+        await queries.get_environment(conn, spec.environment_id, account_id=account_id)
+        await _validate_trigger_references(conn, spec.source, spec.action, account_id=account_id)
+        warnings = await _lint_trigger(conn, spec.source, spec.action, account_id=account_id)
+        await queries.acquire_account_triggers_lock(conn, account_id)
+        if spec.enabled:
+            cap = get_settings().triggers_per_account_max
+            existing = await queries.count_account_triggers(
+                conn, account_id=account_id, enabled_only=True
+            )
+            if existing >= cap:
+                raise RateLimitedError(
+                    f"account at active-trigger cap ({existing}/{cap}); "
+                    "remove or disable an existing trigger to free a slot"
+                )
+        echo = await queries.add_operator_trigger(
+            conn,
+            name=spec.name,
+            source=spec.source.kind,
+            source_spec=spec.source.model_dump(mode="json", exclude={"kind"}),
+            action=spec.action.model_dump(mode="json"),
+            enabled=spec.enabled,
+            metadata=spec.metadata,
+            next_fire=next_fire,
+            environment_id=spec.environment_id,
+            account_id=account_id,
+        )
+    return echo.model_copy(update={"warnings": warnings})
+
+
+async def update_operator_trigger(
+    pool: asyncpg.Pool[Any], name: str, update: OperatorTriggerUpdate, *, account_id: str
+) -> OperatorTriggerEcho:
+    """Update an operator trigger by name, with :func:`update_trigger`'s rules for
+    ``next_fire``, the cap on re-enable, and the failure-counter reset."""
+    async with pool.acquire() as conn, conn.transaction():
+        current = await queries.get_operator_trigger(conn, name, account_id=account_id)
+        if update.source is not None or update.action is not None:
+            await _validate_trigger_references(
+                conn, update.source, update.action, account_id=account_id
+            )
+        new_enabled = update.enabled if update.enabled is not None else current.enabled
+        merged_source = update.source if update.source is not None else current.source
+        merged_action = update.action if update.action is not None else current.action
+        warnings = await _lint_trigger(conn, merged_source, merged_action, account_id=account_id)
+        next_fire = await _rearm(
+            conn,
+            current_enabled=current.enabled,
+            new_enabled=new_enabled,
+            source_provided=update.source is not None,
+            merged_source=merged_source,
+            account_id=account_id,
+        )
+        echo = await queries.update_operator_trigger(
+            conn,
+            name,
+            source=update.source.kind if update.source is not None else None,
+            source_spec=(
+                update.source.model_dump(mode="json", exclude={"kind"})
+                if update.source is not None
+                else None
+            ),
+            action=update.action.model_dump(mode="json") if update.action is not None else None,
+            enabled=update.enabled,
+            metadata=update.metadata,
+            next_fire=next_fire,
+            reset_consecutive_failures=new_enabled and not current.enabled,
+            account_id=account_id,
+        )
+    return echo.model_copy(update={"warnings": warnings})
+
+
+async def get_operator_trigger(
+    pool: asyncpg.Pool[Any], name: str, *, account_id: str
+) -> OperatorTriggerEcho:
+    async with pool.acquire() as conn:
+        return await queries.get_operator_trigger(conn, name, account_id=account_id)
+
+
+async def list_operator_triggers(
+    pool: asyncpg.Pool[Any], *, account_id: str
+) -> list[OperatorTriggerEcho]:
+    async with pool.acquire() as conn:
+        return await queries.list_operator_triggers(conn, account_id=account_id)
+
+
+async def remove_operator_trigger(pool: asyncpg.Pool[Any], name: str, *, account_id: str) -> None:
+    async with pool.acquire() as conn:
+        await queries.remove_operator_trigger(conn, name, account_id=account_id)
+
+
+async def list_operator_trigger_runs(
+    pool: asyncpg.Pool[Any], name: str, *, account_id: str, limit: int = 50
+) -> list[TriggerRunEcho]:
+    async with pool.acquire() as conn:
+        return await queries.list_operator_trigger_runs(
+            conn, account_id=account_id, trigger_name=name, limit=limit
         )

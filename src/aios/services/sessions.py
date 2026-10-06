@@ -38,6 +38,7 @@ from aios.jobs.app import defer_run_wake, defer_wake
 from aios.logging import get_logger
 from aios.models.accounting import DEFAULT_USAGE_WINDOW_SECONDS, UsageNodeRef
 from aios.models.agents import (
+    REPLAY_TOOL_TYPES,
     StepSurface,
     is_mcp_tool_name,
 )
@@ -66,6 +67,7 @@ from aios.models.triggers import (
     TriggerCreate,
     compute_initial_next_fire,
 )
+from aios.models.workflows import OperatorAuthority
 from aios.sandbox.snapshot_store import get_snapshot_store
 from aios.sandbox.volumes import (
     purge_session_directories,
@@ -742,7 +744,11 @@ async def create_child_session(
             agent_version=stim.agent_version,
             model=stim.model,
             parent_run_id=stim.parent_run_id,
-            tools=stim.surface.tools,
+            # A replay tool is run-only (#2475): no session holds one. A named child's
+            # surface is already a meet with its agent's, which lacks them; a generic
+            # child of a replay run inherits the run's surface, so drop them here, at
+            # the one writer of a child's frozen surface.
+            tools=[t for t in stim.surface.tools if t.type not in REPLAY_TOOL_TYPES],
             mcp_servers=stim.surface.mcp_servers,
             http_servers=stim.surface.http_servers,
             ssh_servers=stim.surface.ssh_servers,
@@ -1074,6 +1080,7 @@ async def invoke(
             input=input,
             caller=caller,
             output_schema=output_schema,
+            authority=OperatorAuthority(),
             # The external/API task caller has no launcher session from which a
             # shared workspace could be inherited. Keep this operator launch on
             # the valid isolated mode; agent launches retain the shared default.
@@ -2547,6 +2554,7 @@ async def increment_usage(
     cache_read_input_tokens: int = 0,
     cache_creation_input_tokens: int = 0,
     cost_microusd: int = 0,
+    model: str | None,
 ) -> int:
     """Atomically add token and spend counts; return the account spend total."""
     async with pool.acquire() as conn:
@@ -2559,6 +2567,7 @@ async def increment_usage(
             cache_creation_input_tokens=cache_creation_input_tokens,
             cost_microusd=cost_microusd,
             account_id=account_id,
+            model=model,
         )
 
 

@@ -279,7 +279,7 @@ async def _resolve_inner_run_and_harvest(
         # Charge the run's ``call_llm`` meter once — the spend a real inference leaf
         # inside the run would book at its own site (the harvest re-charges nothing).
         await wf_queries.add_run_call_llm_cost_microusd(
-            conn, run_id, _INNER_COST_MICROUSD, account_id=_ACCOUNT
+            conn, run_id, _INNER_COST_MICROUSD, account_id=_ACCOUNT, model="test/model"
         )
     await write_harvest_event(
         pool,
@@ -352,11 +352,10 @@ async def test_sweep_ticks_do_not_relaunch_inner_run(mwf_runtime: asyncpg.Pool[A
 
 
 async def test_park_ticks_write_the_reminder_once(mwf_runtime: asyncpg.Pool[Any]) -> None:
-    """The composer's reminder writer runs on every tick (compose precedes the
-    park-pending check), so a parked session is the sharpest place to show the
-    change-gate: a concise agent parks, ≥3 sweep ticks elapse, and exactly ONE
-    reminder row exists — written on tick 1, before the park span — with every
-    later tick's ``context_build_end`` reporting nothing written."""
+    """A concise agent parks and ≥3 sweep ticks elapse: exactly ONE reminder row
+    exists, written on tick 1 before the park span. The pending ticks don't
+    compose at all (the park-pending check precedes compose), so they write no
+    reminder row that could replay ahead of the harvested turn."""
     pool = mwf_runtime
     session_id, _ = await _make_bound_session(pool, output_style="concise")
 
@@ -383,7 +382,7 @@ async def test_park_ticks_write_the_reminder_once(mwf_runtime: asyncpg.Pool[Any]
         ]
     assert len(reminder_seqs) == 1, reminder_seqs
     assert reminder_seqs[0] < park_seq
-    assert [e["reminders_written"] for e in ends] == [["concise"], [], [], []]
+    assert [e["reminders_written"] for e in ends] == [["concise"]]
     # The ticks were real: the parked session stayed a sweep candidate.
     needing = await find_sessions_needing_inference(pool, runtime.require_inflight_tool_registry())
     assert session_id in needing

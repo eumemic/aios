@@ -36,6 +36,7 @@ from aios.harness.invariant_sweep import (
     sweep_session_invariants,
 )
 from aios.models.sessions import Ok, Outcome
+from aios.models.workflows import OperatorAuthority
 from aios.services import sessions as service
 
 # ``run_tools`` first breaks the ``workflows.service`` <-> ``services.workflows`` import
@@ -186,6 +187,7 @@ class _Fixture:
         run = await wf_service.create_run(
             pool=self.pool,
             account_id=_ACCOUNT,
+            authority=OperatorAuthority(),
             workflow_id=wf.id,
             environment_id=self.env_id,
             input=None,
