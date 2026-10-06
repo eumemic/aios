@@ -637,6 +637,8 @@ from .requests import (  # noqa: E402
     get_blobs,
     get_events_by_seq,
     insert_blobs,
+    present_blob_shas,
+    sample_request_spans,
 )
 from .sandboxes import (  # noqa: E402
     acquire_workspace_advisory_xact_lock,
@@ -1129,6 +1131,7 @@ __all__ = [
     "outcome_to_jsonb",
     "phone_digits",
     "precompute_event_append",
+    "present_blob_shas",
     "prune_archived_runs",
     "prune_trigger_runs",
     "prune_unpinned_archived_agents",
@@ -1173,6 +1176,7 @@ __all__ = [
     "revoke_account_key",
     "revoke_inbound_grant",
     "revoke_runtime_token",
+    "sample_request_spans",
     "session_active_predicate",
     "session_errored_predicate",
     "set_browser_grant_handback",

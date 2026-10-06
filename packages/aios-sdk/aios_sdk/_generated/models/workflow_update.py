@@ -53,7 +53,13 @@ class WorkflowUpdate:
                 failed `agent`. `as_agent={"agent_id": ..., "version": N}` also intersects the sub-run's surface with that agent
                 version's; only a run an operator launched may pass it. `request_ref` (with `input=None`) hands the sub-run the
                 request this run was created with: it starts with that request as a workflow-as-model run would.
-                  - `tool(name, input)`: invoke a declared tool; tool errors are returned, not raised.
+                  - `tool(name, input)`: invoke a declared tool; tool errors are returned, not raised. An operator run that
+                declares the replay tools can read an agent's past requests: `tool("sample_requests", {"agent_id", "start",
+                "end", "n", "seed", "cluster_cap"})` returns `{"items": [...]}`, a seeded sample of the agent's answered
+                requests in `[start, end)` (ISO-8601 times), each with a `request_ref`, its session, time, model,
+                `response_event_id` and whether it is `missing`. `tool("get_request", {"request_ref", "model"})` rebuilds one as
+                `{messages, tools, params, fidelity}`. A ref a sample returned can be passed to `call_llm(request_ref=)`,
+                `invoke_workflow(request_ref=)` and `get_request`.
                   - `call_llm(request)`: run one raw inference turn and await the assistant turn. `request` carries `model`
                 (omit to use the run's default child model; a `workflow:` target is rejected), `messages` (required), optional
                 `tools` (schemas OFFERED — the model may request a call, but call_llm never runs it), and optional `params`
