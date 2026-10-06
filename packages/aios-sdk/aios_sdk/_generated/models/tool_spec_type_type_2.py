@@ -2,8 +2,8 @@ from enum import Enum
 
 
 class ToolSpecTypeType2(str, Enum):
-    CUSTOM = "custom"
-    MCP_TOOLSET = "mcp_toolset"
+    GET_REQUEST = "get_request"
+    SAMPLE_REQUESTS = "sample_requests"
 
     def __str__(self) -> str:
         return str(self.value)

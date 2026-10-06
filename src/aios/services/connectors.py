@@ -17,7 +17,7 @@ from pydantic import ValidationError as PydanticValidationError
 
 from aios.db import queries
 from aios.errors import ForbiddenError, ValidationError
-from aios.models.agents import ToolSpec
+from aios.models.agents import REPLAY_TOOL_TYPES, ToolSpec
 from aios.models.connectors import ConnectorCapabilities
 
 
@@ -35,10 +35,14 @@ def _validate_tools_schema(connector: str, tools_schema: list[dict[str, Any]]) -
     at the operator/author edge (a 422) instead of wedging live sessions.
     The check mirrors the exact model and site the prelude uses, so what
     passes here is what the prelude will accept.
+
+    A replay tool (``sample_requests`` / ``get_request``, #2475) is refused too, even
+    though ``ToolSpec`` admits it: only an operator workflow run may hold one, and a
+    connector's tools reach session surfaces, which must never hold one.
     """
     for index, entry in enumerate(tools_schema):
         try:
-            ToolSpec.model_validate(entry)
+            spec = ToolSpec.model_validate(entry)
         except PydanticValidationError as exc:
             raise ValidationError(
                 "connector tools_schema entry is not a valid ToolSpec; "
@@ -50,6 +54,12 @@ def _validate_tools_schema(connector: str, tools_schema: list[dict[str, Any]]) -
                     "errors": exc.errors(include_url=False),
                 },
             ) from exc
+        if spec.type in REPLAY_TOOL_TYPES:
+            raise ValidationError(
+                f"connector tools_schema entry declares {spec.type!r}, which only a "
+                "workflow run can hold; a connector's tools reach session surfaces",
+                detail={"connector": connector, "index": index, "type": spec.type},
+            )
 
 
 async def update_tools_schema(

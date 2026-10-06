@@ -20721,15 +20721,15 @@
               {
                 "type": "string",
                 "enum": [
-                  "sample_requests",
-                  "get_request"
+                  "custom",
+                  "mcp_toolset"
                 ]
               },
               {
                 "type": "string",
                 "enum": [
-                  "custom",
-                  "mcp_toolset"
+                  "sample_requests",
+                  "get_request"
                 ]
               }
             ],

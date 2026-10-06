@@ -891,7 +891,7 @@ class ToolSpec(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    type: BuiltinToolType | ReplayToolType | Literal["custom", "mcp_toolset"]
+    type: BuiltinToolType | Literal["custom", "mcp_toolset"] | ReplayToolType
     name: str | None = None
     description: str | None = None
     input_schema: dict[str, Any] | None = None

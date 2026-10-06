@@ -373,7 +373,7 @@ async def test_a_session_launch_drops_the_replay_tools(pool: asyncpg.Pool[Any]) 
         environment_id="env_vis",
     )
     assert run.tools == []
-    assert run.visibility == "account"
+    assert (run.principal, run.visibility) == ("session", "account")
 
 
 def _run_with(run: WfRun, *, principal: str, tools: list[ToolSpec]) -> WfRun:
@@ -442,3 +442,138 @@ async def test_a_generic_child_of_a_replay_run_holds_no_replay_tool(
             tools=_REPLAY_TOOLS,
             creator_session_id=child_id,
         )
+
+
+# ── #2475 gap tests: every launch path keeps the replay tools only on an operator run ─
+
+
+async def test_an_as_agent_sub_run_of_a_replay_run_drops_the_replay_tools(
+    pool: asyncpg.Pool[Any],
+) -> None:
+    """``as_agent`` re-roots a sub-run at an agent's surface within the parent's. No
+    agent holds a replay tool, so the sub-run drops them even though both the parent
+    and the sub-workflow declare them, and it stays operator-principal and private."""
+    agent = await agents_service.create_agent(
+        pool,
+        account_id="acc_vis",
+        name=f"arm-{next(_names)}",
+        model="test/dummy",
+        system="",
+        tools=[ToolSpec(type="read")],
+        description=None,
+        metadata={},
+        window_min=1000,
+        window_max=100000,
+    )
+    child = await wf_service.create_workflow(
+        pool,
+        account_id="acc_vis",
+        name=f"eval-arm-{next(_names)}",
+        script="async def main(input):\n    return 1\n",
+        tools=[*_REPLAY_TOOLS, ToolSpec(type="read")],
+    )
+    parent_wf = await wf_service.create_workflow(
+        pool,
+        account_id="acc_vis",
+        name=f"eval-driver-{next(_names)}",
+        script=(
+            "async def main(input):\n"
+            "    return await invoke_workflow(input['wf'], {}, as_agent=input['as_agent'])\n"
+        ),
+        tools=[*_REPLAY_TOOLS, ToolSpec(type="read")],
+    )
+    parent = await service.create_run(
+        pool,
+        account_id="acc_vis",
+        authority=OperatorAuthority(),
+        workflow_id=parent_wf.id,
+        environment_id="env_vis",
+        input={"wf": child.id, "as_agent": {"agent_id": agent.id, "version": 1}},
+    )
+    assert {t.type for t in parent.tools} >= {"sample_requests", "get_request"}
+    with mock.patch("aios.workflows.step.defer_run_wake", new=AsyncMock()):
+        await run_workflow_step(parent.id)
+
+    async with pool.acquire() as conn:
+        sub_id = await conn.fetchval("SELECT id FROM wf_runs WHERE parent_run_id = $1", parent.id)
+        assert sub_id is not None
+        sub = await wf_queries.get_run_for_step(conn, sub_id)
+    assert sub is not None
+    assert [t.type for t in sub.tools] == ["read"]
+    assert (sub.principal, sub.visibility, sub.launcher_session_id) == (
+        "operator",
+        "session",
+        None,
+    )
+
+
+@pytest.mark.parametrize("replay_tool", ["sample_requests", "get_request"])
+async def test_an_inline_call_workflow_from_a_session_cannot_declare_a_replay_tool(
+    pool: asyncpg.Pool[Any], replay_tool: str
+) -> None:
+    """An inline run's surface must not exceed its launching agent's, and no agent
+    holds a replay tool: the launch is refused, not silently narrowed."""
+    launcher = await _session(pool, "inline-launcher")
+    with pytest.raises(ForbiddenError):
+        await wf_service.launch_awaited_run(
+            pool,
+            account_id="acc_vis",
+            inline=service.InlineScript(
+                script="async def main(input):\n    return 1\n",
+                tools=[ToolSpec(type=replay_tool)],
+            ),
+            environment_id="env_vis",
+            caller={"kind": "session", "id": launcher},
+            authority=SessionAuthority(launcher, None),
+        )
+    async with pool.acquire() as conn:
+        assert await conn.fetchval("SELECT count(*) FROM wf_runs") == 0
+
+
+async def test_an_operator_inline_run_declaring_only_get_request_is_private(
+    pool: asyncpg.Pool[Any],
+) -> None:
+    """Either replay tool alone makes the run private (the 0191 arm has a disjunct per
+    tool)."""
+    run = await service.create_run(
+        pool,
+        account_id="acc_vis",
+        authority=OperatorAuthority(),
+        inline=service.InlineScript(
+            script="async def main(input):\n    return 1\n",
+            tools=[ToolSpec(type="get_request")],
+        ),
+        environment_id="env_vis",
+    )
+    assert [t.type for t in run.tools] == ["get_request"]
+    assert (run.principal, run.visibility, run.launcher_session_id) == (
+        "operator",
+        "session",
+        None,
+    )
+
+
+async def test_the_tasks_api_workflow_arm_keeps_the_replay_tools_and_is_private(
+    pool: asyncpg.Pool[Any],
+) -> None:
+    """``POST /v1/tasks`` with ``target_kind=workflow`` launches under the operator."""
+    wf_id = await _replay_workflow(pool)
+    handle = await sessions_service.invoke(
+        pool,
+        account_id="acc_vis",
+        target_kind="workflow",
+        target=wf_id,
+        input={},
+        environment_id="env_vis",
+    )
+    assert handle.servicer_kind == "run"
+    run = await wf_service.get_run(pool, handle.servicer_id, account_id="acc_vis", reader=None)
+    assert {t.type for t in run.tools} == {"sample_requests", "get_request"}
+    assert (run.principal, run.visibility, run.launcher_session_id) == (
+        "operator",
+        "session",
+        None,
+    )
+    reader = await _session(pool, "tasks-reader")
+    with pytest.raises(NotFoundError):
+        await wf_service.get_run(pool, run.id, account_id="acc_vis", reader=RunReader(reader))

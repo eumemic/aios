@@ -30,6 +30,7 @@ from aios.db.queries import workflows as wf_queries
 from aios.errors import ConflictError, NotFoundError
 from aios.harness import runtime
 from aios.harness.trigger_runner import MAX_CONSECUTIVE_FAILURES, run_trigger_step
+from aios.models.agents import ToolSpec
 from aios.models.triggers import (
     OperatorTriggerCreate,
     OperatorTriggerUpdate,
@@ -37,6 +38,7 @@ from aios.models.triggers import (
     TriggerUpdate,
 )
 from aios.services import triggers as trig_service
+from aios.services import workflows as wf_service
 from aios.workflows import run_tools
 from tests.integration.conftest import seed_agent_env_session
 
@@ -302,3 +304,75 @@ async def test_re_enabling_an_operator_trigger_rearms_it_and_resets_failures(
 
     await trig_service.remove_operator_trigger(pool, "weekly", account_id=ACC)
     assert await trig_service.list_operator_triggers(pool, account_id=ACC) == []
+
+
+async def _replay_workflow(pool: asyncpg.Pool[Any]) -> str:
+    """An operator-authored workflow declaring both replay tools (#2475)."""
+    wf = await wf_service.create_workflow(
+        pool,
+        account_id=ACC,
+        name=f"eval-{secrets.token_hex(4)}",
+        script="async def main(input):\n    return input\n",
+        tools=[ToolSpec(type="sample_requests"), ToolSpec(type="get_request")],
+    )
+    return wf.id
+
+
+async def test_an_operator_cron_trigger_fires_a_replay_workflow_as_a_private_operator_run(
+    op_runtime: asyncpg.Pool[Any],
+) -> None:
+    """#2475: an operator trigger launches under the operator, so the run keeps both
+    replay tools, and the 0191 visibility arm hides it from every agent."""
+    pool = op_runtime
+    env_id, _, _ = await _scaffold(pool)
+    wf_id = await _replay_workflow(pool)
+    echo = await trig_service.add_operator_trigger(
+        pool, _spec("eval-weekly", env_id, wf_id), account_id=ACC
+    )
+    assert echo.next_fire is not None
+    async with pool.acquire() as conn, conn.transaction():
+        await queries.fetch_and_claim_due_triggers(
+            conn, now_utc=echo.next_fire + timedelta(seconds=1)
+        )
+
+    await run_trigger_step(echo.id)
+
+    [row] = await _launched_runs(pool, echo.id)
+    assert row["principal"] == "operator"
+    assert row["visibility"] == "session"
+    assert row["launcher_session_id"] is None
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_run_for_step(conn, row["id"])
+    assert run is not None
+    assert {t.type for t in run.tools} == {"sample_requests", "get_request"}
+
+
+async def test_a_session_trigger_firing_a_replay_workflow_drops_the_replay_tools(
+    op_runtime: asyncpg.Pool[Any],
+) -> None:
+    """#2475: a session-owned trigger launches under its session, whose agent can't
+    hold a replay tool, so the run's surface is clamped to none of them."""
+    pool = op_runtime
+    _, session_id, _ = await _scaffold(pool)
+    wf_id = await _replay_workflow(pool)
+    echo = await trig_service.add_trigger(
+        pool,
+        session_id,
+        TriggerCreate.model_validate(
+            {
+                "name": "session-eval",
+                "source": {"kind": "cron", "schedule": "*/5 * * * *"},
+                "action": {"kind": "workflow", "workflow_id": wf_id},
+            }
+        ),
+        account_id=ACC,
+    )
+    await run_trigger_step(echo.id)
+
+    [row] = await _launched_runs(pool, echo.id)
+    assert row["principal"] == "session"
+    assert row["launcher_session_id"] == session_id
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_run_for_step(conn, row["id"])
+    assert run is not None
+    assert {t.type for t in run.tools} & {"sample_requests", "get_request"} == set()
