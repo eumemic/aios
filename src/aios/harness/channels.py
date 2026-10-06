@@ -14,6 +14,7 @@ from collections.abc import Iterable
 from typing import Any
 
 from aios.harness._text import join_blocks
+from aios.harness.chat_type import chat_type_of
 from aios.models.events import Event
 
 MONOLOGUE_PREFIX = "INTERNAL_MONOLOGUE_NOT_SEEN_BY_USER: "
@@ -144,12 +145,68 @@ def augment_with_focal_paradigm(base_system: str, channels: list[str]) -> str:
     return join_blocks(base_system, build_focal_paradigm_block(channels))
 
 
+# #118: the human-readable channel name rendered after ``channel_id=`` in
+# the listing and the notification marker is truncated (by code point) to
+# this many characters plus an ellipsis, so the listing's worst-case
+# reserve (:func:`max_channels_reminder_local`) stays a true upper bound.
+CHANNEL_NAME_MAX_CHARS = 32
+
+# Connector ``chat_type`` values that denote a multi-party chat.  Telegram
+# stamps its raw chat kind (``supergroup`` / ``channel``) alongside the
+# normalized ``dm`` / ``group``.
+_GROUP_CHAT_TYPES = frozenset({"group", "supergroup", "channel"})
+
+
+def _clean_name(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    name = " ".join(value.split())
+    if not name:
+        return None
+    if len(name) > CHANNEL_NAME_MAX_CHARS:
+        name = name[:CHANNEL_NAME_MAX_CHARS] + "…"
+    return name
+
+
+def channel_display_name(metadata: dict[str, Any] | None, channel: str | None) -> str | None:
+    """Advisory human-readable name for a channel, from one inbound's metadata.
+
+    Type-directed ladder (#118): a group is named by its ``chat_name``
+    (the group title); a DM is named by its counterparty's
+    ``sender_name`` — a DM has no group title by construction.  The
+    chat type comes from ``metadata.chat_type`` and falls back to the
+    address shape (:func:`~aios.harness.chat_type.chat_type_of`).
+    Returns ``None`` when no name applies; callers then render the bare
+    ``channel_id`` exactly as before.  The name is whitespace-normalized
+    to one line and truncated to :data:`CHANNEL_NAME_MAX_CHARS`.
+    """
+    if not isinstance(metadata, dict):
+        return None
+    raw_type = metadata.get("chat_type")
+    kind: str | None
+    if isinstance(raw_type, str) and raw_type:
+        kind = "group" if raw_type in _GROUP_CHAT_TYPES else raw_type
+    else:
+        kind = chat_type_of(channel)
+    if kind == "group":
+        return _clean_name(metadata.get("chat_name"))
+    if kind == "dm":
+        return _clean_name(metadata.get("sender_name"))
+    return None
+
+
+def _name_clause(name: str | None) -> str:
+    return f' "{name}"' if name else ""
+
+
 # Sixty four-byte code points the tokenizer has no merges for (a private-use
 # character costs one token per UTF-8 byte — the byte-fallback ceiling), plus
 # the ellipsis: the densest preview ``render_channels_reminder`` can emit,
 # since it truncates by code point at 60. Prices above any real 60-character
 # preview — ASCII, CJK, or the emoji mixes that tokenize worst.
 _FATTEST_PREVIEW = "\U0010fffd" * 60 + "…"
+# Same byte-fallback ceiling for the #118 name clause.
+_FATTEST_NAME = "\U0010fffd" * CHANNEL_NAME_MAX_CHARS + "…"
 
 
 def max_channels_reminder_local(channels: list[str]) -> int:
@@ -177,7 +234,10 @@ def max_channels_reminder_local(channels: list[str]) -> int:
         # render_channels_reminder below; the truncation is by CODE POINT, so
         # the fattest preview is 60 four-byte characters (emoji tokenize at
         # ~3-4 tokens each), not 60 ASCII letters.
-        lines.append(f'○ channel_id={addr} — 9999 unread: "{_FATTEST_PREVIEW}"')
+        # #118: plus the maximal truncated name clause.
+        lines.append(
+            f'○ channel_id={addr}{_name_clause(_FATTEST_NAME)} — 9999 unread: "{_FATTEST_PREVIEW}"'
+        )
     # The row is user-role and lands after the log's final message. When
     # that message is also user-role, ``merge_adjacent_user_messages``
     # concatenates them; reserving an assistant-separator's worth of tokens
@@ -211,8 +271,10 @@ def render_channels_reminder(
 
     unread = derive_unread_counts(events, channels)
 
-    # Index last inbound per channel for the preview clause.
+    # Index last inbound per channel for the preview clause, and the
+    # latest-observed human-readable name (#118) in the same single pass.
     last_content: dict[str, str] = {}
+    names: dict[str, str] = {}
     for e in events:
         if e.kind != "message" or e.data.get("role") != "user":
             continue
@@ -222,11 +284,15 @@ def render_channels_reminder(
         content = e.data.get("content") or ""
         if isinstance(content, str):
             last_content[orig] = content
+        name = channel_display_name(e.data.get("metadata"), orig)
+        if name:
+            names[orig] = name
 
     lines = ["━━━ Channels ━━━"]
     for addr in channels:
+        label = f"channel_id={addr}{_name_clause(names.get(addr))}"
         if addr == focal_channel:
-            lines.append(f"▸ channel_id={addr} (focal)")
+            lines.append(f"▸ {label} (focal)")
             continue
         count = unread.get(addr, 0)
         if count > 0:
@@ -235,9 +301,9 @@ def render_channels_reminder(
             if len(preview) > 60:
                 preview = preview[:60] + "…"
             preview_clause = f': "{preview}"' if preview else ""
-            lines.append(f"○ channel_id={addr} — {count} unread{preview_clause}")
+            lines.append(f"○ {label} — {count} unread{preview_clause}")
         else:
-            lines.append(f"○ channel_id={addr} — 0 unread")
+            lines.append(f"○ {label} — 0 unread")
     return "\n".join(lines)
 
 

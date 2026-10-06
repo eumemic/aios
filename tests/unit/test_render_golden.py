@@ -9,7 +9,8 @@ The log exercises the renderer's branches: an omission marker, merged user
 turns in a non-UTC timezone, reasoning content, tool results with images and a
 mislabeled MIME type, resolved, blind-spot, in-flight and external tool calls,
 a model-visible lifecycle notice, inlined and missing attachments, a non-focal
-channel notification, a persisted reminder row and this step's reminder rows.
+channel notification carrying a chat name and sender, a persisted reminder row
+and this step's reminder rows.
 It renders for three gate models: an unknown model (vision allowed, no
 thinking), a thinking model and a model without vision.
 """
@@ -46,9 +47,9 @@ _PNG = valid_png_bytes()
 
 # Bump RENDER_VERSION and re-pin when a rendering change is deliberate.
 _PINNED = {
-    "golden/plain": "528c753c9322a7fedab5e49bf6702b67d239c8296e667423edfb3626a3972fb4",
-    "golden/thinker": "9b2deec132c08c215f360b16ccf9cbcc920b0ac2c81e9b9d2b26e0d200611cd3",
-    "golden/blind": "feb4d6b656db43d10e81e603249da7a28714e5d000e0f2d79c8135339fab7b50",
+    "golden/plain": "a1a51c9e7e684a5a7f5ae20ae1dd7af245d75a512357282941271322a2918185",
+    "golden/thinker": "e526285b9acd27651804eff46e20c1bbd7dfd7d534bdf71aa1d18ccae4216dbc",
+    "golden/blind": "5c06668b405caf676d9ac987d9fdc43fa96749a4780ce0e09216f2e7fd54b077",
 }
 
 
@@ -142,7 +143,16 @@ def _log(workspace: Path) -> list[Event]:
         _event(8, {"role": "tool", "tool_call_id": "t_blind", "content": "late file body"}),
         _event(
             9,
-            {"role": "user", "content": "ping from elsewhere", "metadata": {"channel": "sig/b"}},
+            {
+                "role": "user",
+                "content": "ping from elsewhere",
+                "metadata": {
+                    "channel": "sig/b",
+                    "chat_type": "group",
+                    "chat_name": "Ops",
+                    "sender_name": "Bob",
+                },
+            },
             orig_channel="sig/b",
             focal_channel_at_arrival="sig/a",
         ),
@@ -187,5 +197,5 @@ def _fixed_catalog(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 
 @pytest.mark.parametrize("gate_model", sorted(_PINNED))
 def test_rendering_matches_the_pinned_hash(gate_model: str, tmp_path: Path) -> None:
-    assert RENDER_VERSION == 1
+    assert RENDER_VERSION == 2
     assert sha256_hex(render(gate_model, tmp_path)) == _PINNED[gate_model]

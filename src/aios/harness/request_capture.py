@@ -43,7 +43,7 @@ if TYPE_CHECKING:
     from aios.harness.window import WindowOmission
     from aios.models.agents import StepBinding
 
-RENDER_VERSION = 1
+RENDER_VERSION = 2
 
 
 def encode(value: Any) -> bytes:

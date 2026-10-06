@@ -2454,6 +2454,38 @@ class TestFocalRendering:
         assert header == f"🔔 channel_id={self._CHAN_B} · hey"
         assert hint.startswith("(to respond, call switch_channel(channel_id=")
 
+    def test_notification_carries_group_chat_name(self) -> None:
+        """#118: the marker names the channel (group -> chat_name) right
+        after the load-bearing channel_id."""
+        md = {
+            "channel": self._CHAN_B,
+            "chat_type": "group",
+            "chat_name": "AI Bros",
+            "sender_name": "Bob",
+        }
+        events = [
+            _evt(1, "user", content="hey", metadata=md, focal_channel_at_arrival=self._CHAN_A)
+        ]
+        content = build_messages(events, system_prompt=None).messages[0]["content"]
+        header = content.split("\n", 1)[0]
+        assert header == f'🔔 channel_id={self._CHAN_B} "AI Bros" · from=Bob · hey'
+
+    def test_notification_carries_dm_sender_name(self) -> None:
+        md = {"channel": self._CHAN_B, "chat_type": "dm", "sender_name": "Bob"}
+        events = [
+            _evt(1, "user", content="hey", metadata=md, focal_channel_at_arrival=self._CHAN_A)
+        ]
+        content = build_messages(events, system_prompt=None).messages[0]["content"]
+        assert content.startswith(f'🔔 channel_id={self._CHAN_B} "Bob" · from=Bob · hey')
+
+    def test_notification_without_name_unchanged(self) -> None:
+        md = {"channel": self._CHAN_B, "chat_type": "group", "sender_name": "Bob"}
+        events = [
+            _evt(1, "user", content="hey", metadata=md, focal_channel_at_arrival=self._CHAN_A)
+        ]
+        content = build_messages(events, system_prompt=None).messages[0]["content"]
+        assert content.split("\n", 1)[0] == f"🔔 channel_id={self._CHAN_B} · from=Bob · hey"
+
     def test_notification_hint_names_the_channel_id(self) -> None:
         """The ``to respond...`` hint line includes the same channel_id
         as the marker, so weaker models can copy-paste it directly into
