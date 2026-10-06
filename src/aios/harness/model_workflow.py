@@ -47,9 +47,10 @@ import asyncpg
 
 from aios.harness.completion import LlmRequest
 from aios.harness.model_binding import WorkflowModelRef
+from aios.harness.request_capture import captured_params
 from aios.ids import WORKFLOW_RUN, make_id
 from aios.logging import get_logger
-from aios.models.workflows import SessionAuthority
+from aios.models.workflows import RequestRef, SessionAuthority
 from aios.services import sessions as sessions_service
 from aios.services import tasks as tasks_service
 from aios.services import workflows as wf_service
@@ -174,7 +175,7 @@ async def launch_model_workflow_park(
     run_id = run_id or make_id(WORKFLOW_RUN)
     # Seal ``reacting_to`` at park: the harvest re-applies this exact watermark, so a
     # stimulus arriving mid-deliberation doesn't widen what the turn reacted to.
-    await sessions_service.append_event(
+    park = await sessions_service.append_event(
         pool,
         session_id,
         "span",
@@ -186,15 +187,21 @@ async def launch_model_workflow_park(
         },
         account_id=account_id,
     )
+    # The park span is the request's record (#2471), so it names the request: the run's
+    # ref and its grant (#2474), which the recipe can pass to ``call_llm`` or hand to a
+    # sub-run instead of the payload.
+    request_ref = RequestRef(session_id=session_id, request_id=park.id)
     session = await sessions_service.get_session_basic(pool, session_id, account_id=account_id)
     # The inference payload is delivered as the run's ``input`` — a bound workflow
     # receives the same named ``LlmRequest`` shape ``call_llm`` consumes, so it can
-    # forward it to its own ``call_llm`` leaf or deliberate over it.
+    # forward it to its own ``call_llm`` leaf or deliberate over it. ``params`` is the
+    # captured params: an inline ``api_key`` never reaches the run row or its journal.
     run_input = {
         "messages": request.messages,
         "tools": request.tools,
-        "params": request.params,
+        "params": captured_params(request.params),
         "session_id": request.session_id,
+        "request_ref": request_ref.model_dump(),
     }
     run, _request_id = await wf_service.launch_awaited_run(
         pool,
@@ -218,6 +225,7 @@ async def launch_model_workflow_park(
         # rather than inherited by silence.
         workspace="shared",
         run_id=run_id,
+        request_ref=request_ref,
     )
     _launch_harvest_task(pool, session_id, run_id=run.id, account_id=account_id)
     log.info(

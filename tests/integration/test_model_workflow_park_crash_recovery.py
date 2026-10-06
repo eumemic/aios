@@ -34,6 +34,7 @@ via ``repark_stranded_model_dispatch``.
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
 from typing import Any, cast
 from unittest import mock
@@ -147,9 +148,14 @@ async def mwf_runtime(
 
 
 async def _make_bound_session(
-    pool: asyncpg.Pool[Any], *, finish_reason: str = "stop", output_model: str | None = None
+    pool: asyncpg.Pool[Any],
+    *,
+    finish_reason: str = "stop",
+    output_model: str | None = None,
+    script: str | None = None,
+    litellm_extra: dict[str, Any] | None = None,
 ) -> str:
-    script = _INNER_SCRIPT.replace("{finish_reason}", finish_reason)
+    script = script or _INNER_SCRIPT.replace("{finish_reason}", finish_reason)
     async with pool.acquire() as conn:
         wf = await wf_queries.insert_workflow(
             conn,
@@ -169,6 +175,7 @@ async def _make_bound_session(
         metadata={},
         window_min=50_000,
         window_max=150_000,
+        litellm_extra=litellm_extra,
     )
     env = await environments_service.get_environment(pool, _ENV, account_id=_ACCOUNT)
     session = await sessions_service.create_session(
@@ -564,6 +571,22 @@ async def test_crash_after_record_before_launch_launches_the_recorded_run(
     await run_session_step(session_id)
 
     assert await _inner_run_ids(pool, session_id) == [park["run_id"]]
+    # The relaunch appended a fresh park record for the request it actually sent, and
+    # the run it created refers to that record, not the crashed attempt's (#2474).
+    async with pool.acquire() as conn:
+        park_ids = [
+            r["id"]
+            for r in await conn.fetch(
+                "SELECT id FROM events WHERE session_id = $1 AND kind = 'span' "
+                "AND data->>'event' = 'model_workflow_park' ORDER BY seq",
+                session_id,
+            )
+        ]
+        relaunched = await wf_queries.get_run_for_step(conn, park["run_id"])
+    assert len(park_ids) == 2
+    assert relaunched is not None and relaunched.request_ref == RequestRef(
+        session_id=session_id, request_id=park_ids[-1]
+    )
     run_output = await _resolve_inner_run(pool, park["run_id"])
     await write_harvest_event(
         pool,
@@ -1337,3 +1360,70 @@ async def test_a_run_holding_a_ref_hands_on_only_that_ref(
         refusals = [e.payload["error"]["kind"] for e in events if e.type == "call_result"]
         assert refusals == ["invoke_workflow_refused"]
         assert await _sub_run_count(pool, parent_id) == 0
+
+
+# ── #2474 B3: the park writes a ref to its own request ────────────────────────
+
+
+async def test_a_parked_turn_holds_a_ref_to_its_own_request(
+    mwf_runtime: asyncpg.Pool[Any],
+) -> None:
+    """The turn's run holds a ref to the park span (its grant), its input carries the
+    ref beside today's payload, and an inline ``api_key`` never reaches the run."""
+    forget_stored_blobs()
+    pool = mwf_runtime
+    session_id = await _make_bound_session(
+        pool, litellm_extra={"api_key": "sk-inline-secret", "temperature": 0.2}
+    )
+    await run_session_step(session_id)
+
+    async with pool.acquire() as conn:
+        park_id = await conn.fetchval(
+            "SELECT id FROM events WHERE session_id = $1 AND kind = 'span' "
+            "AND data->>'event' = 'model_workflow_park'",
+            session_id,
+        )
+    [run_id] = await _inner_run_ids(pool, session_id)
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_run_for_step(conn, run_id)
+    assert run is not None
+    assert run.request_ref == RequestRef(session_id=session_id, request_id=park_id)
+    assert run.input["request_ref"] == {"session_id": session_id, "request_id": park_id}
+    assert run.input["params"] == {"temperature": 0.2}
+    assert run.input["session_id"] == session_id
+    assert run.visibility == "session"
+
+    # The input is on the row too (until the contract step stops writing it), so no
+    # wake rebuilds the request.
+    with mock.patch("aios.workflows.step.rebuild_request", wraps=rebuild_request) as rebuild_spy:
+        await run_workflow_step(run_id)
+    rebuild_spy.assert_not_awaited()
+    async with pool.acquire() as conn:
+        events = await wf_queries.list_run_events(conn, run_id)
+    assert events[0].type == "run_started"
+    assert events[0].payload["input"] == run.input
+    assert "sk-inline-secret" not in json.dumps([e.payload for e in events])
+
+
+async def test_a_parked_turns_recipe_can_send_its_request_by_ref(
+    mwf_runtime: asyncpg.Pool[Any],
+) -> None:
+    """A recipe forwards its own request by ref: the call is granted and launched."""
+    forget_stored_blobs()
+    pool = mwf_runtime
+    session_id = await _make_bound_session(
+        pool,
+        script=(
+            "async def main(input):\n"
+            "    return await call_llm(request_ref=input['request_ref'], model='openrouter/x')\n"
+        ),
+    )
+    await run_session_step(session_id)
+    [run_id] = await _inner_run_ids(pool, session_id)
+
+    with mock.patch("aios.workflows.step.run_llm.launch_call_llm_task") as launch:
+        await run_workflow_step(run_id)
+
+    launch.assert_called_once()
+    assert launch.call_args.kwargs["spec"]["kind"] == "ref"
+    assert await _results(pool, run_id) == []  # nothing refused
