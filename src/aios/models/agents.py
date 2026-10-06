@@ -141,6 +141,15 @@ PreemptPolicy = Literal["preempt", "wait"]
 OutputStyle = Literal["default", "concise"]
 
 _BUILTIN_NAMES: frozenset[str] = frozenset(get_args(BuiltinToolType))
+
+# Tools only a workflow run can declare (#2475): reading an agent's past requests.
+# An agent's tool spec rejects them, so no agent surface ever holds one; every
+# surface gate (workflow authoring, the inline-run check, the ``create_run`` clamp)
+# is then a meet with an agent surface that lacks them, which drops or refuses
+# them. Only an operator-authored workflow, launched by the operator, keeps them.
+# Not part of ``BuiltinToolType``: no session can call them.
+ReplayToolType = Literal["sample_requests", "get_request"]
+REPLAY_TOOL_TYPES: frozenset[str] = frozenset(get_args(ReplayToolType))
 log = get_logger(__name__)
 
 # Read-tolerance for the builtin tool renames (#1419 invoke*→call_*, #1428 cancel_run→stop_task,
@@ -725,6 +734,13 @@ def validate_mcp_servers(servers: list[McpServerSpec]) -> None:
             )
 
 
+def reject_replay_tools(tools: list[ToolSpec]) -> None:
+    """An agent can't hold a replay tool (#2475): only a workflow run declares one."""
+    held = sorted(t.type for t in tools if t.type in REPLAY_TOOL_TYPES)
+    if held:
+        raise ValueError(f"{held} can only be declared by a workflow, not an agent")
+
+
 def validate_tools(tools: list[ToolSpec]) -> None:
     """Cross-item invariant for ingress ``tools`` lists: unique attenuation identity.
 
@@ -875,7 +891,7 @@ class ToolSpec(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    type: BuiltinToolType | Literal["custom", "mcp_toolset"]
+    type: BuiltinToolType | Literal["custom", "mcp_toolset"] | ReplayToolType
     name: str | None = None
     description: str | None = None
     input_schema: dict[str, Any] | None = None
@@ -1040,6 +1056,7 @@ class AgentCreate(BaseModel):
         validate_ssh_servers(self.ssh_servers)
         validate_mcp_servers(self.mcp_servers)
         validate_tools(self.tools)
+        reject_replay_tools(self.tools)
         return self
 
 
@@ -1081,6 +1098,7 @@ class AgentUpdate(BaseModel):
             validate_mcp_servers(self.mcp_servers)
         if self.tools is not None:
             validate_tools(self.tools)
+            reject_replay_tools(self.tools)
         return self
 
 

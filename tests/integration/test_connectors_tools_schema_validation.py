@@ -160,3 +160,29 @@ async def test_auth_gate_runs_before_validation(
             account_id=child_id,
             tools_schema=[{"name": "malicious", "description": "injection", "parameters": {}}],
         )
+
+
+@pytest.mark.parametrize("replay_tool", ["sample_requests", "get_request"])
+async def test_a_replay_tool_is_rejected_at_put_boundary(
+    root_and_child: tuple[asyncpg.Pool[Any], str, str], replay_tool: str
+) -> None:
+    """#2475: ``ToolSpec`` admits the replay types (a workflow may declare them), but
+    a connector's tools reach session surfaces, and no session may hold one. The PUT
+    refuses them, and nothing is written."""
+    pool, root_id, _child_id = root_and_child
+
+    with pytest.raises(ValidationError) as excinfo:
+        await connectors_service.update_tools_schema(
+            pool,
+            connector="echo",
+            account_id=root_id,
+            tools_schema=[_VALID_ENTRY, {"type": replay_tool}],
+        )
+
+    assert excinfo.value.status_code == 422
+    assert excinfo.value.detail.get("index") == 1
+    assert excinfo.value.detail.get("type") == replay_tool
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT tools_schema FROM connectors WHERE connector = 'echo'")
+    assert row is not None
+    assert row["tools_schema"] == []

@@ -38,6 +38,7 @@ from aios.jobs.app import defer_run_wake, defer_wake
 from aios.logging import get_logger
 from aios.models.accounting import DEFAULT_USAGE_WINDOW_SECONDS, UsageNodeRef
 from aios.models.agents import (
+    REPLAY_TOOL_TYPES,
     StepSurface,
     is_mcp_tool_name,
 )
@@ -743,7 +744,11 @@ async def create_child_session(
             agent_version=stim.agent_version,
             model=stim.model,
             parent_run_id=stim.parent_run_id,
-            tools=stim.surface.tools,
+            # A replay tool is run-only (#2475): no session holds one. A named child's
+            # surface is already a meet with its agent's, which lacks them; a generic
+            # child of a replay run inherits the run's surface, so drop them here, at
+            # the one writer of a child's frozen surface.
+            tools=[t for t in stim.surface.tools if t.type not in REPLAY_TOOL_TYPES],
             mcp_servers=stim.surface.mcp_servers,
             http_servers=stim.surface.http_servers,
             ssh_servers=stim.surface.ssh_servers,

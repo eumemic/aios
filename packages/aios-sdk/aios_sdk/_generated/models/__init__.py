@@ -323,6 +323,7 @@ from .tool_spec_permission_type_0 import ToolSpecPermissionType0
 from .tool_spec_transport_type_0 import ToolSpecTransportType0
 from .tool_spec_type_type_0 import ToolSpecTypeType0
 from .tool_spec_type_type_1 import ToolSpecTypeType1
+from .tool_spec_type_type_2 import ToolSpecTypeType2
 from .tools_schema_update import ToolsSchemaUpdate
 from .tools_schema_update_tools_item import ToolsSchemaUpdateToolsItem
 from .trace_entry import TraceEntry
@@ -708,6 +709,7 @@ __all__ = (
     "ToolSpecTransportType0",
     "ToolSpecTypeType0",
     "ToolSpecTypeType1",
+    "ToolSpecTypeType2",
     "ToolsSchemaUpdate",
     "ToolsSchemaUpdateToolsItem",
     "TraceEntry",

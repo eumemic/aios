@@ -216,11 +216,11 @@ def test_apply_mcp_polish_cleans_schemas(polished_mcp: Any) -> None:
     assert mode_prop["type"] == ["string", "null"]
     assert set(mode_prop["enum"]) == {"detached", "single_session", "per_chat"}
 
-    # Preservation: the ``tools[].type`` two-branch enum union (no null branch)
-    # is left alone — flattening it would collapse the BuiltinToolType vs.
+    # Preservation: the ``tools[].type`` enum union (no null branch) is left alone —
+    # flattening it would collapse the BuiltinToolType vs. ReplayToolType vs.
     # custom/mcp_toolset distinction the Pydantic union encodes.
     tools_type_prop = by_name["create_agent"].inputSchema["properties"]["tools"]["items"][
         "properties"
     ]["type"]
     assert "anyOf" in tools_type_prop
-    assert len(tools_type_prop["anyOf"]) == 2
+    assert len(tools_type_prop["anyOf"]) == 3
