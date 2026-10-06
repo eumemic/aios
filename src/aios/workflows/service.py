@@ -329,7 +329,11 @@ async def create_run(
     ``request_ref`` (#2474) is the request the run works on, and its grant: the run
     can resolve that request and no other. The caller either already holds the
     composed request and passes it as ``input`` too, or passes no ``input`` and the
-    run's first step rebuilds the request and starts the script with it.
+    run's first step rebuilds the request and starts the script with it. A carried
+    request (both set) is journaled as ``run_started`` in the insert transaction and
+    never written to the row: the journal is pruned on a short schedule, the row is
+    kept forever, and the step starts the script from ``run_started`` without
+    rebuilding.
     """
     # A shared workspace is inherited from a launcher session. Reject an impossible
     # pointer before minting an id, acquiring a connection, inserting a row, or waking.
@@ -606,6 +610,7 @@ async def create_run(
             await queries.acquire_workspace_hierarchy_advisory_xact_locks(
                 conn, workspace_path, boundary=str(settings.workspace_root)
             )
+        carried = request_ref is not None and input is not None
         run = await wf_queries.insert_wf_run(
             conn,
             account_id=account_id,
@@ -623,7 +628,7 @@ async def create_run(
             script_sha=script_sha,
             source_version=source_version,
             host_semantics_epoch=HOST_SEMANTICS_EPOCH,
-            input=input,
+            input=None if carried else input,
             # Snapshot the launch-clamped surface (like script), so a later
             # update_workflow never shifts this run's tool-authority.
             tools=effective.tools,
@@ -640,6 +645,16 @@ async def create_run(
         assert run.principal == principal, (
             f"insert trigger stamped principal {run.principal!r}, authority implies {principal!r}"
         )
+        # A concurrent replay that won the insert already journaled it (its row comes
+        # back with a nonzero ``last_event_seq``), so only the inserting call appends.
+        if carried and run.last_event_seq == 0:
+            await wf_queries.append_run_event(
+                conn,
+                account_id=account_id,
+                run_id=run.id,
+                type="run_started",
+                payload={"input": input},
+            )
         if requested:
             await wf_queries.set_run_vaults(conn, run.id, requested, account_id=account_id)
         # The run→run request edge (#1126/#1129) needs no session-scoped

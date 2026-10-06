@@ -19,6 +19,8 @@ async def test_archival_feeder_failure_degrades_sweep_result(
         wf_runs_retention_days=30,
         archived_definition_retention_days=30,
         wf_runs_archive_grace_days=7,
+        wf_runs_request_copy_archive_grace_days=0,
+        wf_runs_request_copy_retention_days=1,
         reclaimable_prune_batch_rows=100,
     )
     monkeypatch.setattr(reclaimable_prune, "get_settings", lambda: settings)

@@ -46,6 +46,7 @@ import pytest
 from aios.db import queries as db_queries
 from aios.db.pool import create_pool
 from aios.db.queries import workflows as wf_queries
+from aios.db.queries.prune import prune_archived_runs, reconcile_terminal_archival_batch
 from aios.harness import model_workflow as mwf
 from aios.harness import runtime
 from aios.harness.completion import LlmRequest
@@ -882,8 +883,12 @@ async def _parked_turn(pool: asyncpg.Pool[Any]) -> tuple[str, str, dict[str, Any
             "AND data->>'event' = 'model_workflow_park'",
             session_id,
         )
+        # The row holds no input (#2474 B4): the turn's input is its run_started.
         run_input = await conn.fetchval(
-            "SELECT input FROM wf_runs WHERE launcher_session_id = $1", session_id
+            "SELECT e.payload->'input' FROM wf_run_events e "
+            "JOIN wf_runs r ON r.id = e.run_id "
+            "WHERE r.launcher_session_id = $1 AND e.type = 'run_started'",
+            session_id,
         )
     return session_id, park_id, run_input
 
@@ -1368,12 +1373,15 @@ async def test_a_run_holding_a_ref_hands_on_only_that_ref(
 async def test_a_parked_turn_holds_a_ref_to_its_own_request(
     mwf_runtime: asyncpg.Pool[Any],
 ) -> None:
-    """The turn's run holds a ref to the park span (its grant), its input carries the
-    ref beside today's payload, and an inline ``api_key`` never reaches the run."""
+    """The turn's run holds a ref to the park span (its grant) and no input: the input,
+    today's payload plus the ref, is only in its prunable ``run_started`` (#2474 B4),
+    and an inline ``api_key`` never reaches the run."""
     forget_stored_blobs()
     pool = mwf_runtime
     session_id = await _make_bound_session(
-        pool, litellm_extra={"api_key": "sk-inline-secret", "temperature": 0.2}
+        pool,
+        litellm_extra={"api_key": "sk-inline-secret", "temperature": 0.2},
+        script=_ECHO_AFTER_A_WAKE,
     )
     await run_session_step(session_id)
 
@@ -1386,22 +1394,29 @@ async def test_a_parked_turn_holds_a_ref_to_its_own_request(
     [run_id] = await _inner_run_ids(pool, session_id)
     async with pool.acquire() as conn:
         run = await wf_queries.get_run_for_step(conn, run_id)
+        events = await wf_queries.list_run_events(conn, run_id)
     assert run is not None
     assert run.request_ref == RequestRef(session_id=session_id, request_id=park_id)
-    assert run.input["request_ref"] == {"session_id": session_id, "request_id": park_id}
-    assert run.input["params"] == {"temperature": 0.2}
-    assert run.input["session_id"] == session_id
+    assert run.input is None
     assert run.visibility == "session"
+    [started] = events
+    assert started.type == "run_started"
+    run_input = started.payload["input"]
+    assert run_input["request_ref"] == {"session_id": session_id, "request_id": park_id}
+    assert run_input["params"] == {"temperature": 0.2}
+    assert run_input["session_id"] == session_id
 
-    # The input is on the row too (until the contract step stops writing it), so no
-    # wake rebuilds the request.
+    # No wake rebuilds the request: every one starts from run_started.
     with mock.patch("aios.workflows.step.rebuild_request", wraps=rebuild_request) as rebuild_spy:
-        await run_workflow_step(run_id)
+        for _ in range(3):
+            await run_workflow_step(run_id)
     rebuild_spy.assert_not_awaited()
     async with pool.acquire() as conn:
+        done = await wf_queries.get_run_for_step(conn, run_id)
         events = await wf_queries.list_run_events(conn, run_id)
-    assert events[0].type == "run_started"
-    assert events[0].payload["input"] == run.input
+    assert done is not None and done.status == "completed"
+    assert done.output == run_input
+    assert [e.type for e in events].count("run_started") == 1
     assert "sk-inline-secret" not in json.dumps([e.payload for e in events])
 
 
@@ -1427,3 +1442,48 @@ async def test_a_parked_turns_recipe_can_send_its_request_by_ref(
     launch.assert_called_once()
     assert launch.call_args.kwargs["spec"]["kind"] == "ref"
     assert await _results(pool, run_id) == []  # nothing refused
+
+
+async def test_a_finished_turns_run_still_answers_after_its_journal_is_pruned(
+    mwf_runtime: asyncpg.Pool[Any],
+) -> None:
+    """#2474 B4: a workflow-as-model run is archived with no grace and its journal is
+    pruned on the short schedule. The harvest reads its answer from the run row, so it
+    answers the same after the prune, and then the turn completes."""
+    pool = mwf_runtime
+    session_id = await _make_bound_session(pool)
+    await run_session_step(session_id)
+    [run_id] = await _inner_run_ids(pool, session_id)
+    run_output = await _resolve_inner_run(pool, run_id)
+
+    async with pool.acquire() as conn:
+        before = await wf_queries.derive_run_response(conn, run_id, account_id=_ACCOUNT)
+        archived = await reconcile_terminal_archival_batch(
+            conn, grace_days=7, request_copy_grace_days=0
+        )
+        await prune_archived_runs(conn, retention_days=30, request_copy_retention_days=0)
+        run = await wf_queries.get_run_for_step(conn, run_id)
+        after = await wf_queries.derive_run_response(conn, run_id, account_id=_ACCOUNT)
+        events = await wf_queries.list_run_events(conn, run_id)
+    assert archived == 1
+    assert run is not None and run.archived_at is not None
+    assert run.journal_pruned_at is not None and events == []
+    assert before is not None and after == before
+
+    await write_harvest_event(
+        pool,
+        session_id,
+        run_id=run_id,
+        outcome="ok",
+        output=run_output,
+        error=None,
+        account_id=_ACCOUNT,
+    )
+    await run_session_step(session_id, cause="model_workflow_harvest")
+    async with pool.acquire() as conn:
+        assistant = await conn.fetchval(
+            "SELECT count(*) FROM events WHERE session_id = $1 AND kind = 'message' "
+            "AND data->>'role' = 'assistant'",
+            session_id,
+        )
+    assert assistant == 1

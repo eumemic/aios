@@ -949,6 +949,22 @@ class Settings(BaseSettings):
         description="Days after a workflow run becomes terminal before the maintenance "
         "sweep archives it, feeding terminal history into T6 retention.",
     )
+    wf_runs_request_copy_archive_grace_days: int = Field(
+        default=0,
+        ge=0,
+        description="``wf_runs_archive_grace_days`` for a run whose journal holds a copy "
+        "of a session's request (#2474): a run with a request ref, a workflow-as-model "
+        "run, or a run in a replay tree (#2475). The request is rebuildable from "
+        "the session log, so these journals don't need the default grace. Harvest and "
+        "parents read the run row, which archival leaves in place.",
+    )
+    wf_runs_request_copy_retention_days: int = Field(
+        default=1,
+        ge=0,
+        description="``wf_runs_retention_days`` for the same runs. Pruning one also "
+        "clears the ``input`` of a workflow-as-model run from before #2474 and of a "
+        "replay-tree sub-run, so no full request outlives it on the row.",
+    )
     archived_definition_retention_days: int = Field(
         default=30,
         ge=1,
