@@ -917,6 +917,7 @@ class TestWakeSessionIntegration:
             consecutive_failures=0,
             environment_id=None,
             ingest_token_hash=None,
+            account_archived_at=None,
         )
         trigger_source_id = "trigger:trig_01WAKE"
         action = trigger.action

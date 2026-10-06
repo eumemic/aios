@@ -85,7 +85,9 @@ class TriggerRow(NamedTuple):
     Carries ``owner`` and ``account_id`` alongside the definition fields so the
     unscoped fire-job handler (which only has the trigger id) can resolve the
     owner and, for a session owner, verify it hasn't been archived between
-    claim and fire — without an extra round-trip.
+    claim and fire — without an extra round-trip. ``account_archived_at`` is the
+    owning account's archive stamp, re-checked the same way: nothing fires on behalf
+    of an archived account.
 
     ``source`` is the raw discriminator text and ``source_spec`` the raw
     parsed dict (the scheduler/runner branch lifecycle on the source
@@ -109,6 +111,7 @@ class TriggerRow(NamedTuple):
     consecutive_failures: int
     environment_id: str | None
     ingest_token_hash: str | None
+    account_archived_at: datetime | None
 
 
 def _row_to_trigger_echo(row: asyncpg.Record) -> TriggerEcho:
@@ -642,8 +645,10 @@ async def unscoped_get_trigger_row(
         "t.last_fire_at, t.last_fire_status, t.consecutive_failures, "
         "t.environment_id, t.ingest_token_hash, "
         "s.archived_at AS session_archived_at, "
-        "s.parent_run_id AS session_parent_run_id "
+        "s.parent_run_id AS session_parent_run_id, "
+        "a.archived_at AS account_archived_at "
         "FROM triggers AS t "
+        "JOIN accounts AS a ON a.id = t.account_id "
         "LEFT JOIN sessions AS s ON s.id = t.owner_session_id "
         "WHERE t.id = $1",
         trigger_id,
@@ -669,6 +674,7 @@ async def unscoped_get_trigger_row(
         consecutive_failures=row["consecutive_failures"],
         environment_id=row["environment_id"],
         ingest_token_hash=row["ingest_token_hash"],
+        account_archived_at=row["account_archived_at"],
     )
 
 
@@ -692,8 +698,9 @@ async def fetch_and_claim_due_triggers(
 
     Archive is the lifecycle boundary — once ``sessions.archived_at`` is
     set, none of the session's triggers fire again, regardless of their own
-    ``enabled`` flag. Unarchiving (if supported) restores firing. The rows
-    themselves are preserved.
+    ``enabled`` flag; once ``accounts.archived_at`` is set, none of the account's
+    triggers do, operator triggers included. Unarchiving (if supported) restores
+    firing. The rows themselves are preserved.
 
     The claim SELECT projects ``source_spec ->> 'schedule' AS schedule``
     (text extraction in SQL) so the cron-advance loop stays byte-identical
@@ -719,8 +726,10 @@ async def fetch_and_claim_due_triggers(
                s.archived_at AS session_archived_at,
                s.parent_run_id AS session_parent_run_id
         FROM triggers AS t
+        JOIN accounts AS a ON a.id = t.account_id
         LEFT JOIN sessions AS s ON s.id = t.owner_session_id
         WHERE t.enabled
+          AND a.archived_at IS NULL
           AND {_OWNER_LIVE}
           AND t.next_fire IS NOT NULL
           AND t.next_fire <= $1
@@ -783,6 +792,7 @@ async def fetch_and_claim_due_triggers(
                 consecutive_failures=r["consecutive_failures"],
                 environment_id=r["environment_id"],
                 ingest_token_hash=r["ingest_token_hash"],
+                account_archived_at=None,  # the claim selects live accounts only
             )
         )
     return claimed
@@ -1016,12 +1026,14 @@ async def insert_run_completion_fires(
         """
         SELECT t.id, t.account_id, t.owner_session_id, t.name
         FROM triggers AS t
+        JOIN accounts AS a ON a.id = t.account_id
         JOIN sessions AS s ON s.id = t.owner_session_id
         WHERE t.source = 'run_completion'
           AND t.account_id = $1
           AND t.source_spec ->> 'workflow_id' = $2
           AND t.source_spec -> 'statuses' ? $3
           AND t.enabled
+          AND a.archived_at IS NULL
           AND s.archived_at IS NULL
           AND ($4 = 'account' OR t.owner_session_id = $5)
         ORDER BY t.created_at
@@ -1076,7 +1088,7 @@ async def resolve_external_event_trigger(
     ingest_token_hash: str,
 ) -> ResolvedExternalEventTrigger | None:
     """Resolve an ingest-token hash to the single enabled ``external_event``
-    trigger on a non-archived session, or ``None``.
+    trigger on a non-archived session of a non-archived account, or ``None``.
 
     No ``account_id`` parameter: this is the account-key-free ingress edge.
     The matched row's own ``account_id`` is the authenticated scope (the token
@@ -1090,10 +1102,12 @@ async def resolve_external_event_trigger(
         """
         SELECT t.id, t.account_id, t.owner_session_id, t.name
         FROM triggers AS t
+        JOIN accounts AS a ON a.id = t.account_id
         JOIN sessions AS s ON s.id = t.owner_session_id
         WHERE t.source = 'external_event'
           AND t.ingest_token_hash = $1
           AND t.enabled
+          AND a.archived_at IS NULL
           AND s.archived_at IS NULL
         """,
         ingest_token_hash,
@@ -1486,7 +1500,7 @@ async def fetch_next_trigger_event(
     """Return when the event-driven scheduler should next wake.
 
     Computed as ``MIN(GREATEST(next_fire, running_since + stale_threshold))``
-    across enabled rows whose session (if any) isn't archived:
+    across enabled rows whose account and session (if any) aren't archived:
 
     - Idle rows (``running_since IS NULL``) contribute ``next_fire`` — the
       earliest of these is the next genuine fire.
@@ -1512,8 +1526,10 @@ async def fetch_next_trigger_event(
             END
         )
         FROM triggers AS t
+        JOIN accounts AS a ON a.id = t.account_id
         LEFT JOIN sessions AS s ON s.id = t.owner_session_id
         WHERE t.enabled
+          AND a.archived_at IS NULL
           AND {_OWNER_LIVE}
           AND t.next_fire IS NOT NULL
         """,
