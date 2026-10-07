@@ -1314,7 +1314,7 @@ async def test_a_run_cannot_hand_on_a_ref_it_was_not_given(
     async with pool.acquire() as conn:
         events = await wf_queries.list_run_events(conn, parent_id)
     refusals = [e.payload["error"]["kind"] for e in events if e.type == "call_result"]
-    assert refusals == ["invoke_workflow_refused"]
+    assert refusals == ["invoke_workflow_forbidden"]
     async with pool.acquire() as conn:
         subs = await conn.fetchval(
             "SELECT count(*) FROM wf_runs WHERE parent_run_id = $1", parent_id
@@ -1485,7 +1485,7 @@ async def test_a_run_holding_a_ref_hands_on_only_that_ref(
         async with pool.acquire() as conn:
             events = await wf_queries.list_run_events(conn, parent_id)
         refusals = [e.payload["error"]["kind"] for e in events if e.type == "call_result"]
-        assert refusals == ["invoke_workflow_refused"]
+        assert refusals == ["invoke_workflow_forbidden"]
         assert await _sub_run_count(pool, parent_id) == 0
 
 

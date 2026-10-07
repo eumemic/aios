@@ -641,12 +641,34 @@ async def test_as_agent_is_refused_to_a_run_that_acts_for_a_session(
 
     events = await _list(pool, parent_run)
     refusals = [e.payload["error"]["kind"] for e in events if e.type == "call_result"]
-    assert refusals == ["invoke_workflow_refused"]
+    assert refusals == ["invoke_workflow_forbidden"]
     async with pool.acquire() as conn:
         sub_runs = await conn.fetchval(
             "SELECT count(*) FROM wf_runs WHERE parent_run_id = $1", parent_run
         )
     assert sub_runs == 0
+
+
+async def test_a_full_run_cap_is_refused_as_capacity_not_authority(
+    wf_runtime: asyncpg.Pool[Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A run cap is capacity, ``invoke_workflow_refused``, which frees up as runs
+    finish; an authority refusal is ``invoke_workflow_forbidden``, which never does."""
+    from aios.config import get_settings
+
+    pool = wf_runtime
+    child_wf = await _insert_workflow(pool, "child", "async def main(input):\n    return 1\n")
+    parent_wf = await _insert_workflow(pool, "parent", _INVOKE_PARENT)
+    parent_run = await _make_run(pool, parent_wf, input={"wf": child_wf})
+    full = get_settings().model_copy(update={"workflow_runs_per_account_max": 1})
+    monkeypatch.setattr("aios.workflows.service.get_settings", lambda: full)
+
+    await run_workflow_step(parent_run)
+
+    events = await _list(pool, parent_run)
+    [refused] = [e.payload["error"] for e in events if e.type == "call_result"]
+    assert refused["kind"] == "invoke_workflow_refused"
+    assert "outstanding-run cap" in refused["message"]
 
 
 # An operator root re-roots an arm at an agent version; the arm runs input['script'].
@@ -685,7 +707,7 @@ async def test_an_as_agent_arm_cannot_re_root_its_own_sub_runs(
 
     events = await _list(pool, arm)
     assert [e.payload["error"]["kind"] for e in events if e.type == "call_result"] == [
-        "invoke_workflow_refused"
+        "invoke_workflow_forbidden"
     ]
 
 

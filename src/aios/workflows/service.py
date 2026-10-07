@@ -437,7 +437,7 @@ async def create_run(
                 if authority.as_agent is not None:
                     if parent_run.principal != "operator":
                         raise ForbiddenError(
-                            "as_agent is only available to runs an operator launched",
+                            "as_agent is only available to runs that act for the operator",
                             detail={"parent_run_id": parent_run.id},
                         )
                     agent_version = await queries.get_agent_version(
