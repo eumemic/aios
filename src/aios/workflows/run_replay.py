@@ -30,7 +30,7 @@ from aios.errors import NotFoundError
 from aios.harness import runtime
 from aios.logging import get_logger
 from aios.models.workflows import RequestRef, WfRun
-from aios.services.requests import Missing, rebuild_request
+from aios.services.requests import Missing, Rebuilt, rebuild_request
 
 log = get_logger("aios.workflows.run_replay")
 
@@ -64,6 +64,26 @@ async def request_ref_granted(conn: asyncpg.Connection[Any], run: WfRun, ref: An
     return await wf_queries.request_ref_minted(
         conn, run.id, ref, account_id=run.account_id, minting_tools=list(MINTING_TOOLS)
     )
+
+
+def captured_params_for(
+    rebuilt: Rebuilt, model: str
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """The captured params a request rendered for ``model`` keeps, and the launcher
+    params that vouch for their endpoint (#823), as ``(params, launcher_extra)``.
+
+    The params belong to the model the request was sent to, and their launcher already
+    passed #823 for them, so that model keeps them, endpoint included. A request sent
+    to a ``workflow:`` binding handed those same params to the bound run, so any model
+    keeps them, but nothing vouches for an ``api_base`` in them: it passes only the
+    allowlist, as in an inline call. Any other model gets none, so the request can't
+    reach that model's endpoint with another's key."""
+    captured = rebuilt.request["params"]
+    if model == rebuilt.record["model"]:
+        return captured, captured
+    if rebuilt.record["model"].startswith(_WORKFLOW_MODEL_PREFIX):
+        return captured, None
+    return None, None
 
 
 class _SampleArgs(BaseModel):
@@ -191,7 +211,7 @@ async def _get_request(run: WfRun, args: _GetArgs) -> dict[str, Any]:
     return {
         "messages": rebuilt.request["messages"],
         "tools": rebuilt.request["tools"],
-        "params": rebuilt.request["params"] if model == rebuilt.record["model"] else None,
+        "params": captured_params_for(rebuilt, model)[0],
         "fidelity": rebuilt.fidelity,
     }
 

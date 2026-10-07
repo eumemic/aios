@@ -67,6 +67,7 @@ from aios.harness.completion import (
     call_litellm,
     estimate_cost_usd,
 )
+from aios.harness.request_capture import litellm_version
 from aios.jobs.app import defer_run_wake
 from aios.logging import get_logger
 from aios.models.attenuation import api_base_of
@@ -74,6 +75,7 @@ from aios.models.workflows import RequestRef, WfRun
 from aios.services import attenuation as attenuation_service
 from aios.services import model_providers as model_providers_service
 from aios.services.requests import Missing, rebuild_request
+from aios.workflows import run_replay
 
 log = get_logger("aios.workflows.run_llm")
 
@@ -237,11 +239,7 @@ async def invoke_call_llm(*, run: WfRun, spec: dict[str, Any]) -> tuple[dict[str
         messages = rebuilt.request["messages"]
         tools = rebuilt.request["tools"]
         fidelity = rebuilt.fidelity
-        # The captured params (endpoint included) belong to the model the request was
-        # sent to, and their launcher already passed #823 for them. Another model gets
-        # none, so the request can't reach that model's endpoint with another's key.
-        params = rebuilt.request["params"] if model == rebuilt.record["model"] else None
-        launcher_extra = params
+        params, launcher_extra = run_replay.captured_params_for(rebuilt, model)
         # An operator run (an eval arm) gets its own prompt-cache key.
         session_id = ref.session_id if run.principal == "session" else run.id
     else:
@@ -344,6 +342,32 @@ def _request_unavailable(why: str) -> dict[str, Any]:
         "error": f"call_llm: the request is unavailable: {why}",
         "error_kind": "request_unavailable",
     }
+
+
+def price_uncached(facts: dict[str, Any]) -> dict[str, Any]:
+    """Give each usage entry of a ``sub_runs()`` result its cost at uncached rates.
+
+    ``uncached_cost_microusd`` prices the entry's tokens from litellm's cost map with
+    no prompt-cache discount or premium, so it doesn't depend on which of two arms
+    sharing a prefix ran first. ``None`` when the model isn't in the cost map or the
+    entry has no model. The result records the litellm version once, since a change
+    in the cost map changes these numbers between runs."""
+    for node in facts["nodes"]:
+        for entry in node["usage"]:
+            model = entry["model"]
+            cost = (
+                estimate_cost_usd(
+                    model,
+                    {
+                        "input_tokens": entry["input_tokens"] or 0,
+                        "output_tokens": entry["output_tokens"] or 0,
+                    },
+                )
+                if model is not None
+                else None
+            )
+            entry["uncached_cost_microusd"] = None if cost is None else _to_microusd(cost)
+    return {**facts, "litellm_version": litellm_version()}
 
 
 def _to_microusd(cost_usd: float | None) -> int:

@@ -591,6 +591,77 @@ async def test_a_minted_ref_can_be_handed_to_a_sub_run(pool: asyncpg.Pool[Any]) 
     assert sub.request_ref == RequestRef(session_id=session, request_id=span)
 
 
+async def test_a_sub_run_handed_a_ref_and_an_input_starts_with_the_input(
+    pool: asyncpg.Pool[Any],
+) -> None:
+    """An eval arm gets its own parameters and the ref it may send: the input is
+    journaled as ``run_started`` (the row keeps none) and the ref is its grant."""
+    await _blobs(pool, "sha-system", "sha-tools", "sha-params")
+    agent = await _agent(pool)
+    session = await _session(pool, agent)
+    span, _ = await _request(pool, session, agent, _DAY)
+    async with pool.acquire() as conn:
+        arm = await wf_queries.insert_workflow(
+            conn,
+            account_id=_ACC,
+            name="arm-with-input",
+            script=(
+                "async def main(input):\n"
+                "    return await call_llm(request_ref=input['ref'], model=input['model'])\n"
+            ),
+        )
+    wf = await wf_service.create_workflow(
+        pool,
+        account_id=_ACC,
+        name="eval-hand-on-input",
+        script=(
+            "async def main(input):\n"
+            "    sample = await tool('sample_requests', input['sample'])\n"
+            "    ref = sample['items'][0]['request_ref']\n"
+            "    arm_input = {'ref': ref, 'model': 'openrouter/baseline'}\n"
+            "    return await invoke_workflow(input['arm'], arm_input, request_ref=ref)\n"
+        ),
+        tools=_REPLAY_TOOLS,
+    )
+    run = await service.create_run(
+        pool,
+        account_id=_ACC,
+        authority=OperatorAuthority(),
+        workflow_id=wf.id,
+        environment_id=_ENV,
+        input={
+            "arm": arm.id,
+            "sample": {
+                "agent_id": agent,
+                "start": _DAY.isoformat(),
+                "end": (_DAY + timedelta(days=1)).isoformat(),
+                "n": 1,
+                "seed": 1,
+            },
+        },
+    )
+    await _drive(run.id, 3)
+
+    ref = {"session_id": session, "request_id": span}
+    async with pool.acquire() as conn:
+        sub_id = await conn.fetchval("SELECT id FROM wf_runs WHERE parent_run_id = $1", run.id)
+        sub = await wf_queries.get_run_for_step(conn, sub_id)
+        sub_events = await wf_queries.list_run_events(conn, sub_id)
+    assert sub is not None
+    assert sub.input is None
+    assert sub.request_ref == RequestRef(**ref)
+    assert sub_events[0].type == "run_started"
+    assert sub_events[0].payload["input"] == {"ref": ref, "model": "openrouter/baseline"}
+
+    with mock.patch("aios.workflows.step.run_llm.launch_call_llm_task") as launch:
+        await _drive(sub_id, 2)
+    assert launch.called  # granted, so launched rather than refused
+    assert launch.call_args.kwargs["spec"]["request_ref"] == ref
+    async with pool.acquire() as conn:
+        sub_events = await wf_queries.list_run_events(conn, sub_id)
+    assert not [e for e in sub_events if e.type == "call_result"]
+
+
 async def test_a_session_run_cannot_sample(pool: asyncpg.Pool[Any]) -> None:
     """End to end: a session launch of a replay workflow drops the tools (the clamp),
     so its sample call is refused as a value and reads nothing."""
