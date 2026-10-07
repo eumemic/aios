@@ -24,6 +24,7 @@ A verdict is advisory. On PASS, the deploy is one ``PUT`` of the agent's model t
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import re
 import sys
@@ -53,9 +54,41 @@ def _workflow(api: Api, name: str) -> dict[str, Any]:
     return dict(found[0])
 
 
+def config_of(script: str) -> dict[str, Any]:
+    """The ``CONFIG`` a registered gate script was rendered with, read from its source
+    without running it: the script text comes from the API, so whoever can update
+    the workflow controls it."""
+    for node in ast.parse(script).body:
+        if not (isinstance(node, ast.Assign) and len(node.targets) == 1):
+            continue
+        target, value = node.targets[0], node.value
+        if (
+            isinstance(target, ast.Name)
+            and target.id == "CONFIG"
+            and isinstance(value, ast.Call)
+            and len(value.args) == 1
+            and isinstance(value.args[0], ast.Constant)
+            and isinstance(value.args[0].value, str)
+        ):
+            return dict(json.loads(value.args[0].value))
+    raise Refused("the registered gate script has no CONFIG literal")
+
+
 def bar_of(script: str) -> dict[str, Any]:
     """The bar baked into a registered gate script."""
-    return dict(load(script)["BAR"])
+    return dict(config_of(script)["bar"])
+
+
+def trusted(registered: str, local: str, name: str) -> dict[str, Any]:
+    """The namespace of ``local``, a script this checkout built from its own templates,
+    once it matches the registered text byte for byte. Only local text is executed,
+    so a workflow someone else updated is refused rather than run on this machine."""
+    if registered != local:
+        raise Refused(
+            f"the registered {name} differs from this checkout's template: register it "
+            "again with evals.register, or launch from the checkout that registered it"
+        )
+    return load(local)
 
 
 def _parse_candidate(candidate: str) -> tuple[str, int]:
@@ -117,7 +150,8 @@ def plan(
 ) -> dict[str, Any]:
     """Everything ``launch`` checks and estimates, and the run it would create."""
     gate = _workflow(api, gate_name)
-    registered = load(gate["script"])
+    config = config_of(gate["script"])
+    registered = trusted(gate["script"], paired_eval.build(**config), gate_name)
     bar = dict(registered["BAR"])
     agent = api.get(f"/v1/agents/{agent_id}")
     workflow_id, version = _parse_candidate(candidate)
@@ -133,7 +167,9 @@ def plan(
     # pins, and the gate's own budget rule.
     pinned = registered["CONFIG"]["analysis"]
     analysis = api.get(f"/v1/workflows/{pinned['id']}/versions/{pinned['version']}")
-    needed = load(analysis["script"])["required_n"](bar)
+    needed = trusted(analysis["script"], eval_analysis.build(), eval_analysis.NAME)["required_n"](
+        bar
+    )
     budgets = registered["budgets"]()
     estimate = {
         "n_required": needed["n"],

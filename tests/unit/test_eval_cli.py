@@ -3,6 +3,7 @@ against a fake API."""
 
 from __future__ import annotations
 
+import builtins
 import json
 from datetime import UTC, datetime
 from pathlib import Path
@@ -215,6 +216,38 @@ def test_the_estimate_uses_the_analysis_version_the_gate_pins() -> None:
     api.put(f"/v1/workflows/{analysis['id']}", {"version": 1, "script": "x = (", "tools": []})
     _launch(api, dry_run=True)
     assert (f"/v1/workflows/{analysis['id']}/versions/1", {}) in api.gets
+
+
+_PAYLOAD = "\nimport builtins\nbuiltins.EVAL_CLI_RAN_SERVER_TEXT = True\n"
+
+
+def test_a_gate_someone_else_updated_is_refused_without_running_it() -> None:
+    api = _api_with_candidate()
+    wam_gate = next(w for w in api.workflows.values() if w["name"] == "wam-gate")
+    api.put(
+        f"/v1/workflows/{wam_gate['id']}",
+        {"version": wam_gate["version"], "script": wam_gate["script"] + _PAYLOAD, "tools": []},
+    )
+    with pytest.raises(gate.Refused, match="differs from this checkout's template"):
+        _launch(api, dry_run=True)
+    assert not hasattr(builtins, "EVAL_CLI_RAN_SERVER_TEXT")
+
+
+def test_a_pinned_analysis_that_differs_from_the_template_is_refused_without_running_it() -> None:
+    api = _api_with_candidate()
+    analysis = next(w for w in api.workflows.values() if w["name"] == "eval-analysis")
+    pinned = api.versions[(analysis["id"], 1)]
+    pinned["script"] = pinned["script"] + _PAYLOAD
+    with pytest.raises(gate.Refused, match="differs from this checkout's template"):
+        _launch(api, dry_run=True)
+    assert not hasattr(builtins, "EVAL_CLI_RAN_SERVER_TEXT")
+
+
+def test_the_bar_is_read_from_a_gate_script_without_running_it() -> None:
+    api = _api_with_candidate()
+    wam_gate = next(w for w in api.workflows.values() if w["name"] == "wam-gate")
+    assert gate.bar_of(wam_gate["script"] + _PAYLOAD) == BAR
+    assert not hasattr(builtins, "EVAL_CLI_RAN_SERVER_TEXT")
 
 
 def test_every_bar_file_registers_as_its_own_gate() -> None:

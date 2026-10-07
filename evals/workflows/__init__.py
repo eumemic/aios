@@ -46,7 +46,11 @@ def render(template: str, **values: Any) -> str:
 def load(script: str) -> dict[str, Any]:
     """Execute a rendered script's top level and return its namespace, so its pure
     helpers can be called outside a run (by tests and the launcher's estimates). The
-    capabilities aren't bound, so ``main`` can't run this way."""
+    capabilities aren't bound, so ``main`` can't run this way.
+
+    Only pass text built here from these templates. Script text read back from the
+    API is whatever the workflow's last updater wrote, so callers compare it with a
+    local build first (``evals.gate.trusted``) and never execute it."""
     namespace: dict[str, Any] = {"__name__": "<workflow>"}
     exec(compile(script, "<workflow>", "exec", dont_inherit=True), namespace)
     return namespace
