@@ -825,6 +825,128 @@ async def test_capacity_backoff_keeps_the_park_live_and_relaunches_the_same_id(
     assert set(await _park_run_ids(pool, session_id)) == {first_id}
 
 
+# ── #2514: pin the crash-ordering and 5xx properties the #2480/#2481 mutants hit ──
+
+
+async def test_crash_after_refusal_marker_before_latch_recovers_to_a_fresh_turn(
+    mwf_runtime: asyncpg.Pool[Any],
+) -> None:
+    """#2481 M4: a permanent refusal writes the consumed-park marker BEFORE latching
+    the turn errored. A crash between the two must leave the refused park consumed,
+    so recovery opens a fresh turn under a new run id. Latch-first would crash with
+    the stale park still open, and recovery would relaunch the refused turn."""
+    from aios.harness import loop
+
+    pool = mwf_runtime
+    session_id = await _make_bound_session(pool)
+    ref = await _bound_ref(pool, session_id)
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE workflows SET archived_at = now() WHERE id = $1", ref.workflow_id
+        )
+    real_latch = loop._latch_errored_turn
+    crashed = False
+
+    async def _crash_once(*args: Any, **kwargs: Any) -> None:
+        nonlocal crashed
+        if not crashed:
+            crashed = True
+            raise RuntimeError("worker died between the marker and the latch")
+        await real_latch(*args, **kwargs)
+
+    with mock.patch.object(loop, "_latch_errored_turn", side_effect=_crash_once):
+        await run_session_step(session_id)
+
+    assert crashed
+    [stale_run_id] = await _park_run_ids(pool, session_id)
+    session = await sessions_service.get_session(pool, session_id, account_id=_ACCOUNT)
+    assert session.stop_reason is not None and session.stop_reason["type"] != "error"
+    async with pool.acquire() as conn:
+        assert (
+            await db_queries.find_latest_model_workflow_park(conn, session_id, account_id=_ACCOUNT)
+            is None
+        ), "the marker landed before the crash, so the refused park is consumed"
+
+    # The operator fixes the cause; the session's next wake opens a fresh turn.
+    async with pool.acquire() as conn:
+        await conn.execute("UPDATE workflows SET archived_at = NULL WHERE id = $1", ref.workflow_id)
+    await run_session_step(session_id)
+
+    run_ids = await _inner_run_ids(pool, session_id)
+    assert len(run_ids) == 1
+    assert stale_run_id not in run_ids, "recovery relaunched the refused turn's stale run id"
+    assert (await _park_run_ids(pool, session_id))[-1] == run_ids[0]
+
+
+async def test_a_5xx_from_the_park_launch_propagates_instead_of_refusing_the_turn(
+    mwf_runtime: asyncpg.Pool[Any],
+) -> None:
+    """#2481 M9: an ``AiosError`` with ``status_code >= 500`` is a server fault, not a
+    refusal. It must reach the step's crash handler (``harness_error`` + retry with the
+    park left live), never end the turn as a terminal refusal that consumes the park."""
+    from aios.errors import ServiceUnavailableError
+
+    pool = mwf_runtime
+    session_id = await _make_bound_session(pool)
+
+    with mock.patch.object(
+        wf_service,
+        "launch_awaited_run",
+        side_effect=ServiceUnavailableError("a dependency is down"),
+    ):
+        await run_session_step(session_id)
+
+    assert len(await _span_events(pool, session_id, "harness_error")) == 1
+    assert await _span_events(pool, session_id, "model_workflow_launch_refused") == []
+    assert await _span_events(pool, session_id, "model_workflow_harvest_end") == []
+    session = await sessions_service.get_session(pool, session_id, account_id=_ACCOUNT)
+    assert session.stop_reason == {"type": "rescheduling"}
+    [park_run_id] = await _park_run_ids(pool, session_id)
+    disposition = await mwf.take_pending_harvest(pool, session_id, account_id=_ACCOUNT)
+    assert disposition == mwf.UnlaunchedPark(run_id=park_run_id), "the park stays live"
+
+
+async def test_a_relaunched_park_run_keeps_its_session_visibility(
+    mwf_runtime: asyncpg.Pool[Any],
+) -> None:
+    """#2480: a park that crashed before its launch is relaunched by the next wake.
+    The relaunched run is still the session's own turn: visible only to the session,
+    under the session's principal, and marked as a model dispatch."""
+    pool = mwf_runtime
+    session_id = await _make_bound_session(pool)
+
+    with (
+        mock.patch.object(
+            wf_service,
+            "launch_awaited_run",
+            side_effect=RuntimeError("worker died before the run was created"),
+        ),
+        pytest.raises(RuntimeError),
+    ):
+        await mwf.launch_model_workflow_park(
+            pool,
+            session_id,
+            ref=await _bound_ref(pool, session_id),
+            request=_request(),
+            reacting_to=1,
+            request_record={},
+            account_id=_ACCOUNT,
+        )
+    assert await _inner_run_ids(pool, session_id) == []
+
+    await run_session_step(session_id)
+
+    [run_id] = await _inner_run_ids(pool, session_id)
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_run_for_step(conn, run_id)
+    assert run is not None
+    assert run.visibility == "session"
+    assert run.principal == "session"
+    caller = await _run_caller(pool, run_id)
+    assert caller["purpose"] == "model_dispatch"
+    assert caller["kind"] == "session" and caller["id"] == session_id
+
+
 # ── #2471: the park record carries the captured request ───────────────────────
 
 
