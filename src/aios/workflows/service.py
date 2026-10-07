@@ -389,6 +389,7 @@ async def create_run(
         launcher_agent = None
         launcher_session_id: str | None = None
         parent_run_id: str | None = None
+        budget_run_id: str | None = None
         bound: Surface | None = None
         held: list[str] | None = None
         workspace_path: str | None = None
@@ -444,6 +445,11 @@ async def create_run(
                 launcher_session_id = parent_run.launcher_session_id
                 parent_run_id = parent_run.id
                 principal = parent_run.principal
+                # The nearest budgeted ancestor (#2476): a sub-run with no budget of its
+                # own is held to that run's ceiling.
+                budget_run_id = (
+                    parent_run.id if parent_run.budget_usd is not None else parent_run.budget_run_id
+                )
         if workspace == "fresh":
             workspace_path = str(run_workspace_dir(account_id, effective_run_id))
         source_version: int | None
@@ -641,6 +647,7 @@ async def create_run(
             trigger_id=trigger_id,
             as_agent=authority.as_agent if isinstance(authority, RunAuthority) else None,
             request_ref=request_ref,
+            budget_run_id=budget_run_id,
         )
         assert run.principal == principal, (
             f"insert trigger stamped principal {run.principal!r}, authority implies {principal!r}"

@@ -149,6 +149,7 @@ def _row_to_wf_run(row: asyncpg.Record) -> WfRun:
             if row.get("budget_total_microusd") is not None
             else None
         ),
+        budget_run_id=row.get("budget_run_id"),
         default_child_model=row.get("default_child_model"),
         call_llm_cost_microusd=row.get("call_llm_cost_microusd", 0) or 0,
         call_llm_tokens_complete=bool(row.get("call_llm_tokens_complete", True)),
@@ -747,6 +748,7 @@ async def insert_wf_run(
     trigger_id: str | None = None,
     as_agent: AsAgent | None = None,
     request_ref: RequestRef | None = None,
+    budget_run_id: str | None = None,
 ) -> WfRun:
     """Insert a fresh ``pending`` run that snapshots ``script`` (+ ``script_sha``) and the
     declared tool surface (``tools``/``mcp_servers``/``http_servers``) — pinned at launch.
@@ -800,11 +802,11 @@ async def insert_wf_run(
                  tools, mcp_servers, http_servers, budget_total_microusd, default_child_model,
                  depth, tools_vocab_epoch, creator_session_id, creator_run_id, ssh_servers,
                  trigger_id, as_agent_id, as_agent_version,
-                 request_ref_session_id, request_ref_id)
+                 request_ref_session_id, request_ref_id, budget_run_id)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10, $11, $12, $13, $14, $15,
                     'pending', $16::jsonb,
                     $17::jsonb, $18::jsonb, $19::jsonb, $20, $21, $22, $23, $24, $25, $26::jsonb,
-                    $27, $28, $29, $30, $31)
+                    $27, $28, $29, $30, $31, $32)
             ON CONFLICT (id) DO NOTHING
             RETURNING *
             """,
@@ -839,6 +841,7 @@ async def insert_wf_run(
             as_agent.version if as_agent is not None else None,
             request_ref.session_id if request_ref is not None else None,
             request_ref.request_id if request_ref is not None else None,
+            budget_run_id,
         )
     except asyncpg.ForeignKeyViolationError as exc:
         raise NotFoundError(
@@ -939,6 +942,19 @@ async def run_budget_spent_microusd(
 ) -> int:
     """Point form of :func:`runs_budget_spent_microusd`."""
     return (await runs_budget_spent_microusd(conn, [run_id], account_id=account_id))[run_id]
+
+
+async def get_run_budget_total_microusd(
+    conn: asyncpg.Connection[Any], run_id: str, *, account_id: str
+) -> int | None:
+    """A run's ``budget_usd`` ceiling in micro-USD, or ``None`` when it has none (or is
+    absent): the ceiling a sub-run without a budget of its own inherits (#2476)."""
+    total: int | None = await conn.fetchval(
+        "SELECT budget_total_microusd FROM wf_runs WHERE id = $1 AND account_id = $2",
+        run_id,
+        account_id,
+    )
+    return total
 
 
 async def get_run_call_llm_cost_microusd(
@@ -1355,7 +1371,8 @@ async def list_run_ids_needing_step(
       a step that actually runs, and a parent parked behind a burning child has no
       signal and no other traffic to produce one. 0 disables.
 
-    - a PARKED run with a ``budget_usd`` whose creation-subtree spend has reached it
+    - a PARKED run whose budget (its own ``budget_usd``, else its nearest budgeted
+      ancestor's, #2476) is spent by that budget run's creation subtree,
       and which still has an open ``agent()`` call (#2446 c). The run-level analogue
       of the per-child clause above, and live for the same reason: the budget gate
       in the step only runs when a new ``agent()``/``call_llm`` opens, and a run
@@ -1366,9 +1383,8 @@ async def list_run_ids_needing_step(
       a later ``agent()`` is refused by the gate instead of opening. This is a
       SECOND statement, not an OR-clause: the rollup is a recursive walk that must
       not run per row of the main predicate. Its candidate set is cheap and usually
-      empty (``budget_total_microusd IS NOT NULL`` on a suspended run -- no
-      trigger-launched run had a budget before #2446 a), and only candidates pay
-      the batched rollup.
+      empty (a suspended run with a budget or a budgeted ancestor), and only
+      candidates pay the batched rollup, once per distinct budget run.
 
     (No ``account_id``: ``defer_run_wake`` needs none and appends no journal span.)
     """
@@ -1487,10 +1503,12 @@ async def list_run_ids_needing_step(
 
 
 async def list_parked_run_ids_over_budget(conn: asyncpg.Connection[Any]) -> list[str]:
-    """Suspended runs with an open ``agent()`` call whose creation-subtree spend
-    has reached ``budget_usd`` (#2446 c) -- the budget clause of
-    :func:`list_run_ids_needing_step`. ``>=`` matches the step's gate and its
-    harvest-side force-resolution, so a run woken here is always resolved.
+    """Suspended runs with an open ``agent()`` call whose budget is spent (#2446 c) --
+    the budget clause of :func:`list_run_ids_needing_step`. A run's budget is its own
+    ``budget_usd``, else its nearest budgeted ancestor's (``budget_run_id``, #2476),
+    spent when that budget run's creation subtree has reached it. ``>=`` matches the
+    step's gate and its harvest-side force-resolution, so a run woken here is always
+    resolved.
 
     Fail-open PER ACCOUNT: each account's rollup runs in its own SAVEPOINT. If it
     raises (the rollup's 10s statement timeout, any DB error), the savepoint is
@@ -1500,10 +1518,16 @@ async def list_parked_run_ids_over_budget(conn: asyncpg.Connection[Any]) -> list
     """
     candidates = await conn.fetch(
         """
-        SELECT r.id, r.account_id, r.budget_total_microusd FROM wf_runs r
+        SELECT r.id, r.account_id, b.id AS budget_run_id, b.budget_total_microusd
+          FROM wf_runs r
+          JOIN wf_runs b
+            ON b.id = CASE WHEN r.budget_total_microusd IS NOT NULL
+                           THEN r.id ELSE r.budget_run_id END
+           AND b.account_id = r.account_id
         WHERE r.archived_at IS NULL
           AND r.status = 'suspended'
-          AND r.budget_total_microusd IS NOT NULL
+          AND (r.budget_total_microusd IS NOT NULL OR r.budget_run_id IS NOT NULL)
+          AND b.budget_total_microusd IS NOT NULL
           AND EXISTS (
             SELECT 1 FROM wf_run_events cs
             WHERE cs.run_id = r.id AND cs.type = 'call_started'
@@ -1534,7 +1558,9 @@ async def list_parked_run_ids_over_budget(conn: asyncpg.Connection[Any]) -> list
             try:
                 async with conn.transaction():  # SAVEPOINT: a failure aborts only this
                     spent = await runs_budget_spent_microusd(
-                        conn, [r["id"] for r in rows], account_id=account_id
+                        conn,
+                        sorted({r["budget_run_id"] for r in rows}),
+                        account_id=account_id,
                     )
             except Exception as exc:
                 log.warning(
@@ -1545,7 +1571,9 @@ async def list_parked_run_ids_over_budget(conn: asyncpg.Connection[Any]) -> list
                     error=str(exc),
                 )
                 continue
-            over.extend(r["id"] for r in rows if spent[r["id"]] >= r["budget_total_microusd"])
+            over.extend(
+                r["id"] for r in rows if spent[r["budget_run_id"]] >= r["budget_total_microusd"]
+            )
     return over
 
 

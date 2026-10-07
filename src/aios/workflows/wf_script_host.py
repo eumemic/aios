@@ -36,6 +36,7 @@ import builtins
 import contextlib
 import inspect
 import linecache
+import math
 import os
 import sys
 import traceback
@@ -220,6 +221,7 @@ def invoke_workflow(
     label: str | None = None,
     as_agent: dict[str, Any] | None = None,
     request_ref: Any = None,
+    budget_usd: float | None = None,
 ) -> _Capability:
     """Invoke another workflow as a sub-run and await its result — the dual of
     :func:`agent` (which invokes a child *session*), keyed by id like
@@ -245,7 +247,20 @@ def invoke_workflow(
     request rebuilt, in the shape a workflow-as-model run gets, so an eval arm sees
     what production would have given it; with an ``input`` it starts with that input
     instead and can send or read the request by ref.
+
+    ``budget_usd`` gives the sub-run a spend ceiling of its own, over its whole
+    creation subtree, clamped to what this run may still spend. Without one the sub-run
+    is held to this run's ceiling (or its nearest budgeted ancestor's). Once a ceiling
+    is spent, a run's new ``agent()``, ``call_llm`` and ``invoke_workflow`` calls are
+    refused, and ``invoke_workflow`` raises :class:`AgentError` (``budget_exceeded``).
     """
+    if budget_usd is not None and (
+        isinstance(budget_usd, bool)
+        or not isinstance(budget_usd, int | float)
+        or not math.isfinite(budget_usd)
+        or budget_usd <= 0
+    ):
+        raise ValueError(f"invoke_workflow() requires budget_usd > 0, got {budget_usd!r}")
     annotations: dict[str, Any] = {}
     if label is not None:
         annotations["label"] = label
@@ -265,6 +280,8 @@ def invoke_workflow(
         spec["as_agent"] = as_agent
     if request_ref is not None:
         spec["request_ref"] = _request_ref_spec(request_ref)
+    if budget_usd is not None:
+        spec["budget_usd"] = budget_usd
     return _Capability("invoke_workflow", spec, annotations)
 
 
@@ -281,7 +298,9 @@ def _request_ref_spec(ref: Any) -> dict[str, str]:
 
 
 def budget() -> _Capability:
-    """Read this run's shared direct-child spend budget, or None when unset."""
+    """Read the budget this run is held to, as ``{total_usd, spent_usd, remaining_usd}``
+    over the budget run's whole creation subtree: its own ``budget_usd``, else its
+    nearest budgeted ancestor's. ``None`` when there is none."""
     return _Capability("budget", None)
 
 

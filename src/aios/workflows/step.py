@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import math
 import secrets
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
@@ -154,17 +155,59 @@ def _usage_payload(usage: wf_queries.RunChildrenUsage) -> dict[str, Any]:
     }
 
 
-def _budget_view(run: WfRun, spent_microusd: int) -> dict[str, float] | None:
-    if run.budget_usd is None:
+class _Budget(NamedTuple):
+    """The ceiling a run is held to: its own ``budget_usd``, else its nearest budgeted
+    ancestor's (#2476), with that budget run's creation-SUBTREE spend (#2446 b), which
+    already includes its own call_llm meter (#1633)."""
+
+    total_microusd: int
+    spent_microusd: int
+
+    @property
+    def exhausted(self) -> bool:
+        return self.spent_microusd >= self.total_microusd
+
+    @property
+    def remaining_microusd(self) -> int:
+        return max(self.total_microusd - self.spent_microusd, 0)
+
+    def refusal(self, refused: str) -> str:
+        return (
+            f"run budget exhausted: spent ${self.spent_microusd / 1_000_000:.2f} "
+            f"of ${self.total_microusd / 1_000_000:.2f} — {refused}"
+        )
+
+
+async def _held_budget(conn: asyncpg.Connection[Any], run: WfRun) -> _Budget | None:
+    """Read the budget ``run`` is held to, or ``None`` when neither it nor any ancestor
+    has one. A sub-run with a budget of its own was clamped to its caller's remaining
+    budget when it was created, so it checks only its own."""
+    if run.budget_usd is not None:
+        budget_run_id, total = run.id, round(run.budget_usd * 1_000_000)
+    elif run.budget_run_id is not None:
+        budget_run_id = run.budget_run_id
+        inherited = await wf_queries.get_run_budget_total_microusd(
+            conn, budget_run_id, account_id=run.account_id
+        )
+        if inherited is None:
+            return None
+        total = inherited
+    else:
         return None
-    # The script-facing spend must match what the over-budget gate enforces: the
-    # run's creation-SUBTREE cost (#2446 b), which already includes the run's own
-    # call_llm meter (#1633) -- see ``wf_queries.run_budget_spent_microusd``.
-    spent = spent_microusd / 1_000_000
+    spent = await wf_queries.run_budget_spent_microusd(
+        conn, budget_run_id, account_id=run.account_id
+    )
+    return _Budget(total, spent)
+
+
+def _budget_view(budget: _Budget | None) -> dict[str, float] | None:
+    # The script-facing spend matches what the over-budget gate enforces.
+    if budget is None:
+        return None
     return {
-        "total_usd": run.budget_usd,
-        "spent_usd": spent,
-        "remaining_usd": max(run.budget_usd - spent, 0.0),
+        "total_usd": budget.total_microusd / 1_000_000,
+        "spent_usd": budget.spent_microusd / 1_000_000,
+        "remaining_usd": budget.remaining_microusd / 1_000_000,
     }
 
 
@@ -545,12 +588,11 @@ async def _run_workflow_step_body(
         # force-resolve those calls on the #2440 exit path. The sweep's budget
         # clause (``list_parked_run_ids_over_budget``) is what wakes such a run.
         run_over_budget = False
-        if run.budget_usd is not None and any(
+        if (run.budget_usd is not None or run.budget_run_id is not None) and any(
             e.payload.get("capability") == "agent" for e in inflight.values()
         ):
-            run_over_budget = await wf_queries.run_budget_spent_microusd(
-                conn, run_id, account_id=account_id
-            ) >= round(run.budget_usd * 1_000_000)
+            held = await _held_budget(conn, run)
+            run_over_budget = held is not None and held.exhausted
         for call_key, cap_event in list(inflight.items()):
             cap_payload = cap_event.payload
             if cap_payload.get("capability") == "agent":
@@ -852,21 +894,12 @@ async def _run_workflow_step_body(
             1 for e in inflight.values() if e.payload.get("capability") == "agent"
         )
         slots = max(0, get_settings().workflow_max_inflight_children_per_run - inflight_agents)
-        # The budget gate reads the run's full creation-SUBTREE spend (#2446 b): the
-        # run's own call_llm meter (#1633), every child, every grandchild (a child's
-        # own call_agent), and every sub-run. It used to sum direct children only, so
-        # spend one level down never counted against budget_usd.
-        budget_total_microusd = (
-            round(run.budget_usd * 1_000_000) if run.budget_usd is not None else None
-        )
-        budget_spent_microusd = (
-            await wf_queries.run_budget_spent_microusd(conn, run_id, account_id=account_id)
-            if run.budget_usd is not None
-            else 0
-        )
-        over_budget = (
-            budget_total_microusd is not None and budget_spent_microusd >= budget_total_microusd
-        )
+        # The budget gate reads the budget run's full creation-SUBTREE spend (#2446 b):
+        # its own call_llm meter (#1633), every child, every grandchild (a child's own
+        # call_agent), and every sub-run. A sub-run with no budget of its own is held to
+        # its nearest budgeted ancestor's (#2476), so a sub-run can't spend past it.
+        budget = await _held_budget(conn, run)
+        over_budget = budget is not None and budget.exhausted
 
         # Suspended: open any *new* frontier capability, then park.
         for cap in outcome.emitted:
@@ -906,16 +939,13 @@ async def _run_workflow_step_body(
                     disposition = _escalate(disposition, "harvest_now")
             elif cap.capability_id == "agent":
                 if over_budget:
-                    assert run.budget_usd is not None
+                    assert budget is not None
                     await _journal_agent_rejection(
                         conn,
                         run=run,
                         call_key=cap.call_key,
                         kind="budget_exceeded",
-                        message=(
-                            f"run budget exhausted: spent ${budget_spent_microusd / 1_000_000:.2f} "
-                            f"of ${run.budget_usd:.2f} — new agent() calls are refused"
-                        ),
+                        message=budget.refusal("new agent() calls are refused"),
                     )
                     disposition = _escalate(disposition, "owed_drive")
                     continue
@@ -988,7 +1018,18 @@ async def _run_workflow_step_body(
                 # create_run and apply for free. A bad output_schema / target
                 # rejects as a CATCHABLE author error (call_result error journaled),
                 # so self-wake to replay and throw the AgentError at the await.
-                spawn = await _open_invoke_workflow_capability(conn, pool, run, cap)
+                if over_budget:
+                    assert budget is not None
+                    await _journal_agent_rejection(
+                        conn,
+                        run=run,
+                        call_key=cap.call_key,
+                        kind="budget_exceeded",
+                        message=budget.refusal("new invoke_workflow() calls are refused"),
+                    )
+                    disposition = _escalate(disposition, "owed_drive")
+                    continue
+                spawn = await _open_invoke_workflow_capability(conn, pool, run, cap, budget)
                 if spawn.rejected:
                     disposition = _escalate(disposition, "owed_drive")
                 elif spawn.needs_rewake:
@@ -1002,7 +1043,7 @@ async def _run_workflow_step_body(
                     type="call_result",
                     call_key=cap.call_key,
                     payload={
-                        "result": _budget_view(run, budget_spent_microusd),
+                        "result": _budget_view(budget),
                         "is_error": False,
                     },
                 )
@@ -1113,14 +1154,8 @@ async def _run_workflow_step_body(
                 llm_spec = cap.spec if isinstance(cap.spec, dict) else {}
                 refusal: dict[str, Any] | None = None
                 if over_budget:
-                    assert run.budget_usd is not None
-                    refusal = {
-                        "error": (
-                            f"run budget exhausted: spent "
-                            f"${budget_spent_microusd / 1_000_000:.2f} of "
-                            f"${run.budget_usd:.2f} — call_llm is refused"
-                        )
-                    }
+                    assert budget is not None
+                    refusal = {"error": budget.refusal("call_llm is refused")}
                 elif llm_spec.get("kind") == "ref" and not await run_replay.request_ref_granted(
                     conn, run, llm_spec.get("request_ref")
                 ):
@@ -1496,6 +1531,7 @@ async def _open_invoke_workflow_capability(
     pool: asyncpg.Pool[Any],
     run: WfRun,
     cap: EmittedCapability,
+    budget: _Budget | None,
 ) -> _SpawnResult:
     """Open one ``invoke_workflow()`` frontier: spawn a sub-run, journal ``call_started``.
 
@@ -1556,6 +1592,24 @@ async def _open_invoke_workflow_capability(
             "invoke_workflow() requires as_agent to be {'agent_id': str, 'version': int >= 1}, "
             f"got {as_agent_spec!r}",
         )
+    # A budget of its own (#2476), clamped to what this run may still spend, so a
+    # sub-run's ceiling never exceeds its caller's. The host checked it's a positive
+    # finite number; the worker re-checks the wire value.
+    budget_usd = spec.get("budget_usd")
+    if budget_usd is not None:
+        if (
+            isinstance(budget_usd, bool)
+            or not isinstance(budget_usd, int | float)
+            or not math.isfinite(budget_usd)
+            or budget_usd <= 0
+        ):
+            return await _reject(
+                "bad_invoke_workflow",
+                f"invoke_workflow() requires budget_usd to be a positive number, got "
+                f"{budget_usd!r}",
+            )
+        if budget is not None:
+            budget_usd = min(float(budget_usd), budget.remaining_microusd / 1_000_000)
     # The script host checked the ref's shape; this run may hand on only a ref it can
     # resolve itself (#2474). The sub-run's row then holds it as its own grant.
     request_ref_spec = spec.get("request_ref")
@@ -1604,6 +1658,7 @@ async def _open_invoke_workflow_capability(
             # The sub-run acts within this run's frozen surface and inherits its vaults
             # (#2472); ``as_agent`` re-roots the surface at an agent version.
             authority=RunAuthority(run.id, as_agent),
+            budget_usd=budget_usd,
             request_ref=request_ref,
             request_id=cap.call_key,  # the invoke_workflow() call IS the request
             caller={"kind": "run", "id": run.id, "awaited": True},
