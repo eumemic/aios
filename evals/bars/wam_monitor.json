@@ -1,5 +1,6 @@
 {
   "delta": 0.1,
+  "alpha": 0.05,
   "sample_size": 500,
   "cluster_cap": 2,
   "min_clusters": 30,
@@ -25,7 +26,7 @@
   },
   "budget": {
     "arm_usd": 0.5,
-    "candidate_usd": 2.0,
+    "candidate_margin": 2.0,
     "judge_usd": 0.5
   },
   "planning": {

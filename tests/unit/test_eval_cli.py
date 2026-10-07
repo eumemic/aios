@@ -8,6 +8,7 @@ import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 import pytest
 from evals import gate, monitor_check, register
@@ -36,6 +37,17 @@ class FakeApi:
             return {"id": path.rsplit("/", 1)[1], "version": 7, "model": self.agent_model}
         if path.startswith("/v1/triggers/") and path.endswith("/runs"):
             return {"data": self.fires}
+        if path.startswith("/v1/triggers/"):
+            return {
+                "name": path.rsplit("/", 1)[1],
+                "action": {
+                    "kind": "workflow",
+                    "input_template": {
+                        "agent": {"agent_id": "agent_1", "version": 7},
+                        "candidate": {"workflow_id": "wf_cand", "version": 3},
+                    },
+                },
+            }
         if "/versions/" in path:
             parts = path.split("/")
             return self.versions[(parts[3], int(parts[5]))]
@@ -87,7 +99,9 @@ def test_registering_creates_then_leaves_alone_then_updates() -> None:
     item_wf = api.workflows[first["eval-item"]["id"]]
     assert item_wf["script"] == eval_item.build(r0=first["eval-r0"], judge=first["eval-judge"])
 
-    assert register.register(api, {"wam-gate": BAR, "wam-monitor": MONITOR_BAR}) == first  # nothing changed
+    assert (
+        register.register(api, {"wam-gate": BAR, "wam-monitor": MONITOR_BAR}) == first
+    )  # nothing changed
 
     stricter = dict(BAR, delta=0.05)
     again = register.register(api, {"wam-gate": stricter, "wam-monitor": MONITOR_BAR})
@@ -438,6 +452,13 @@ def _fire(result_id: str | None, status: str = "ok", error: str | None = None) -
     }
 
 
+def _monitor_api() -> FakeApi:
+    """An API whose agent runs the workflow the monitor tests."""
+    api = FakeApi()
+    api.agent_model = "workflow:wf_cand@3"
+    return api
+
+
 def _check(api: FakeApi, now: datetime = _CHECK_NOW) -> tuple[int, list[str]]:
     lines: list[str] = []
     code = monitor_check.check(
@@ -447,14 +468,14 @@ def _check(api: FakeApi, now: datetime = _CHECK_NOW) -> tuple[int, list[str]]:
 
 
 def test_a_quiet_week_is_ok_and_a_failure_to_re_prove_is_not_an_alarm() -> None:
-    api = FakeApi()
+    api = _monitor_api()
     api.fires = [_fire("wfr_1")]
     api.runs["wfr_1"] = _monitor_run("wfr_1", "2026-10-12T03:17:00+00:00", verdict="FAIL")
     assert _check(api)[0] == monitor_check.OK
 
 
 def test_an_alarm_exits_one_and_names_what_is_worse() -> None:
-    api = FakeApi()
+    api = _monitor_api()
     api.fires = [_fire("wfr_1")]
     api.runs["wfr_1"] = _monitor_run(
         "wfr_1", "2026-10-12T03:17:00+00:00", alarm=True, alarms=["win_rate", "cost"]
@@ -465,7 +486,7 @@ def test_an_alarm_exits_one_and_names_what_is_worse() -> None:
 
 
 def test_a_running_fire_falls_back_to_last_weeks_completed_run() -> None:
-    api = FakeApi()
+    api = _monitor_api()
     api.fires = [_fire("wfr_2"), _fire("wfr_1")]
     api.runs["wfr_2"] = dict(_monitor_run("wfr_2", "2026-10-12T03:17:00+00:00"), status="running")
     api.runs["wfr_1"] = _monitor_run("wfr_1", "2026-10-05T03:17:00+00:00")
@@ -490,12 +511,129 @@ def test_a_running_fire_falls_back_to_last_weeks_completed_run() -> None:
             [_fire("wfr_1")],
             {"wfr_1": dict(_monitor_run("wfr_1", "2026-10-12T03:17:00+00:00"), status="errored")},
         ),
+        # This week's run failed: last week's completed run doesn't hide it.
+        (
+            [_fire("wfr_2"), _fire("wfr_1")],
+            {
+                "wfr_2": dict(_monitor_run("wfr_2", "2026-10-12T03:17:00+00:00"), status="errored"),
+                "wfr_1": _monitor_run("wfr_1", "2026-10-07T03:17:00+00:00"),
+            },
+        ),
+        # INCONCLUSIVE for an operational reason is a monitor that isn't working.
+        (
+            [_fire("wfr_1")],
+            {
+                "wfr_1": _monitor_run(
+                    "wfr_1",
+                    "2026-10-12T03:17:00+00:00",
+                    verdict="INCONCLUSIVE",
+                    reasons={"invalid": [], "inconclusive": ["budget_stop"], "failed": []},
+                )
+            },
+        ),
     ],
 )
 def test_a_monitor_that_isnt_watching_exits_two(
     fires: list[dict[str, Any]], runs: dict[str, dict[str, Any]]
 ) -> None:
-    api = FakeApi()
+    api = _monitor_api()
     api.fires = fires
     api.runs.update(runs)
     assert _check(api)[0] == monitor_check.NOT_WATCHING
+
+
+def _thin(id: str, created_at: str) -> dict[str, Any]:
+    return _monitor_run(
+        id,
+        created_at,
+        verdict="INCONCLUSIVE",
+        reasons={"invalid": [], "inconclusive": ["too_few_clusters"], "failed": []},
+    )
+
+
+def test_a_thin_week_warns_without_paging() -> None:
+    """A low-traffic agent has too few clusters every week: that is no reason to page."""
+    api = _monitor_api()
+    api.fires = [_fire("wfr_1")]
+    api.runs["wfr_1"] = _thin("wfr_1", "2026-10-12T03:17:00+00:00")
+    code, lines = _check(api)
+    assert code == monitor_check.OK
+    assert lines[0].startswith("jarvis-wam: warning:")
+
+
+def test_two_thin_weeks_warn_louder() -> None:
+    api = _monitor_api()
+    api.fires = [_fire("wfr_2"), _fire("wfr_1")]
+    api.runs["wfr_2"] = _thin("wfr_2", "2026-10-12T03:17:00+00:00")
+    api.runs["wfr_1"] = _thin("wfr_1", "2026-10-05T03:17:00+00:00")
+    code, lines = _check(api)
+    assert code == monitor_check.OK
+    assert "two thin weeks in a row" in lines[0]
+
+
+def test_a_monitor_of_a_workflow_no_longer_deployed_is_stale() -> None:
+    api = FakeApi()  # the agent runs a plain model again: rolled back
+    api.fires = [_fire("wfr_1")]
+    api.runs["wfr_1"] = _monitor_run("wfr_1", "2026-10-12T03:17:00+00:00")
+    code, lines = _check(api)
+    assert code == monitor_check.NOT_WATCHING
+    assert "stale" in lines[0]
+
+
+def test_an_unreadable_api_is_not_watching_never_an_alarm(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class Down:
+        def get(self, path: str, **params: Any) -> Any:
+            raise OSError("connection refused")
+
+    with mock.patch.object(monitor_check, "Client", Down):
+        assert monitor_check.main(["jarvis-wam"]) == monitor_check.NOT_WATCHING
+    assert "the check failed: OSError" in capsys.readouterr().out
+
+
+def test_the_report_reads_a_monitor_run_and_prints_its_alarm() -> None:
+    api = FakeApi()
+    run = _monitor_run(
+        "wfr_m", "2026-10-12T03:17:00+00:00", alarm=True, alarms=["win_rate"], mode="monitor"
+    )
+    run.update(
+        workflow_id="wf_monitor",
+        input={
+            "trigger": {"fired_at": "2026-10-12T03:17:00+00:00"},
+            "input": {
+                "agent": {"agent_id": "agent_1", "version": 7},
+                "candidate": {"workflow_id": "wf_cand", "version": 3},
+            },
+        },
+    )
+    api.runs["wfr_m"] = run
+    lines: list[str] = []
+    gate.report(api, "wfr_m", lines.append)
+    assert "week 2026-10-05..2026-10-12: ALARM on win_rate" in lines
+
+
+def test_reanalyze_reads_a_gate_output_from_before_the_monitor() -> None:
+    api = FakeApi()
+    register.register(api, {"wam-gate": BAR})
+    run = _gate_run("wfr_g", start="2026-09-21T00:00:00+00:00")
+    run["output"].pop("mode", None)
+    run["output"].pop("alpha", None)
+    api.runs["wfr_g"] = run
+    gate.reanalyze(api, "wfr_g", None, lambda _: None)
+    body = api.posts[-1][1]
+    assert body["input"]["mode"] == "gate" and body["input"]["alpha"] == BAR["alpha"]
+
+
+@pytest.mark.parametrize(
+    "bar_path", sorted((Path(__file__).parents[2] / "evals" / "bars").glob("*.json"))
+)
+def test_every_bar_renders_and_budgets(bar_path: Path) -> None:
+    """Each bar file registers as a working gate or monitor: its script loads and its
+    per-item budgets follow from its fields."""
+    bar = json.loads(bar_path.read_text())
+    ref = {"id": "wf_x", "version": 1}
+    script = paired_eval.build(mode=register.mode_of(bar), bar=bar, item=ref, analysis=ref)
+    budgets = load(script)["budgets"]()
+    assert budgets["candidate_usd"] == (1 + bar["limits"]["cost"]) * 0.5 * 2.0
+    assert bar["alpha"] > 0

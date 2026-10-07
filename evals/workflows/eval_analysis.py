@@ -11,7 +11,9 @@ Three modes, chosen by the input's ``mode``:
   ``attributed`` holds the cluster of each excluded item the candidate could have
   caused.
 * ``monitor``: the same input and result, plus ``alarm`` and ``alarms``: the tests
-  on which the candidate is shown worse (see ``alarms``).
+  on which the candidate is shown worse (see ``alarms``). Its ``alpha`` is the week's
+  false-alarm rate, split across ``ALARM_TESTS``; ``stats`` adds the per-test level
+  (``alarm_alpha``) and the win rate it can hear (``detectable_w``).
 
 The primary statistic is the candidate's win rate W against the baseline (a tie is
 half a win). Its one-sided bound is cluster-robust over (session, UTC day): the mean
@@ -354,8 +356,11 @@ def analyze(input):
     if len(set(control_clusters)) < bar["control"]["min_clusters"]:
         inconclusive.append("control_unpowered")
     else:
+        # The judge's validity is tested at the bar's ordinary level in either mode:
+        # it gates the verdict, not the alarm, so the monitor's stricter alarm level
+        # doesn't apply to it (and would make a valid judge read as invalid).
         w_neg = cluster_mean(
-            [SCORE[r["outcomes"]["neg"]] for r in control], control_clusters, alpha
+            [SCORE[r["outcomes"]["neg"]] for r in control], control_clusters, bar["alpha"]
         )
         judged = [r for r in control if not r["identical"]["neg"]]
         ties = _count(judged, lambda r: r["outcomes"]["neg"] == "tie")
@@ -410,7 +415,10 @@ def analyze(input):
     else:
         latency = p95_ratio(
             [b for b, _, _ in timed], [c for _, c, _ in timed], [k for _, _, k in timed],
-            alpha, input["seed"], bar["bootstrap_rounds"],
+            # A limit of the gate at its level; the monitor reports it at the bar's
+            # level as a diagnostic (a percentile bootstrap can't reach its alarm level).
+            alpha if input["mode"] == "gate" else bar["alpha"],
+            input["seed"], bar["bootstrap_rounds"],
         )
         stats["latency_p95"] = latency
         if latency["upper"] > 1.0 + limits["latency"]:
@@ -484,11 +492,21 @@ def verdict(invalid, inconclusive, failed, stats, diagnostics):
     }
 
 
+# The monitor's alarm tests. Each runs at the week's false-alarm rate divided by
+# their number (Bonferroni), so the week's chance of any false alarm stays within it.
+# p95 latency isn't one: a percentile bootstrap can't bound a tail that far out, so
+# the monitor reports it as a diagnostic.
+ALARM_TESTS = ("win_rate", "degenerate", "tool_calls", "cost")
+
+
 def alarms(result, bar):
     """What the monitor shows is worse, never what it merely fails to re-prove: the
     win rate's upper bound under 0.5 - delta, or a limit's lower bound over it. A
     judge that isn't valid can't raise the win-rate alarm (one sharing the baseline's
-    family could favor it); the limits don't depend on the judge."""
+    family could favor it); the limits don't depend on the judge. On a week too thin
+    for the control (``control_unpowered``) the judge is unvalidated, but a judge that
+    can't tell replies apart pulls W toward 0.5, never under it, so the win-rate alarm
+    stays."""
     stats = result["stats"]
     if stats.get("clusters", 0) < bar["min_clusters"]:
         return []
@@ -500,20 +518,38 @@ def alarms(result, bar):
     for name in ("degenerate", "tool_calls"):
         if stats[name]["lower"] > limits[name]:
             found.append(name)
-    for name, key in (("cost", "cost"), ("latency", "latency_p95")):
-        lower = stats.get(key, {}).get("lower")
-        if lower is not None and lower > 1.0 + limits[name]:
-            found.append(name)
+    lower = stats.get("cost", {}).get("lower")
+    if lower is not None and lower > 1.0 + limits["cost"]:
+        found.append("cost")
     return found
+
+
+def detectable_w(bar, n, alpha):
+    """The observed win rate under which the monitor alarms at n items, under the bar's
+    planning values: what it can hear."""
+    if n < 2:
+        return None
+    plan = bar["planning"]
+    deff = 1.0 + (bar["cluster_cap"] - 1) * plan["icc"]
+    se = math.sqrt(plan["score_var"] * deff / n)
+    return 0.5 - bar["delta"] - _NORMAL.inv_cdf(1.0 - alpha) * se
 
 
 async def main(input):
     if input["mode"] == "power":
         return required_n(input["bar"])
-    result = analyze(input)
-    if input["mode"] == "monitor":
-        result["alarms"] = alarms(result, input["bar"])
-        result["alarm"] = bool(result["alarms"])
+    if input["mode"] == "gate":
+        return analyze(input)
+    # The monitor: input["alpha"] is the week's false-alarm rate, split across the
+    # alarm tests.
+    alpha = input["alpha"] / len(ALARM_TESTS)
+    result = analyze(dict(input, alpha=alpha))
+    result["alarms"] = alarms(result, input["bar"])
+    result["alarm"] = bool(result["alarms"])
+    result["stats"]["alarm_alpha"] = alpha
+    result["stats"]["detectable_w"] = detectable_w(
+        input["bar"], len(input["records"]), alpha
+    )
     return result
 '''
 

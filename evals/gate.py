@@ -220,9 +220,17 @@ def launch(api: Api, *, dry_run: bool, out: Callable[[str], None], **kwargs: Any
     return str(run["id"])
 
 
+def spec_of(run_input: dict[str, Any]) -> dict[str, Any]:
+    """What a run compares. A monitor run's input is its trigger's envelope, with the
+    template under ``input``; a gate run's is the spec itself."""
+    return dict(run_input["input"] if "trigger" in run_input else run_input)
+
+
 def earlier_runs(api: Api, run: dict[str, Any]) -> list[dict[str, Any]]:
-    """Earlier gate runs for the same agent and candidate, newest first."""
-    key = (run["input"]["agent"]["agent_id"], run["input"]["candidate"])
+    """Earlier runs of the same gate (or monitor) for the same agent and candidate,
+    newest first."""
+    spec = spec_of(run["input"])
+    key = (spec["agent"]["agent_id"], spec["candidate"])
     found: list[dict[str, Any]] = []
     cursor = None
     while True:
@@ -233,7 +241,7 @@ def earlier_runs(api: Api, run: dict[str, Any]) -> list[dict[str, Any]]:
             cursor=cursor,
         )
         for other in page["data"]:
-            other_input = other.get("input") or {}
+            other_input = spec_of(other.get("input") or {})
             other_key = (other_input.get("agent", {}).get("agent_id"), other_input.get("candidate"))
             if other["id"] != run["id"] and other_key == key:
                 found.append(other)
@@ -248,10 +256,29 @@ def report(api: Api, run_id: str, out: Callable[[str], None]) -> dict[str, Any]:
     out(f"run {run_id}: {run['status']}")
     out(f"verdict: {output.get('verdict')}  candidate: {output.get('candidate')}")
     out(f"reasons: {json.dumps(output.get('reasons'))}")
+    if output.get("mode") == "monitor":
+        week = output.get("window") or {}
+        alarm = output.get("alarm")
+        out(
+            f"week {week.get('start', '?')[:10]}..{week.get('end', '?')[:10]}: "
+            + (f"ALARM on {', '.join(output['alarms'])}" if alarm else "no alarm")
+        )
     if output.get("analysis_error"):
         out(f"analysis failed: {output['analysis_error']} (run `reanalyze {run_id}`)")
     stats = output.get("stats") or {}
-    for key in ("n", "clusters", "w", "control", "degenerate", "tool_calls", "cost", "latency_p95"):
+    for key in (
+        "n",
+        "clusters",
+        "w",
+        "w_worst",
+        "control",
+        "degenerate",
+        "tool_calls",
+        "cost",
+        "latency_p95",
+        "alarm_alpha",
+        "detectable_w",
+    ):
         if key in stats:
             out(f"  {key}: {json.dumps(stats[key])}")
     created = output.get("candidate_created_at")
@@ -281,9 +308,9 @@ def reanalyze(
             "version": analysis_version or analysis["version"],
             "environment_id": run["environment_id"],
             "input": {
-                "mode": output["mode"],
+                "mode": output.get("mode", "gate"),
                 "bar": output["bar"],
-                "alpha": output["alpha"],
+                "alpha": output.get("alpha", output["bar"]["alpha"]),
                 "records": records,
                 "exclusions": exclusions,
                 "attributed": output.get("attributed", []),

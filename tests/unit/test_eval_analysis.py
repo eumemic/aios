@@ -395,8 +395,41 @@ def test_the_monitor_main_reports_its_alarms() -> None:
         "flags": [],
         "seed": "s",
     }
+    out = _monitor_main(inputs)
+    assert out["alarm"] is True
+    assert out["alarms"] == ["win_rate"]
+    # The week's false-alarm rate is split across the alarm tests (Bonferroni).
+    assert out["stats"]["alarm_alpha"] == pytest.approx(_WEEKLY / 4)
+    assert list(NS["ALARM_TESTS"]) == ["win_rate", "degenerate", "tool_calls", "cost"]
+    assert 0.0 < out["stats"]["detectable_w"] < 0.5 - bar["delta"]
+
+
+def _monitor_main(inputs: dict[str, Any]) -> dict[str, Any]:
     coroutine = NS["main"](inputs)
     with pytest.raises(StopIteration) as done:
         coroutine.send(None)
-    assert done.value.value["alarm"] is True
-    assert done.value.value["alarms"] == ["win_rate"]
+    return dict(done.value.value)
+
+
+def test_the_monitor_tests_the_judge_at_the_bars_level_not_the_alarms() -> None:
+    """A control shown worse at the bar's level (W_neg = 0.35 over 40 clusters) is a
+    valid judge. At the alarm's level, about 1e-4, the same control would read as
+    not shown worse, and the week would be INVALID and deaf to a regression."""
+    outcomes = ["loss"] * 26 + ["win"] * 14
+    records = [_record(i, neg=o) for i, o in enumerate(outcomes)]
+    out = _analyze(records, mode="monitor", alpha=_WEEKLY / 4)
+    assert out["stats"]["control"]["w"]["upper"] < 0.5
+    assert out["reasons"]["invalid"] == []
+    strict = NS["cluster_mean"](
+        [NS["SCORE"][o] for o in outcomes], [r["cluster"] for r in records], _WEEKLY / 4
+    )
+    assert strict["upper"] >= 0.5
+
+
+def test_latency_is_not_a_monitor_alarm() -> None:
+    """A percentile bootstrap can't bound a tail at the alarm's level, so a slower
+    candidate is reported, not alarmed on."""
+    records = [_record(i, cand_arm=_arm(duration_ms=50_000)) for i in range(40)]
+    out = _analyze(records, mode="monitor", alpha=_WEEKLY / 4)
+    assert out["stats"]["latency_p95"]["lower"] > 2.0
+    assert NS["alarms"](out, _analyze_bar()) == []

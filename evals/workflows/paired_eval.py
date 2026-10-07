@@ -245,6 +245,7 @@ async def main(input):
         spec = input["input"]
         window = monitor_window(input["trigger"]["fired_at"])
         seed = str(spec["seed"]) + "|" + window["start"][:10]
+        # The week's false-alarm rate; eval_analysis splits it across its alarm tests.
         alpha = BAR["monitor"]["alpha_year"] / 52
     else:
         spec = input

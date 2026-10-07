@@ -125,23 +125,53 @@ the registered version).
   seed is derived from that week, so a late or repeated fire re-tests the same
   sample.
 - **Alarm.** It alarms only when the deployed workflow is *shown* worse: the win
-  rate's upper bound is under `0.5 - delta`, or a limit's lower bound is over that
-  limit. Failing to re-prove non-inferiority is not an alarm. Every bound is at
-  `monitor.alpha_year / 52`, so false alarms stay under `alpha_year` a year without
-  any state carried between weeks.
-- **Judge.** A judge that isn't valid that week (family overlap, or a control not
-  shown worse) can't raise the win-rate alarm. The limits don't depend on the judge.
+  rate's upper bound is under `0.5 - delta`, or the lower bound of the degenerate,
+  tool-call or cost limit is over it. Failing to re-prove non-inferiority is not an
+  alarm. The week's false-alarm rate is `monitor.alpha_year / 52`, split evenly
+  across those four tests (each at `alpha_year / 208`), so false alarms stay under
+  `alpha_year` a year with no state carried between weeks. p95 latency is reported
+  but never alarms: a percentile bootstrap can't bound a tail at that level.
+- **Judge.** The negative control is tested at the bar's ordinary `alpha`, not the
+  alarm's: it decides whether the judge is valid, not whether to alarm. A judge that
+  isn't valid that week (family overlap, or a control not shown worse) can't raise
+  the win-rate alarm. The limits don't depend on the judge. A week too thin for the
+  control leaves the judge unvalidated, but a judge that can't tell replies apart
+  pulls W toward 0.5, never under it, so the win-rate alarm stays.
 - **Items.** It runs up to `monitor.n` items with no power refusal.
+- **What it can hear.** Each run reports `stats.detectable_w`: the observed win rate
+  under which it alarms at that week's n, under the bar's planning values. At the
+  default bar that is about 0.26 at n = 200 (the candidate has to lose about three in
+  four judged comparisons) and 0.31 at n = 500, the sample cap. It is built to catch
+  a large regression, not to re-run the gate weekly; raising `monitor.n` buys
+  sensitivity at the cost of the weekly bill.
 
 An operator trigger reaches no session, so nobody hears a failed fire or an alarm
 from inside aios. Run `python -m evals.monitor_check NAME` from an external cron.
 It exits:
 
-- 0 when the monitor is fine;
-- 1 on an alarm;
-- 2 when the monitor isn't watching: it never fired, its last fire failed, its
-  latest completed run is older than 8 days, or that run was INVALID or
-  INCONCLUSIVE.
+- 0 when the monitor is watching and shows nothing worse. A week too thin to decide
+  (too few clusters or control items, no records) is 0 with a warning, and two in a
+  row print a stronger one: a low-traffic agent is thin every week, which is no
+  reason to page.
+- 1 on an alarm.
+- 2 when the monitor isn't watching or the check couldn't tell:
+  - the agent no longer runs the workflow the monitor tests (after a rollback or a
+    newer deploy, delete the monitor and create one for what is deployed);
+  - it never fired, its last fire failed, or that fire's run ended without
+    completing;
+  - its latest completed run is older than 8 days;
+  - that run was INVALID, or INCONCLUSIVE for an operational reason (a budget stop,
+    the run cap, too many exclusions, unpriced cost, a failed sample or analysis);
+  - the API couldn't be read (a crash never reads as an alarm).
+
+Residuals:
+
+- A repeated fire in the same week (a stuck-run re-claim, a re-created trigger)
+  re-tests the same sample with fresh draws of the arms and the judge: another
+  chance at a false alarm that week. `max_outstanding_runs = 1` only stops two at
+  once.
+- A week too thin for the control can still raise the win-rate alarm with a judge
+  that wasn't validated that week (see **Judge**).
 
 ## Scope (gate and monitor)
 
