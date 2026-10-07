@@ -203,14 +203,16 @@ async def test_account_scoped_reads_isolate_tenants(wf_conn: asyncpg.Connection[
 
     # Owner sees everything.
     assert (await wf_queries.get_wf_run(wf_conn, run_id, account_id="acc_root")).id == run_id
-    assert [r.id for r in await wf_queries.list_wf_runs(wf_conn, account_id="acc_root")] == [run_id]
+    assert [
+        r.id for r in await wf_queries.list_wf_runs(wf_conn, account_id="acc_root", reader=None)
+    ] == [run_id]
     assert len(await wf_queries.list_workflows(wf_conn, account_id="acc_root")) == 1
     assert len(await wf_queries.list_run_events_scoped(wf_conn, run_id, account_id="acc_root")) == 1
 
     # The other tenant sees nothing — a 404 on the point read, empty lists otherwise.
     with pytest.raises(NotFoundError):
         await wf_queries.get_wf_run(wf_conn, run_id, account_id="acc_other")
-    assert await wf_queries.list_wf_runs(wf_conn, account_id="acc_other") == []
+    assert await wf_queries.list_wf_runs(wf_conn, account_id="acc_other", reader=None) == []
     assert await wf_queries.list_workflows(wf_conn, account_id="acc_other") == []
     assert await wf_queries.list_run_events_scoped(wf_conn, run_id, account_id="acc_other") == []
 
@@ -591,24 +593,32 @@ async def test_list_wf_runs_filters_by_launcher_session(wf_conn: asyncpg.Connect
 
     # The launcher filter lists only that session's runs.
     by_a = await wf_queries.list_wf_runs(
-        wf_conn, account_id="acc_root", launcher_session_id="ses_a"
+        wf_conn, account_id="acc_root", launcher_session_id="ses_a", reader=None
     )
     assert [r.id for r in by_a] == [run_a]
 
     # No launcher → the whole account (all three).
-    everything = await wf_queries.list_wf_runs(wf_conn, account_id="acc_root")
+    everything = await wf_queries.list_wf_runs(wf_conn, account_id="acc_root", reader=None)
     assert {r.id for r in everything} == {run_a, run_b, run_c}
 
     # The launcher composes with another equality filter (workflow_id).
     by_b = await wf_queries.list_wf_runs(
-        wf_conn, account_id="acc_root", launcher_session_id="ses_b", workflow_id=wf.id
+        wf_conn,
+        account_id="acc_root",
+        launcher_session_id="ses_b",
+        workflow_id=wf.id,
+        reader=None,
     )
     assert [r.id for r in by_b] == [run_b]
 
     # A launcher with no runs → empty.
     assert (
         await wf_queries.list_wf_runs(
-            wf_conn, account_id="acc_root", launcher_session_id="ses_a", workflow_id="wf_nope"
+            wf_conn,
+            account_id="acc_root",
+            launcher_session_id="ses_a",
+            workflow_id="wf_nope",
+            reader=None,
         )
         == []
     )
@@ -733,7 +743,9 @@ async def test_archive_run_refuses_non_terminal(wf_conn: asyncpg.Connection[Any]
     # Untouched: still NULL archived_at, still in the default list, still active-counted.
     still = await wf_queries.get_wf_run(wf_conn, run_id, account_id="acc_root")
     assert still.archived_at is None
-    assert [r.id for r in await wf_queries.list_wf_runs(wf_conn, account_id="acc_root")] == [run_id]
+    assert [
+        r.id for r in await wf_queries.list_wf_runs(wf_conn, account_id="acc_root", reader=None)
+    ] == [run_id]
     assert await wf_queries.count_active_runs(wf_conn, account_id="acc_root") == 1
 
 
@@ -751,9 +763,11 @@ async def test_archive_run_terminal_archives_and_hides(wf_conn: asyncpg.Connecti
     assert archived.status == "completed"
 
     # Dropped from the default (archived-blind) list…
-    assert await wf_queries.list_wf_runs(wf_conn, account_id="acc_root") == []
+    assert await wf_queries.list_wf_runs(wf_conn, account_id="acc_root", reader=None) == []
     # …listed when archived runs are asked for…
-    listed = await wf_queries.list_wf_runs(wf_conn, account_id="acc_root", include_archived=True)
+    listed = await wf_queries.list_wf_runs(
+        wf_conn, account_id="acc_root", reader=None, include_archived=True
+    )
     assert [r.id for r in listed] == [run_id]
     # …and still fetchable by id, and its journal survives.
     fetched = await wf_queries.get_wf_run(wf_conn, run_id, account_id="acc_root")

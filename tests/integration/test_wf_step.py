@@ -774,7 +774,7 @@ async def test_children_listable_by_parent_run_id(
             depth=9,
         )
         child_runs = await wf_queries.list_wf_runs(
-            conn, account_id="acc_wf", parent_run_id=parent_id, limit=50
+            conn, account_id="acc_wf", parent_run_id=parent_id, limit=50, reader=None
         )
 
     scoped_ids = [s.id for s in scoped]
