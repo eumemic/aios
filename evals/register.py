@@ -12,7 +12,10 @@ Every bar file is its own gate, named after the file: ``bars/wam_gate.json`` is
 ``wam-gate``, ``bars/wam_gate_fusion.json`` is ``wam-gate-fusion``. A recipe class
 whose cost or latency differs by design (a fusion recipe's fan-out) is gated by its
 own bar, so loosening a limit is a separate registered gate with its own history,
-never an edit to the default. With no arguments, every bar in ``bars/`` is registered.
+never an edit to the default. A bar with a ``monitor`` section registers the same
+template in monitor mode: ``bars/wam_monitor.json`` is ``wam-monitor``, the weekly
+monitor of a deployed workflow. With no arguments, every bar in ``bars/`` is
+registered.
 """
 
 from __future__ import annotations
@@ -31,6 +34,11 @@ BARS = Path(__file__).parent / "bars"
 def gate_name(bar_path: Path) -> str:
     """The gate a bar file registers as: its file name, with dashes."""
     return bar_path.stem.replace("_", "-")
+
+
+def mode_of(bar: dict[str, Any]) -> str:
+    """A bar with a ``monitor`` section is a monitor's; any other is a gate's."""
+    return "monitor" if "monitor" in bar else "gate"
 
 
 def ensure(
@@ -87,9 +95,11 @@ def register(api: Api, bars: dict[str, dict[str, Any]]) -> dict[str, dict[str, A
         registered[name] = ensure(
             api,
             name,
-            paired_eval.build(bar=bar, item=item, analysis=analysis),
+            paired_eval.build(mode=mode_of(bar), bar=bar, item=item, analysis=analysis),
             paired_eval.TOOLS,
-            "A workflow-as-model deploy gate.",
+            "The weekly monitor of a deployed workflow-as-model."
+            if mode_of(bar) == "monitor"
+            else "A workflow-as-model deploy gate.",
         )
     return registered
 

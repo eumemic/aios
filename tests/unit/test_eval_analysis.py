@@ -330,3 +330,73 @@ def test_outputs_are_finite() -> None:
     out = _analyze([_record(i) for i in range(40)])
     text = json.dumps(out)
     assert "Infinity" not in text and "NaN" not in text
+
+
+# ── the monitor's alarm ───────────────────────────────────────────────────────
+
+_WEEKLY = 0.05 / 52
+
+
+def _analyze_bar() -> dict[str, Any]:
+    """The bar ``_analyze`` uses."""
+    bar = copy.deepcopy(BAR)
+    bar["limits"].update(degenerate=0.1, tool_calls=0.1)
+    return bar
+
+
+def _alarms(records: list[dict[str, Any]]) -> list[str]:
+    out = _analyze(records, mode="monitor", alpha=_WEEKLY)
+    return list(NS["alarms"](out, _analyze_bar()))
+
+
+def test_an_unchanged_candidate_raises_no_alarm() -> None:
+    assert _alarms([_record(i) for i in range(40)]) == []
+
+
+def test_failing_to_re_prove_is_not_an_alarm() -> None:
+    """W = 0.45 with a wide bound: the gate's FAIL, but nothing shown worse."""
+    outcomes = ["loss"] * 20 + ["tie"] * 4 + ["win"] * 16
+    records = [_record(i, cand=o) for i, o in enumerate(outcomes)]
+    assert _analyze(records)["verdict"] == "FAIL"
+    assert _alarms(records) == []
+
+
+def test_a_candidate_shown_worse_alarms() -> None:
+    assert _alarms([_record(i, cand="loss") for i in range(40)]) == ["win_rate"]
+
+
+def test_an_invalid_judge_cannot_raise_the_win_rate_alarm() -> None:
+    records = [_record(i, cand="loss", neg="win") for i in range(40)]
+    assert _alarms(records) == []
+
+
+def test_a_limit_shown_worse_alarms_whatever_the_judge() -> None:
+    records = [
+        _record(i, cand="loss", neg="win", cand_arm=_arm(degenerate=True)) for i in range(40)
+    ]
+    assert _alarms(records) == ["degenerate"]
+
+
+def test_too_few_clusters_never_alarm() -> None:
+    assert _alarms([_record(i, cand="loss") for i in range(10)]) == []
+
+
+def test_the_monitor_main_reports_its_alarms() -> None:
+    records = [_record(i, cand="loss") for i in range(40)]
+    bar = _analyze_bar()
+    bar["bootstrap_rounds"] = 200
+    inputs = {
+        "mode": "monitor",
+        "bar": bar,
+        "alpha": _WEEKLY,
+        "records": records,
+        "exclusions": {},
+        "considered": 40,
+        "flags": [],
+        "seed": "s",
+    }
+    coroutine = NS["main"](inputs)
+    with pytest.raises(StopIteration) as done:
+        coroutine.send(None)
+    assert done.value.value["alarm"] is True
+    assert done.value.value["alarms"] == ["win_rate"]

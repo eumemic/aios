@@ -6,7 +6,9 @@ is computed by the eval workflows here and stored in their runs' outputs.
 - `workflows/` holds the eval workflow templates (see `workflows/__init__.py`).
 - `bars/` holds the bars; each file registers as its own gate.
 - `register.py` registers the workflows in an account.
-- `gate.py` launches a gate, reports its verdict and re-runs its analysis.
+- `gate.py` launches a gate, reports its verdict, re-runs its analysis and deploys
+  the weekly monitor.
+- `monitor_check.py` checks a monitor from outside aios (its alarm and liveness).
 - `auto_review/` is the corpus for the MCP auto-review checker.
 - `wam_fusion/` is the external harness the gate replaces.
 
@@ -111,7 +113,37 @@ Items excluded for reasons the candidate can't reach (unavailable, the run cap,
 overloads on the baseline, control or judge) are replaced from the rest of the
 sample, so the run keeps the n its power needs.
 
-### Scope
+## The weekly monitor (`wam-monitor`)
+
+After a deploy, the monitor compares the deployed workflow with the model it replaced
+on the past week's requests. It is the gate's template registered with
+`bars/wam_monitor.json`. It runs on an operator cron trigger
+(`gate.py deploy-monitor`: Mondays 03:17 UTC by default, one run at a time, pinned to
+the registered version).
+
+- **Window and seed.** A fire tests the UTC ISO week before the one it falls in. The
+  seed is derived from that week, so a late or repeated fire re-tests the same
+  sample.
+- **Alarm.** It alarms only when the deployed workflow is *shown* worse: the win
+  rate's upper bound is under `0.5 - delta`, or a limit's lower bound is over that
+  limit. Failing to re-prove non-inferiority is not an alarm. Every bound is at
+  `monitor.alpha_year / 52`, so false alarms stay under `alpha_year` a year without
+  any state carried between weeks.
+- **Judge.** A judge that isn't valid that week (family overlap, or a control not
+  shown worse) can't raise the win-rate alarm. The limits don't depend on the judge.
+- **Items.** It runs up to `monitor.n` items with no power refusal.
+
+An operator trigger reaches no session, so nobody hears a failed fire or an alarm
+from inside aios. Run `python -m evals.monitor_check NAME` from an external cron.
+It exits:
+
+- 0 when the monitor is fine;
+- 1 on an alarm;
+- 2 when the monitor isn't watching: it never fired, its last fire failed, its
+  latest completed run is older than 8 days, or that run was INVALID or
+  INCONCLUSIVE.
+
+## Scope (gate and monitor)
 
 - The candidate may use `call_llm`, `invoke_workflow` and `agent()`. An arm acts
   within the gate's surface, which holds only the replay tools. So the launcher

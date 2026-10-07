@@ -1,6 +1,6 @@
 """``eval_analysis``: the eval statistics, pure compute. No capability is called.
 
-Two modes, chosen by the input's ``mode``:
+Three modes, chosen by the input's ``mode``:
 
 * ``power``: ``{"mode": "power", "bar"}`` returns the smallest number of items, up to
   the sample cap, with which the gate has its target power to pass a candidate that
@@ -10,6 +10,8 @@ Two modes, chosen by the input's ``mode``:
   "considered", "flags", "seed"}`` returns the verdict and its statistics.
   ``attributed`` holds the cluster of each excluded item the candidate could have
   caused.
+* ``monitor``: the same input and result, plus ``alarm`` and ``alarms``: the tests
+  on which the candidate is shown worse (see ``alarms``).
 
 The primary statistic is the candidate's win rate W against the baseline (a tie is
 half a win). Its one-sided bound is cluster-robust over (session, UTC day): the mean
@@ -371,10 +373,13 @@ def analyze(input):
         arms, lambda a: a[0]["tool_calls_valid"] and not a[1]["tool_calls_valid"]
         and a[1]["n_tool_calls"] > 0
     )
-    stats["degenerate"] = {
-        "worse": worse_degenerate, "n": n, "upper": cp_upper(worse_degenerate, n, alpha)
-    }
-    stats["tool_calls"] = {"worse": worse_tools, "n": n, "upper": cp_upper(worse_tools, n, alpha)}
+    for name, worse in (("degenerate", worse_degenerate), ("tool_calls", worse_tools)):
+        stats[name] = {
+            "worse": worse,
+            "n": n,
+            "lower": cp_lower(worse, n, alpha),
+            "upper": cp_upper(worse, n, alpha),
+        }
     if not cp_within(worse_degenerate, n, limits["degenerate"], alpha):
         failed.append("degenerate")
     if not cp_within(worse_tools, n, limits["tool_calls"], alpha):
@@ -479,10 +484,37 @@ def verdict(invalid, inconclusive, failed, stats, diagnostics):
     }
 
 
+def alarms(result, bar):
+    """What the monitor shows is worse, never what it merely fails to re-prove: the
+    win rate's upper bound under 0.5 - delta, or a limit's lower bound over it. A
+    judge that isn't valid can't raise the win-rate alarm (one sharing the baseline's
+    family could favor it); the limits don't depend on the judge."""
+    stats = result["stats"]
+    if stats.get("clusters", 0) < bar["min_clusters"]:
+        return []
+    limits = bar["limits"]
+    found = []
+    upper = stats["w"]["upper"]
+    if not result["reasons"]["invalid"] and upper is not None and upper < 0.5 - bar["delta"]:
+        found.append("win_rate")
+    for name in ("degenerate", "tool_calls"):
+        if stats[name]["lower"] > limits[name]:
+            found.append(name)
+    for name, key in (("cost", "cost"), ("latency", "latency_p95")):
+        lower = stats.get(key, {}).get("lower")
+        if lower is not None and lower > 1.0 + limits[name]:
+            found.append(name)
+    return found
+
+
 async def main(input):
     if input["mode"] == "power":
         return required_n(input["bar"])
-    return analyze(input)
+    result = analyze(input)
+    if input["mode"] == "monitor":
+        result["alarms"] = alarms(result, input["bar"])
+        result["alarm"] = bool(result["alarms"])
+    return result
 '''
 
 

@@ -42,6 +42,8 @@ from typing import Any
 from evals.workflows import render
 
 NAME = "wam-gate"
+MONITOR_NAME = "wam-monitor"
+MODES = frozenset({"gate", "monitor"})
 TOOLS: list[dict[str, str]] = [{"type": "sample_requests"}, {"type": "get_request"}]
 
 SCRIPT = """
@@ -189,6 +191,43 @@ def inconclusive(reason):
     return {"invalid": [], "inconclusive": [reason], "failed": []}
 
 
+# ── the monitor's week (a script has no datetime) ─────────────────────────────
+
+
+def days_from_civil(y, m, d):
+    y -= m <= 2
+    era = (y if y >= 0 else y - 399) // 400
+    yoe = y - era * 400
+    doy = (153 * (m + (-3 if m > 2 else 9)) + 2) // 5 + d - 1
+    doe = yoe * 365 + yoe // 4 - yoe // 100 + doy
+    return era * 146097 + doe - 719468
+
+
+def civil_from_days(z):
+    z += 719468
+    era = (z if z >= 0 else z - 146096) // 146097
+    doe = z - era * 146097
+    yoe = (doe - doe // 1460 + doe // 36524 - doe // 146096) // 365
+    doy = doe - (365 * yoe + yoe // 4 - yoe // 100)
+    mp = (5 * doy + 2) // 153
+    d = doy - (153 * mp + 2) // 5 + 1
+    m = mp + (3 if mp < 10 else -9)
+    return yoe + era * 400 + (m <= 2), m, d
+
+
+def day_iso(days):
+    y, m, d = civil_from_days(days)
+    return f"{y:04d}-{m:02d}-{d:02d}T00:00:00+00:00"
+
+
+def monitor_window(fired_at):
+    # The UTC ISO week (Monday to Monday) before the one fired_at falls in. A late,
+    # early or repeated fire in the same week picks the same week.
+    days = days_from_civil(int(fired_at[0:4]), int(fired_at[5:7]), int(fired_at[8:10]))
+    monday = days - (days + 3) % 7  # 1970-01-01 was a Thursday
+    return {"start": day_iso(monday - 7), "end": day_iso(monday)}
+
+
 def resolved(records):
     out = {"workflows": set(), "agents": set(), "models": set()}
     for r in records:
@@ -198,17 +237,30 @@ def resolved(records):
 
 
 async def main(input):
-    spec = input
-    seed = str(spec["seed"])
-    alpha = BAR["alpha"]
+    mode = CONFIG["mode"]
+    if mode == "monitor":
+        # Launched by a weekly trigger: the envelope's template names the arms, the
+        # fire's time names the week. The seed is per week, so a repeated fire
+        # re-tests the same sample rather than drawing a fresh one.
+        spec = input["input"]
+        window = monitor_window(input["trigger"]["fired_at"])
+        seed = str(spec["seed"]) + "|" + window["start"][:10]
+        alpha = BAR["monitor"]["alpha_year"] / 52
+    else:
+        spec = input
+        window = spec["window"]
+        seed = str(spec["seed"])
+        alpha = BAR["alpha"]
     cand = spec["candidate"]
     report = {
+        "mode": mode,
         "candidate": "workflow:" + cand["workflow_id"] + "@" + str(cand["version"]),
         "agent": spec["agent"],
         "baseline_model": spec["baseline_model"],
-        "window": spec["window"],
+        "window": window,
         "candidate_created_at": spec.get("candidate_created_at"),
         "seed": seed,
+        "alpha": alpha,
         "bar": BAR,
         "bar_digest": hashlib.sha256(
             json.dumps(BAR, sort_keys=True, separators=(",", ":")).encode()
@@ -220,8 +272,8 @@ async def main(input):
         "sample_requests",
         {
             "agent_id": spec["agent"]["agent_id"],
-            "start": spec["window"]["start"],
-            "end": spec["window"]["end"],
+            "start": window["start"],
+            "end": window["end"],
             "n": BAR["sample_size"],
             "seed": seed,
             "cluster_cap": BAR["cluster_cap"],
@@ -235,12 +287,17 @@ async def main(input):
             error=sample["error"],
         )
 
-    power = await invoke_workflow(
-        CONFIG["analysis"]["id"],
-        {"mode": "power", "bar": BAR},
-        version=CONFIG["analysis"]["version"],
-        label="power",
-    )
+    if mode == "monitor":
+        # The monitor only alarms on inferiority it shows, so it runs the items the
+        # week has, up to its own n, with no power refusal.
+        power = {"n": BAR["monitor"]["n"], "power": None}
+    else:
+        power = await invoke_workflow(
+            CONFIG["analysis"]["id"],
+            {"mode": "power", "bar": BAR},
+            version=CONFIG["analysis"]["version"],
+            label="power",
+        )
     needed = power["n"]
     items = [dict(item, index=i) for i, item in enumerate(sample["items"])]
     screened = {}
@@ -255,7 +312,7 @@ async def main(input):
         "n_required": needed,
         "power": power["power"],
     }
-    if needed is None or eligible < needed:
+    if mode == "gate" and (needed is None or eligible < needed):
         return dict(
             report,
             verdict="INCONCLUSIVE",
@@ -284,7 +341,7 @@ async def main(input):
         analysis = await invoke_workflow(
             CONFIG["analysis"]["id"],
             {
-                "mode": "gate",
+                "mode": mode,
                 "bar": BAR,
                 "alpha": alpha,
                 "records": records,
@@ -299,6 +356,8 @@ async def main(input):
         )
     except AgentError as e:
         return dict(report, verdict=None, analysis_error=str(e))
+    if mode == "monitor":
+        report.update(alarm=analysis["alarm"], alarms=analysis["alarms"])
     return dict(
         report,
         verdict=analysis["verdict"],
@@ -309,6 +368,9 @@ async def main(input):
 """
 
 
-def build(*, bar: dict[str, Any], item: dict[str, Any], analysis: dict[str, Any]) -> str:
-    """``item`` and ``analysis`` are ``{"id", "version"}`` of the registered workflows."""
-    return render(SCRIPT, config={"bar": bar, "item": item, "analysis": analysis})
+def build(*, mode: str, bar: dict[str, Any], item: dict[str, Any], analysis: dict[str, Any]) -> str:
+    """``mode`` is ``gate`` or ``monitor``; ``item`` and ``analysis`` are ``{"id",
+    "version"}`` of the registered workflows."""
+    if mode not in MODES:
+        raise ValueError(f"mode is one of {sorted(MODES)}, got {mode!r}")
+    return render(SCRIPT, config={"mode": mode, "bar": bar, "item": item, "analysis": analysis})

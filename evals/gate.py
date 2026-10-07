@@ -5,6 +5,9 @@
         --environment-id ENV_ID --seed 1 --budget-usd 300
     uv run python -m evals.gate report RUN_ID
     uv run python -m evals.gate reanalyze RUN_ID [--analysis-version N]
+    uv run python -m evals.gate deploy-monitor --name NAME --agent AGENT_ID \\
+        --baseline-model PREVIOUS_MODEL --candidate WF_ID@VERSION \\
+        --environment-id ENV_ID --seed 1 --budget-usd 250
 
 ``launch`` runs the gate named by ``--gate`` (default ``wam-gate``; each bar file in
 ``bars/`` registers as its own gate). It refuses a candidate whose version declares
@@ -18,7 +21,8 @@ gate pins) with a cost and run-slot estimate, and starts the run as the operator
 ``budget_usd``.
 
 A verdict is advisory. On PASS, the deploy is one ``PUT`` of the agent's model to the
-``workflow:<id>@<version>`` the verdict names.
+``workflow:<id>@<version>`` the verdict names; then ``deploy-monitor`` creates the
+weekly monitor, and an external cron runs ``evals.monitor_check`` on it.
 """
 
 from __future__ import annotations
@@ -263,8 +267,8 @@ def report(api: Api, run_id: str, out: Callable[[str], None]) -> dict[str, Any]:
 def reanalyze(
     api: Api, run_id: str, analysis_version: int | None, out: Callable[[str], None]
 ) -> str:
-    """Run the analysis again on a finished gate run's records: no item is paid for
-    again."""
+    """Run the analysis again on a finished gate or monitor run's records: no item is
+    paid for again."""
     run = api.get(f"/v1/runs/{run_id}")
     output = run["output"]
     records = output["records"]
@@ -277,9 +281,9 @@ def reanalyze(
             "version": analysis_version or analysis["version"],
             "environment_id": run["environment_id"],
             "input": {
-                "mode": "gate",
+                "mode": output["mode"],
                 "bar": output["bar"],
-                "alpha": output["bar"]["alpha"],
+                "alpha": output["alpha"],
                 "records": records,
                 "exclusions": exclusions,
                 "attributed": output.get("attributed", []),
@@ -291,6 +295,58 @@ def reanalyze(
     )
     out(f"analysis run {created['id']}")
     return str(created["id"])
+
+
+def deploy_monitor(
+    api: Api,
+    *,
+    name: str,
+    agent_id: str,
+    baseline_model: str,
+    candidate: str,
+    seed: str,
+    budget_usd: float,
+    environment_id: str,
+    schedule: str,
+    out: Callable[[str], None],
+) -> dict[str, Any]:
+    """Create the weekly monitor of a deployed workflow-as-model: an operator cron
+    trigger running ``wam-monitor`` at its registered version (so re-registering the
+    bar doesn't change a running monitor), one run at a time.
+
+    Run it after the deploy PUT: the arms act for the agent version that is current
+    now, the one that has the workflow as its model."""
+    monitor = _workflow(api, paired_eval.MONITOR_NAME)
+    agent = api.get(f"/v1/agents/{agent_id}")
+    workflow_id, version = _parse_candidate(candidate)
+    if agent["model"] != f"workflow:{workflow_id}@{version}":
+        raise Refused(
+            f"agent {agent_id} runs {agent['model']!r}, not workflow:{workflow_id}@{version}: "
+            "deploy before creating its monitor"
+        )
+    created = api.post(
+        "/v1/triggers",
+        {
+            "name": name,
+            "source": {"kind": "cron", "schedule": schedule},
+            "environment_id": environment_id,
+            "action": {
+                "kind": "workflow",
+                "workflow_id": monitor["id"],
+                "version": monitor["version"],
+                "max_outstanding_runs": 1,
+                "budget_usd": budget_usd,
+                "input_template": {
+                    "agent": {"agent_id": agent_id, "version": agent["version"]},
+                    "baseline_model": baseline_model,
+                    "candidate": {"workflow_id": workflow_id, "version": version},
+                    "seed": seed,
+                },
+            },
+        },
+    )
+    out(f"monitor trigger {created['name']}: next fire {created.get('next_fire')}")
+    return dict(created)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -310,6 +366,17 @@ def main(argv: list[str] | None = None) -> int:
     again = commands.add_parser("reanalyze")
     again.add_argument("run_id")
     again.add_argument("--analysis-version", type=int)
+    watch = commands.add_parser("deploy-monitor")
+    watch.add_argument("--name", required=True, help="the operator trigger's name")
+    watch.add_argument("--agent", required=True)
+    watch.add_argument("--baseline-model", required=True, help="the model before the deploy")
+    watch.add_argument("--candidate", required=True, help="the deployed WF_ID@VERSION")
+    watch.add_argument("--environment-id", required=True)
+    watch.add_argument("--seed", required=True)
+    watch.add_argument("--budget-usd", type=float, required=True, help="per weekly run")
+    watch.add_argument(
+        "--schedule", default="17 3 * * 1", help="cron, UTC (default: Mondays 03:17)"
+    )
     args = parser.parse_args(argv)
     api = Client()
     try:
@@ -329,8 +396,21 @@ def main(argv: list[str] | None = None) -> int:
             )
         elif args.command == "report":
             report(api, args.run_id, print)
-        else:
+        elif args.command == "reanalyze":
             reanalyze(api, args.run_id, args.analysis_version, print)
+        else:
+            deploy_monitor(
+                api,
+                name=args.name,
+                agent_id=args.agent,
+                baseline_model=args.baseline_model,
+                candidate=args.candidate,
+                seed=args.seed,
+                budget_usd=args.budget_usd,
+                environment_id=args.environment_id,
+                schedule=args.schedule,
+                out=print,
+            )
     except Refused as exc:
         print(f"refused: {exc}", file=sys.stderr)
         return 2
