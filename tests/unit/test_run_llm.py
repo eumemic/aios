@@ -17,7 +17,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from aios.config import Settings
-from aios.harness.completion import LlmResponse, ModelCallDeadlineError
+from aios.harness.completion import LlmResponse, ModelCallDeadlineError, estimate_cost_usd
 from aios.models.model_providers import ProviderAuth
 from aios.services.requests import Missing, Rebuilt
 from aios.workflows import run_llm
@@ -495,3 +495,32 @@ def test_price_uncached_is_none_for_a_model_outside_the_cost_map() -> None:
         "nodes": [{"usage": [{"model": "nope/unknown", "input_tokens": 1, "output_tokens": 1}]}]
     }
     assert run_llm.price_uncached(facts)["nodes"][0]["usage"][0]["uncached_cost_microusd"] is None
+
+
+def test_price_uncached_against_the_real_cost_map_ignores_the_cache_discount() -> None:
+    # Unpatched: pins the premise that litellm counts cache tokens inside the prompt
+    # total, so pricing input_tokens with no cache detail is the uncached price.
+    model = "anthropic/claude-sonnet-4-5"
+    usage = {
+        "model": model,
+        "input_tokens": 1000,
+        "output_tokens": 10,
+        "cache_read_input_tokens": 900,
+        "cache_creation_input_tokens": 0,
+    }
+    priced = run_llm.price_uncached({"nodes": [{"usage": [usage]}]})
+    uncached = priced["nodes"][0]["usage"][0]["uncached_cost_microusd"]
+    cached = estimate_cost_usd(
+        model, {"input_tokens": 1000, "output_tokens": 10, "cache_read_input_tokens": 900}
+    )
+    assert cached is not None
+    assert uncached is not None
+    assert uncached > _to_microusd(cached)
+
+
+def test_price_uncached_looks_up_an_unknown_model_once() -> None:
+    usage = [{"model": "nope/unknown", "input_tokens": i, "output_tokens": 1} for i in range(3)]
+    with patch("aios.workflows.run_llm.estimate_cost_usd", return_value=None) as est:
+        priced = run_llm.price_uncached({"nodes": [{"usage": usage}]})
+    est.assert_called_once()
+    assert all(u["uncached_cost_microusd"] is None for u in priced["nodes"][0]["usage"])

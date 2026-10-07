@@ -351,21 +351,24 @@ def price_uncached(facts: dict[str, Any]) -> dict[str, Any]:
     no prompt-cache discount or premium, so it doesn't depend on which of two arms
     sharing a prefix ran first. ``None`` when the model isn't in the cost map or the
     entry has no model. The result records the litellm version once, since a change
-    in the cost map changes these numbers between runs."""
+    in the cost map changes these numbers between runs. A model the cost map doesn't
+    know is looked up once, not once per entry: the lookup raises inside litellm and
+    the step holds its connection while this runs."""
+    unknown: set[str] = set()
     for node in facts["nodes"]:
         for entry in node["usage"]:
             model = entry["model"]
-            cost = (
-                estimate_cost_usd(
+            cost = None
+            if model is not None and model not in unknown:
+                cost = estimate_cost_usd(
                     model,
                     {
                         "input_tokens": entry["input_tokens"] or 0,
                         "output_tokens": entry["output_tokens"] or 0,
                     },
                 )
-                if model is not None
-                else None
-            )
+                if cost is None:
+                    unknown.add(model)
             entry["uncached_cost_microusd"] = None if cost is None else _to_microusd(cost)
     return {**facts, "litellm_version": litellm_version()}
 

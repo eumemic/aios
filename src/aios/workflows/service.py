@@ -327,13 +327,13 @@ async def create_run(
     so two concurrent fires of one trigger can never both pass the check.
 
     ``request_ref`` (#2474) is the request the run works on, and its grant: the run
-    can resolve that request and no other. The caller either already holds the
-    composed request and passes it as ``input`` too, or passes no ``input`` and the
-    run's first step rebuilds the request and starts the script with it. A carried
-    request (both set) is journaled as ``run_started`` in the insert transaction and
-    never written to the row: the journal is pruned on a short schedule, the row is
-    kept forever, and the step starts the script from ``run_started`` without
-    rebuilding.
+    can resolve that request and no other. The caller either passes an ``input`` with
+    it (the composed request it already holds, or any input a parent run chooses) or
+    passes no ``input`` and the run's first step rebuilds the request and starts the
+    script with it. A carried input (both set) is journaled as ``run_started`` in the
+    insert transaction and never written to the row: the journal is pruned on a
+    short schedule, the row is kept forever, and the step starts the script from
+    ``run_started`` without rebuilding.
     """
     # A shared workspace is inherited from a launcher session. Reject an impossible
     # pointer before minting an id, acquiring a connection, inserting a row, or waking.

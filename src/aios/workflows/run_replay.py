@@ -178,8 +178,8 @@ async def _sample_requests(run: WfRun, args: _SampleArgs) -> dict[str, Any]:
 async def _get_request(run: WfRun, args: _GetArgs) -> dict[str, Any]:
     """Rebuild one ref inline, rendered for ``model`` (default: the model the request
     was composed for), from the same slate the session sent: no re-windowing. ``params``
-    are the captured params only when ``model`` is the model the request was sent to,
-    as for a by-ref ``call_llm``; a captured request never carries an inline ``api_key``.
+    are what :func:`captured_params_for` keeps for ``model``, as for a by-ref
+    ``call_llm``; a captured request never carries an inline ``api_key``.
     """
     ref = args.request_ref
     pool = runtime.require_pool()
