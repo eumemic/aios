@@ -124,7 +124,8 @@ def sync_detailed(
     """List Runs
 
      List the account's runs in ``created_at DESC, id DESC`` order: the unarchived
-    ones, or every one with ``include_archived=true``.
+    ones, or every one with ``include_archived=true``, which needs ``workflow_id`` or
+    ``parent_run_id`` (a 422 otherwise).
 
     This ordering applies before ``limit`` to both filtered and unfiltered reads,
     so a first-page ``?workflow_id=...&limit=N`` query returns the N most recently
@@ -181,7 +182,8 @@ def sync(
     """List Runs
 
      List the account's runs in ``created_at DESC, id DESC`` order: the unarchived
-    ones, or every one with ``include_archived=true``.
+    ones, or every one with ``include_archived=true``, which needs ``workflow_id`` or
+    ``parent_run_id`` (a 422 otherwise).
 
     This ordering applies before ``limit`` to both filtered and unfiltered reads,
     so a first-page ``?workflow_id=...&limit=N`` query returns the N most recently
@@ -233,7 +235,8 @@ async def asyncio_detailed(
     """List Runs
 
      List the account's runs in ``created_at DESC, id DESC`` order: the unarchived
-    ones, or every one with ``include_archived=true``.
+    ones, or every one with ``include_archived=true``, which needs ``workflow_id`` or
+    ``parent_run_id`` (a 422 otherwise).
 
     This ordering applies before ``limit`` to both filtered and unfiltered reads,
     so a first-page ``?workflow_id=...&limit=N`` query returns the N most recently
@@ -288,7 +291,8 @@ async def asyncio(
     """List Runs
 
      List the account's runs in ``created_at DESC, id DESC`` order: the unarchived
-    ones, or every one with ``include_archived=true``.
+    ones, or every one with ``include_archived=true``, which needs ``workflow_id`` or
+    ``parent_run_id`` (a 422 otherwise).
 
     This ordering applies before ``limit`` to both filtered and unfiltered reads,
     so a first-page ``?workflow_id=...&limit=N`` query returns the N most recently

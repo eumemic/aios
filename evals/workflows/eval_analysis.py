@@ -6,14 +6,18 @@ Two modes, chosen by the input's ``mode``:
   the sample cap, with which the gate has its target power to pass a candidate that
   meets the bar's planning values, every limit and the negative control included:
   ``{"n": int | None, "power": float}``. Nothing is spent to find it.
-* ``gate``: ``{"mode": "gate", "bar", "alpha", "records", "exclusions", "considered",
-  "flags", "seed"}`` returns the verdict and its statistics.
+* ``gate``: ``{"mode": "gate", "bar", "alpha", "records", "exclusions", "attributed",
+  "considered", "flags", "seed"}`` returns the verdict and its statistics.
+  ``attributed`` holds the cluster of each excluded item the candidate could have
+  caused.
 
 The primary statistic is the candidate's win rate W against the baseline (a tie is
 half a win). Its one-sided bound is cluster-robust over (session, UTC day): the mean
 plus or minus t(G-1) times SE, with SE from the clusters' summed residuals. The negative control's win
 rate W_neg is bounded the same way and must be shown below 0.5 for the judge to count
-as able to tell replies apart. Cost uses the same cluster-robust bound on the ratio of
+as able to tell replies apart. W is bounded a second time with every attributed
+exclusion scored as a candidate loss (``w_worst``), and PASS needs both bounds, so a
+candidate can't lift its win rate by getting its losses excluded. Cost uses the same cluster-robust bound on the ratio of
 summed uncached costs (delta method); p95 latency uses a cluster bootstrap, since a
 quantile has no simple standard error. The two binary limits (the candidate degenerate
 where the baseline isn't; the candidate's tool calls invalid where the baseline's are
@@ -298,6 +302,15 @@ def _count(records, test):
     return sum(1 for r in records if test(r))
 
 
+def _kinds(arms):
+    """An arm's errors by kind (``budget`` among them: losses the budget forced)."""
+    out = {}
+    for arm in arms:
+        if arm["error_kind"] is not None:
+            out[arm["error_kind"]] = out.get(arm["error_kind"], 0) + 1
+    return out
+
+
 def analyze(input):
     bar = input["bar"]
     alpha = input["alpha"]
@@ -325,6 +338,13 @@ def analyze(input):
     stats["w"] = w
     if w["lower"] is None or w["lower"] < 0.5 - bar["delta"]:
         failed.append("win_rate")
+    # The worst case: every exclusion the candidate could have caused is its loss, so
+    # turning losses into exclusions can't lift the verdict.
+    attributed = input.get("attributed", [])
+    w_worst = cluster_mean(scores + [0.0] * len(attributed), clusters + attributed, alpha)
+    stats["w_worst"] = dict(w_worst, attributed=len(attributed))
+    if attributed and (w_worst["lower"] is None or w_worst["lower"] < 0.5 - bar["delta"]):
+        failed.append("win_rate_worst_case")
 
     control = [r for r in records if r["outcomes"]["neg"] is not None]
     control_clusters = [r["cluster"] for r in control]
@@ -394,6 +414,13 @@ def analyze(input):
     fidelity = {}
     for r in records:
         fidelity[r["fidelity"]] = fidelity.get(r["fidelity"], 0) + 1
+    # Why eligible items have no control outcome: the control arm's errors by kind.
+    control_errors = {}
+    for r in records:
+        neg = r["arms"].get("neg")
+        if r["control_eligible"] and r["outcomes"]["neg"] is None and neg is not None:
+            kind = neg["error_kind"] or "invalid_output"
+            control_errors[kind] = control_errors.get(kind, 0) + 1
     cand_judged = [r for r in records if not r["identical"]["cand"]]
     diagnostics = {
         "w_length_controlled": length_controlled(
@@ -406,6 +433,9 @@ def analyze(input):
         ),
         "exclusions": dict(sorted(input["exclusions"].items())),
         "excluded": excluded,
+        "attributed": len(attributed),
+        "control_errors": dict(sorted(control_errors.items())),
+        "candidate_errors": dict(sorted(_kinds(a[1] for a in arms).items())),
         "considered": considered,
         "fidelity": dict(sorted(fidelity.items())),
         "baseline_rates": {

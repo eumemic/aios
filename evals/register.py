@@ -1,12 +1,18 @@
 """Register the eval workflows in an aios account, in dependency order.
 
     AIOS_URL=... AIOS_API_KEY=<operator key> uv run python -m evals.register \\
-        [--bar evals/bars/wam_gate.json]
+        [evals/bars/wam_gate.json ...]
 
 Each workflow is created if no workflow has its name, updated (a new version) if its
 script or declared tools differ, and otherwise left alone. The workflows that call
-others have those ids and versions substituted in, and the gate has the bar, so the
-printed ``id@version`` of ``wam-gate`` pins everything a gate run uses.
+others have those ids and versions substituted in, and each gate has its bar, so the
+printed ``id@version`` of a gate pins everything a run of it uses.
+
+Every bar file is its own gate, named after the file: ``bars/wam_gate.json`` is
+``wam-gate``, ``bars/wam_gate_fusion.json`` is ``wam-gate-fusion``. A recipe class
+whose cost or latency differs by design (a fusion recipe's fan-out) is gated by its
+own bar, so loosening a limit is a separate registered gate with its own history,
+never an edit to the default. With no arguments, every bar in ``bars/`` is registered.
 """
 
 from __future__ import annotations
@@ -19,7 +25,12 @@ from typing import Any
 from evals.client import Api, Client
 from evals.workflows import eval_analysis, eval_item, eval_judge, eval_r0, paired_eval
 
-DEFAULT_BAR = Path(__file__).parent / "bars" / "wam_gate.json"
+BARS = Path(__file__).parent / "bars"
+
+
+def gate_name(bar_path: Path) -> str:
+    """The gate a bar file registers as: its file name, with dashes."""
+    return bar_path.stem.replace("_", "-")
 
 
 def ensure(
@@ -46,7 +57,8 @@ def ensure(
     return {"id": updated["id"], "version": updated["version"]}
 
 
-def register(api: Api, bar: dict[str, Any]) -> dict[str, dict[str, Any]]:
+def register(api: Api, bars: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Register the shared workflows, then one gate per ``{name: bar}``."""
     r0 = ensure(api, eval_r0.NAME, eval_r0.build(), eval_r0.TOOLS, "Eval arm: one inference.")
     judge = ensure(
         api, eval_judge.NAME, eval_judge.build(), eval_judge.TOOLS, "Eval pairwise judge."
@@ -65,27 +77,29 @@ def register(api: Api, bar: dict[str, Any]) -> dict[str, dict[str, Any]]:
         eval_item.TOOLS,
         "Eval of one sampled request: arms, then the judge.",
     )
-    gate = ensure(
-        api,
-        paired_eval.NAME,
-        paired_eval.build(bar=bar, item=item, analysis=analysis),
-        paired_eval.TOOLS,
-        "The workflow-as-model deploy gate.",
-    )
-    return {
+    registered = {
         eval_r0.NAME: r0,
         eval_judge.NAME: judge,
         eval_analysis.NAME: analysis,
         eval_item.NAME: item,
-        paired_eval.NAME: gate,
     }
+    for name, bar in sorted(bars.items()):
+        registered[name] = ensure(
+            api,
+            name,
+            paired_eval.build(bar=bar, item=item, analysis=analysis),
+            paired_eval.TOOLS,
+            "A workflow-as-model deploy gate.",
+        )
+    return registered
 
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--bar", type=Path, default=DEFAULT_BAR)
+    parser.add_argument("bars", type=Path, nargs="*", help="bar files (default: all in bars/)")
     args = parser.parse_args(argv)
-    registered = register(Client(), json.loads(args.bar.read_text()))
+    paths = args.bars or sorted(BARS.glob("*.json"))
+    registered = register(Client(), {gate_name(p): json.loads(p.read_text()) for p in paths})
     for name, ref in registered.items():
         print(f"{name:16} {ref['id']}@{ref['version']}")
 

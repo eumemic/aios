@@ -12,8 +12,8 @@
   "limits": {
     "degenerate": 0.05,
     "tool_calls": 0.05,
-    "cost": 1.0,
-    "latency": 1.0
+    "cost": 5.0,
+    "latency": 2.0
   },
   "control": {
     "min_clusters": 30,
@@ -39,11 +39,11 @@
     "control_eligible": 0.6,
     "degenerate_rate": 0.005,
     "tool_call_rate": 0.005,
-    "cost_ratio": 1.0,
+    "cost_ratio": 4.0,
     "cost_cv": 1.0,
-    "latency_ratio": 1.0,
+    "latency_ratio": 2.0,
     "latency_cv": 1.0,
-    "item_cost_usd": 1.0,
-    "candidate_fanout": 1
+    "item_cost_usd": 3.0,
+    "candidate_fanout": 5
   }
 }

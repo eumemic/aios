@@ -6,7 +6,9 @@ Invoked by the gate with the item's ref (its grant) and::
      "agent": {"agent_id", "version"}, "baseline_model",
      "candidate": {"workflow_id", "version"},
      "judge": {"model", "params", "tail", "max_chars"},
-     "budget": {"arm_usd", "candidate_usd", "judge_usd"}, "attempt"}
+     "budget": {"arm_usd", "candidate_usd", "judge_usd"}, "attempt", "final"}
+
+(``final`` says the gate won't run this item again.)
 
 1. Read the request rendered for the baseline model (``get_request``).
 2. Run the arms in parallel, each a sub-run acting for the agent (``as_agent``) with
@@ -26,11 +28,21 @@ Invoked by the gate with the item's ref (its grant) and::
 4. Judge the candidate and the control against the baseline, then check the judge's
    own models the same way.
 
-Returns ``{"status": "ok", "record": {...}}``; ``{"status": "retry", "reason"}`` when
-load the eval caused (a provider overload, a full run cap) hit any arm, so the gate
-runs the whole item again later; or ``{"status": "excluded", "reason"}``. A candidate
-error or an output that isn't an assistant turn is a loss and a degenerate turn. The
-record holds no request or reply text.
+Returns one of:
+
+* ``{"status": "ok", "record": {...}}``.
+* ``{"status": "retry", "reason"}`` when load the eval caused hit the item: a launch
+  the run cap refused, or an overload on the baseline, the control or the judge, whose
+  error text core writes. The gate runs the whole item again later. An overload only
+  the candidate reports is retried once, then scored as the candidate's loss, since
+  that text is the candidate's own.
+* ``{"status": "excluded", "reason", "attributable"}``. ``attributable`` when the
+  candidate could have caused the exclusion (a judge failure on its reply), so the
+  analysis's worst case scores the item as a candidate loss.
+
+A candidate error, an output that isn't an assistant turn, or spend at or over its
+budget (read from ``sub_runs()``, its real cost kept) is a loss and a degenerate turn.
+The record holds no request or reply text.
 """
 
 from __future__ import annotations
@@ -53,7 +65,6 @@ _OVERLOAD = re.compile(
     r"service.?unavailable|apiconnectionerror",
     re.IGNORECASE,
 )
-_BUDGET = "budget exhausted"
 _REFUSAL = frozenset({"content_filter", "refusal"})
 
 # Router prefixes that say how a model is reached, not who made it.
@@ -79,21 +90,33 @@ _VENDORS = (
 )
 
 
+def _vendor_of(token):
+    found = {
+        vendor for vendor, aliases in _VENDORS if any(token.startswith(a) for a in aliases)
+    }
+    return found.pop() if len(found) == 1 else None
+
+
 def family(model):
     """The lab that made ``model``, or None when it can't be told (which the caller
-    treats as an overlap: fail closed)."""
+    treats as an overlap: fail closed).
+
+    The model name decides (claude-..., gpt-..., bedrock's anthropic.claude-...). A
+    vendor segment in front of it (openai/gpt-...) must agree: an OpenAI-compatible
+    gateway string like openai/claude-... names one lab's protocol and another's model,
+    so it can't be placed."""
     if not isinstance(model, str) or not model or model.startswith("workflow:"):
         return None
     parts = model.lower().split("/")
     while len(parts) > 1 and parts[0] in _ROUTERS:
         parts = parts[1:]
-    # The vendor segment (openai/gpt-..., or bedrock's anthropic.claude-...), then the
-    # model name itself (gpt-..., claude-...).
-    for name in (parts[0].split(".", 1)[0], parts[-1]):
-        for vendor, aliases in _VENDORS:
-            if any(name.startswith(alias) for alias in aliases):
-                return vendor
-    return None
+    named = {_vendor_of(token) for token in parts[-1].split(".")} - {None}
+    if len(named) != 1:
+        return None
+    name = named.pop()
+    if len(parts) > 1 and _vendor_of(parts[0]) != name:
+        return None
+    return name
 
 
 # ── the request's windows ─────────────────────────────────────────────────────
@@ -336,8 +359,7 @@ def arm_record(result, offered):
         "chars": 0,
     }
     if err is not None:
-        kind = result["raised"]["kind"] if "raised" in result else None
-        rec["error_kind"] = kind or ("budget" if _BUDGET in err else "error")
+        rec["error_kind"] = result["raised"]["kind"] if "raised" in result else "error"
         return rec, None
     if turn is None:
         return rec, None
@@ -352,12 +374,29 @@ def arm_record(result, offered):
     return rec, {"content": turn["content"], "tool_calls": turn["tool_calls"]}
 
 
-def eval_caused(result):
-    """A launch the run cap refused, or a provider overload: the eval's own load."""
-    if "raised" in result and result["raised"]["kind"] == "invoke_workflow_refused":
-        return True
+def launch_refused(result):
+    """The run cap (or the depth cap) refused this arm's own launch. Core sets the
+    kind, so the candidate can't produce it."""
+    return "raised" in result and result["raised"]["kind"] == "invoke_workflow_refused"
+
+
+def overloaded(result):
+    """The arm's error reads as a provider overload. For the baseline and the control
+    the text comes from core; for the candidate it is the candidate's own text."""
     err = error_text(result)
     return err is not None and _OVERLOAD.search(err) is not None
+
+
+def spent(summary):
+    return (summary or {}).get("cost_microusd") or 0
+
+
+def excluded(reason, attributable):
+    """An item left out of the statistics. ``attributable`` when the candidate could
+    have caused it (it happened after the candidate ran, through something its reply
+    or spend can reach): the analysis then also scores the item as a candidate loss in
+    its worst case, so a candidate can't turn losses into exclusions."""
+    return {"status": "excluded", "reason": reason, "attributable": attributable}
 
 
 async def main(input):
@@ -367,14 +406,15 @@ async def main(input):
     cand = input["candidate"]
     judge = input["judge"]
     budget = input["budget"]
+    first = input["attempt"] == 0 and not input["final"]
     r0 = CONFIG["r0"]
 
     request = await tool("get_request", {"request_ref": ref, "model": baseline})
     if "error" in request:
-        return {"status": "excluded", "reason": "unavailable"}
+        return excluded("unavailable", False)
     system, rest = split_system(request["messages"])
     if not rest:
-        return {"status": "excluded", "reason": "empty"}
+        return excluded("empty", False)
     neg_window = rest[last_user(rest):]
     tail = judge_tail(rest, judge["tail"])
     control = len(neg_window) < len(tail) < len(rest)
@@ -399,28 +439,46 @@ async def main(input):
     results = await parallel(arms)
     base, cand_result = results[0], results[1]
     neg = results[2] if control else None
+    core_arms = [base] + ([neg] if neg is not None else [])
 
-    if any(eval_caused(r) for r in results):
+    # The eval's own load: a launch the run cap refused, or an overload reported by an
+    # arm whose text core writes. The whole item runs again, so load never becomes a
+    # loss for one arm.
+    if any(launch_refused(r) for r in results):
+        return {"status": "retry", "reason": "run_cap"}
+    if any(overloaded(r) for r in core_arms):
+        return {"status": "retry", "reason": "overload"}
+    # An overload only the candidate reports may be its own text: one more try, then
+    # it is the candidate's loss like any other error.
+    if overloaded(cand_result) and first:
         return {"status": "retry", "reason": "overload"}
     for r in results:
         if "raised" in r and r["raised"]["kind"] == "invoke_workflow_forbidden":
-            return {"status": "excluded", "reason": "forbidden"}
-
-    offered = request["tools"]
-    base_rec, base_reply = arm_record(base, offered)
-    if base_reply is None:
-        reason = "baseline_budget" if base_rec["error_kind"] == "budget" else "baseline_error"
-        return {"status": "excluded", "reason": reason}
-    cand_rec, cand_reply = arm_record(cand_result, offered)
-    neg_rec, neg_reply = (None, None)
-    if neg is not None:
-        neg_rec, neg_reply = arm_record(neg, offered)
+            return excluded("forbidden", False)
 
     facts = await sub_runs()
     arms_facts = {
         name: summarize(facts, "arm:" + name)
         for name in (["base", "cand", "neg"] if control else ["base", "cand"])
     }
+
+    offered = request["tools"]
+    base_rec, base_reply = arm_record(base, offered)
+    if base_reply is None:
+        over = spent(arms_facts["base"]) >= budget["arm_usd"] * 1_000_000
+        return excluded("baseline_budget" if over else "baseline_error", False)
+    cand_rec, cand_reply = arm_record(cand_result, offered)
+    if spent(arms_facts["cand"]) >= budget["candidate_usd"] * 1_000_000:
+        # Over its budget the candidate loses the item whatever it replied, and its
+        # real cost stays in the record.
+        cand_rec = dict(cand_rec, error_kind="budget", degenerate=True)
+        cand_reply = None
+    elif cand_rec["error_kind"] is not None and overloaded(cand_result):
+        cand_rec["error_kind"] = "overload"
+    neg_rec, neg_reply = (None, None)
+    if neg is not None:
+        neg_rec, neg_reply = arm_record(neg, offered)
+
     judge_families = {family(judge["model"])}
     if violation(facts, judge_families, list(arms_facts.values())):
         return {"status": "ok", "record": {"family_violation": True, "ref": ref}}
@@ -431,6 +489,7 @@ async def main(input):
     if neg_reply is not None:
         pairs["neg"] = neg_reply
     verdicts = {}
+    judge_models = set()
     if pairs:
         judge_input = {
             "model": judge["model"],
@@ -441,6 +500,8 @@ async def main(input):
             "base": base_reply,
             "pairs": pairs,
         }
+        # A judge failure may come from a reply the candidate wrote, so it is
+        # attributable; an overload in the judge's own calls is the eval's load.
         try:
             verdicts = await invoke_workflow(
                 CONFIG["judge"]["id"],
@@ -450,14 +511,14 @@ async def main(input):
                 budget_usd=budget["judge_usd"],
             )
         except AgentError as e:
-            if _OVERLOAD.search(str(e)):
-                return {"status": "retry", "reason": "overload"}
-            return {"status": "excluded", "reason": "judge_error"}
+            if e.kind == "invoke_workflow_refused":
+                return {"status": "retry", "reason": "run_cap"}
+            return excluded("judge_error", True)
         for v in verdicts.values():
             if v.get("error") is not None:
                 if _OVERLOAD.search(v["error"]):
                     return {"status": "retry", "reason": "overload"}
-                return {"status": "excluded", "reason": "judge_error"}
+                return excluded("judge_error", True)
         facts = await sub_runs()
         judged = summarize(facts, "judge")
         judge_models = set(judged["models"]) if judged is not None else set()
@@ -509,7 +570,7 @@ async def main(input):
                 "agents": cand_facts.get("agents", []),
                 "models": cand_facts.get("models", []),
             },
-            "judge_models": sorted(judge_models) if pairs else [],
+            "judge_models": sorted(judge_models),
         },
     }
 '''

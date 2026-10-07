@@ -216,6 +216,40 @@ def test_a_losing_candidate_fails() -> None:
     assert out["reasons"]["failed"] == ["win_rate"]
 
 
+def test_exclusions_the_candidate_could_cause_count_as_losses_in_the_worst_case() -> None:
+    """A candidate that gets its losses excluded (a judge failure on its reply) can't
+    lift W: the worst case scores each such exclusion as a loss, and PASS needs it."""
+    records = [_record(i) for i in range(40)]
+    attributed = [f"x{i}|2026-09-02" for i in range(8)]
+    out = _analyze(records, exclusions={"judge_error": 8}, attributed=attributed, considered=48)
+    assert out["stats"]["w"]["value"] == 0.5
+    assert out["stats"]["w_worst"]["value"] == 20 / 48
+    assert out["stats"]["w_worst"]["attributed"] == 8
+    assert out["verdict"] == "FAIL"
+    assert out["reasons"]["failed"] == ["win_rate_worst_case"]
+    assert out["diagnostics"]["attributed"] == 8
+
+
+def test_without_attributed_exclusions_the_worst_case_is_w() -> None:
+    out = _analyze([_record(i) for i in range(40)])
+    assert out["stats"]["w_worst"]["value"] == out["stats"]["w"]["value"]
+    assert out["verdict"] == "PASS"
+
+
+def test_arm_errors_are_counted_by_kind() -> None:
+    records = [_record(i) for i in range(40)]
+    for r in records[:3]:
+        r["outcomes"]["neg"] = None
+        r["arms"]["neg"] = _arm(error_kind="author_exception", degenerate=True)
+    for r in records[3:5]:
+        r["outcomes"]["cand"] = "loss"
+        r["identical"]["cand"] = False
+        r["arms"]["cand"] = _arm(error_kind="budget", degenerate=True)
+    out = _analyze(records)
+    assert out["diagnostics"]["control_errors"] == {"author_exception": 3}
+    assert out["diagnostics"]["candidate_errors"] == {"budget": 2}
+
+
 def test_a_control_not_shown_worse_is_invalid() -> None:
     records = [_record(i, neg="win" if i % 2 else "loss") for i in range(40)]
     out = _analyze(records)

@@ -94,6 +94,12 @@ def test_a_rendered_value_reads_back_unchanged() -> None:
         ("deepseek/deepseek-chat", "deepseek"),
         ("openrouter/qwen/qwen-2.5-72b", "qwen"),
         ("mistral/mistral-large-latest", "mistral"),
+        ("bedrock/us.anthropic.claude-sonnet-4-5-20250929-v1:0", "anthropic"),
+        # A gateway string naming one lab's protocol and another's model can't be
+        # placed: an Anthropic judge must not pass as unrelated to openai/claude-...
+        ("openai/claude-sonnet-4-5", None),
+        ("anthropic/gpt-4o", None),
+        ("openai/some-private-model", None),
         ("openrouter/auto", None),
         ("workflow:wf_1@2", None),
         ("<unknown>", None),
@@ -262,8 +268,9 @@ def test_tool_call_validity(calls: list[dict[str, Any]], valid: bool) -> None:
 def test_arm_record_marks_errors_and_degenerate_turns() -> None:
     rec, reply = ITEM["arm_record"]({"output": {"error": "call_llm failed: boom"}}, None)
     assert reply is None and rec["error_kind"] == "error" and rec["degenerate"]
+    # A budget is read from the arm's spend, never from text an arm controls.
     rec, _ = ITEM["arm_record"]({"output": {"error": "run budget exhausted: x"}}, None)
-    assert rec["error_kind"] == "budget"
+    assert rec["error_kind"] == "error"
     rec, _ = ITEM["arm_record"]({"raised": {"kind": "child_errored", "message": "m"}}, None)
     assert rec["error_kind"] == "child_errored"
     rec, reply = ITEM["arm_record"]({"output": "text"}, None)
@@ -275,20 +282,25 @@ def test_arm_record_marks_errors_and_degenerate_turns() -> None:
 
 
 @pytest.mark.parametrize(
-    ("result", "caused"),
+    ("result", "refused", "overloaded"),
     [
-        ({"raised": {"kind": "invoke_workflow_refused", "message": "run cap"}}, True),
-        ({"raised": {"kind": "invoke_workflow_forbidden", "message": "no"}}, False),
-        ({"output": {"error": "call_llm failed: RateLimitError: 429"}}, True),
-        ({"output": {"error": "call_llm failed: InternalServerError: Overloaded"}}, True),
-        ({"output": {"error": "call_llm timed out: deadline"}}, True),
-        ({"raised": {"kind": "child_errored", "message": "provider 503"}}, True),
-        ({"output": {"error": "call_llm failed: BadRequestError: bad"}}, False),
-        ({"output": {"content": "fine"}}, False),
+        ({"raised": {"kind": "invoke_workflow_refused", "message": "run cap"}}, True, False),
+        ({"raised": {"kind": "invoke_workflow_forbidden", "message": "no"}}, False, False),
+        ({"output": {"error": "call_llm failed: RateLimitError: 429"}}, False, True),
+        ({"output": {"error": "call_llm failed: InternalServerError: Overloaded"}}, False, True),
+        ({"output": {"error": "call_llm timed out: deadline"}}, False, True),
+        ({"raised": {"kind": "author_exception", "message": "provider 503"}}, False, True),
+        ({"output": {"error": "call_llm failed: BadRequestError: bad"}}, False, False),
+        ({"output": {"content": "fine"}}, False, False),
     ],
 )
-def test_eval_caused_errors(result: dict[str, Any], caused: bool) -> None:
-    assert ITEM["eval_caused"](result) is caused
+def test_launch_refusals_and_overloads(
+    result: dict[str, Any], refused: bool, overloaded: bool
+) -> None:
+    """Only core sets a launch refusal's kind; overload is read from text, which for
+    the candidate arm is the candidate's own (so eval_item trusts it there once)."""
+    assert ITEM["launch_refused"](result) is refused
+    assert ITEM["overloaded"](result) is overloaded
 
 
 # ── the judge ─────────────────────────────────────────────────────────────────

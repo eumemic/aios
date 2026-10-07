@@ -6,12 +6,16 @@
     uv run python -m evals.gate report RUN_ID
     uv run python -m evals.gate reanalyze RUN_ID [--analysis-version N]
 
-``launch`` refuses a candidate whose version declares tools, MCP, HTTP or SSH servers:
-an arm acts within the gate's surface, which holds only the replay tools, so such a
-candidate would be scored on refusals it doesn't get in production. It opens the
-window at the candidate version's creation (so the sample is a holdout), prints the
-items the bar needs with a cost and run-slot estimate, and starts the run as the
-operator with ``budget_usd``.
+``launch`` runs the gate named by ``--gate`` (default ``wam-gate``; each bar file in
+``bars/`` registers as its own gate). It refuses a candidate whose version declares
+tools, MCP, HTTP or SSH servers, and does the same for every workflow the candidate's
+script names by id, the whole way down: an arm acts within the gate's surface, which
+holds only the replay tools, so such a candidate would be scored on refusals it
+doesn't get in production. A workflow the script picks at run time can't be checked,
+so that is a warning. It opens the window at the candidate version's creation (so the
+sample is a holdout), prints the items the bar needs (from the analysis version the
+gate pins) with a cost and run-slot estimate, and starts the run as the operator with
+``budget_usd``.
 
 A verdict is advisory. On PASS, the deploy is one ``PUT`` of the agent's model to the
 ``workflow:<id>@<version>`` the verdict names.
@@ -21,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -33,6 +38,8 @@ MAX_WINDOW = timedelta(days=31)  # the longest range one sample may cover
 SURFACE_FIELDS = ("tools", "mcp_servers", "http_servers", "ssh_servers")
 # Runs one in-flight item holds: the item, its three arms and the judge.
 ITEM_RUNS = 5
+_INVOKE = re.compile(r"invoke_workflow\(\s*([^,)]*)")
+_WORKFLOW_ID = re.compile(r"^[\"'](wf_[0-9A-Za-z]+)[\"']$")
 
 
 class Refused(Exception):
@@ -62,6 +69,40 @@ def _iso(value: str) -> datetime:
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
+def check_surface(api: Api, label: str, version: dict[str, Any], warnings: list[str]) -> None:
+    """Refuse when the version, or a workflow its script invokes by literal id (at its
+    current version, recursively), declares a surface. A workflow chosen at run time
+    can't be checked, which is a warning."""
+    seen: set[str] = set()
+    todo = [(label, version)]
+    while todo:
+        name, current = todo.pop()
+        declared = [field for field in SURFACE_FIELDS if current.get(field)]
+        if declared:
+            raise Refused(
+                f"{name} declares {', '.join(declared)}; the gate runs only candidates "
+                "that use call_llm, invoke_workflow and agent() (an arm acts within the "
+                "gate's surface)"
+            )
+        script = current["script"]
+        if "agent(" in script and "agent() children" not in " ".join(warnings):
+            warnings.append(
+                "the candidate calls agent(): its agent() children run with no tools in the eval"
+            )
+        for arg in _INVOKE.findall(script):
+            literal = _WORKFLOW_ID.match(arg.strip())
+            if literal is None:
+                warnings.append(
+                    f"{name} invokes a workflow chosen at run time ({arg.strip()}): "
+                    "its surface can't be checked before the run"
+                )
+                continue
+            nested = literal.group(1)
+            if nested not in seen:
+                seen.add(nested)
+                todo.append((nested, api.get(f"/v1/workflows/{nested}")))
+
+
 def plan(
     api: Api,
     *,
@@ -72,36 +113,34 @@ def plan(
     budget_usd: float,
     environment_id: str,
     now: datetime,
+    gate_name: str = paired_eval.NAME,
 ) -> dict[str, Any]:
     """Everything ``launch`` checks and estimates, and the run it would create."""
-    gate = _workflow(api, paired_eval.NAME)
-    bar = bar_of(gate["script"])
+    gate = _workflow(api, gate_name)
+    registered = load(gate["script"])
+    bar = dict(registered["BAR"])
     agent = api.get(f"/v1/agents/{agent_id}")
     workflow_id, version = _parse_candidate(candidate)
     cand = api.get(f"/v1/workflows/{workflow_id}/versions/{version}")
-    declared = [field for field in SURFACE_FIELDS if cand.get(field)]
-    if declared:
-        raise Refused(
-            f"candidate {candidate} declares {', '.join(declared)}; the gate runs only "
-            "candidates that use call_llm and agent() (an arm acts within the gate's surface)"
-        )
-    warnings = []
-    if "agent(" in cand["script"]:
-        warnings.append("the candidate calls agent(): its children run with no tools in the eval")
+    warnings: list[str] = []
+    check_surface(api, f"candidate {candidate}", cand, warnings)
     created = _iso(cand["created_at"])
     end = now.astimezone(UTC).replace(minute=0, second=0, microsecond=0)
     start = max(created, end - MAX_WINDOW)
     if start >= end:
         raise Refused(f"candidate {candidate} was created after {end.isoformat()}: no holdout yet")
-    analysis = load(eval_analysis.build())
-    needed = analysis["required_n"](bar)
-    budgets = bar["budget"]
-    item_cap = 2 * budgets["arm_usd"] + budgets["candidate_usd"] + budgets["judge_usd"]
+    # The power and the budgets the run itself will use: the analysis version the gate
+    # pins, and the gate's own budget rule.
+    pinned = registered["CONFIG"]["analysis"]
+    analysis = api.get(f"/v1/workflows/{pinned['id']}/versions/{pinned['version']}")
+    needed = load(analysis["script"])["required_n"](bar)
+    budgets = registered["budgets"]()
     estimate = {
         "n_required": needed["n"],
         "power": needed["power"],
         "cost_usd": None if needed["n"] is None else needed["n"] * bar["planning"]["item_cost_usd"],
-        "item_budget_usd": item_cap,
+        "item_budget_usd": budgets["item_usd"],
+        "candidate_budget_usd": budgets["candidate_usd"],
         "peak_runs": 1 + bar["wave_size"] * (ITEM_RUNS + bar["planning"]["candidate_fanout"]),
     }
     if estimate["cost_usd"] is not None and budget_usd < estimate["cost_usd"]:
@@ -207,6 +246,7 @@ def reanalyze(
                 "alpha": output["bar"]["alpha"],
                 "records": records,
                 "exclusions": exclusions,
+                "attributed": output.get("attributed", []),
                 "considered": len(records) + sum(exclusions.values()),
                 "flags": output.get("flags", []),
                 "seed": output["seed"],
@@ -228,6 +268,7 @@ def main(argv: list[str] | None = None) -> int:
     go.add_argument("--seed", required=True)
     go.add_argument("--budget-usd", type=float, required=True)
     go.add_argument("--dry-run", action="store_true")
+    go.add_argument("--gate", default=paired_eval.NAME, help="the gate (bar) to run")
     show = commands.add_parser("report")
     show.add_argument("run_id")
     again = commands.add_parser("reanalyze")
@@ -248,6 +289,7 @@ def main(argv: list[str] | None = None) -> int:
                 budget_usd=args.budget_usd,
                 environment_id=args.environment_id,
                 now=datetime.now(UTC),
+                gate_name=args.gate,
             )
         elif args.command == "report":
             report(api, args.run_id, print)

@@ -241,7 +241,8 @@ async def list_runs(
     limit: PageLimit = None,
 ) -> ListResponse[WfRun]:
     """List the account's runs in ``created_at DESC, id DESC`` order: the unarchived
-    ones, or every one with ``include_archived=true``.
+    ones, or every one with ``include_archived=true``, which needs ``workflow_id`` or
+    ``parent_run_id`` (a 422 otherwise).
 
     This ordering applies before ``limit`` to both filtered and unfiltered reads,
     so a first-page ``?workflow_id=...&limit=N`` query returns the N most recently
@@ -267,6 +268,13 @@ async def list_runs(
         parent_run_id = st.filters.get("parent_run_id")
         include_archived = st.filters.get("include_archived")
     archived = bool(include_archived)
+    if archived and workflow_id is None and parent_run_id is None:
+        # Every recency index is partial on unarchived rows, so an account-wide read
+        # of archived runs would sort the whole table.
+        raise ValidationError(
+            "include_archived needs workflow_id or parent_run_id",
+            detail={"field": "include_archived", "value": True},
+        )
     items = await service.list_runs(
         pool,
         account_id=account_id,
