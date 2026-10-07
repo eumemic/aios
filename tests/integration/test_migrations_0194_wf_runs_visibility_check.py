@@ -1,4 +1,4 @@
-"""Migration 0192 against a live Postgres (#2513): ``wf_runs.visibility`` is
+"""Migration 0194 against a live Postgres (#2513): ``wf_runs.visibility`` is
 constrained to its known values.
 
 The readers treat every value other than ``account`` as launcher-private, so an
@@ -64,7 +64,7 @@ def test_upgrade_constrains_visibility_to_its_known_values(migration_db_url: str
     db_url = migration_db_url
     assert run_alembic(["upgrade", "0191"], db_url).returncode == 0
     asyncio.run(_execute(db_url, _SEED_SQL))
-    up = run_alembic(["upgrade", "0192"], db_url)
+    up = run_alembic(["upgrade", "0194"], db_url)
     assert up.returncode == 0, up.stderr
 
     (con,) = _constraint(db_url)
@@ -84,14 +84,14 @@ def test_upgrade_refuses_a_row_with_an_unknown_visibility(migration_db_url: str)
     db_url = migration_db_url
     assert run_alembic(["upgrade", "0191"], db_url).returncode == 0
     asyncio.run(_execute(db_url, _SEED_SQL + _FORCE_UNKNOWN_SQL))
-    up = run_alembic(["upgrade", "0192"], db_url)
+    up = run_alembic(["upgrade", "0194"], db_url)
     assert up.returncode != 0
     assert [c["convalidated"] for c in _constraint(db_url)] in ([], [False])
     (version,) = asyncio.run(_fetch(db_url, "SELECT version_num FROM alembic_version"))
     assert version["version_num"] == "0191"
 
     asyncio.run(_execute(db_url, "DELETE FROM wf_runs WHERE id = 'run_unknown'"))
-    up = run_alembic(["upgrade", "0192"], db_url)
+    up = run_alembic(["upgrade", "0194"], db_url)
     assert up.returncode == 0, up.stderr
     assert [c["convalidated"] for c in _constraint(db_url)] == [True]
 
@@ -100,9 +100,9 @@ def test_upgrade_refuses_a_row_with_an_unknown_visibility(migration_db_url: str)
 @pytest.mark.integration
 def test_downgrade_drops_the_constraint(migration_db_url: str) -> None:
     db_url = migration_db_url
-    assert run_alembic(["upgrade", "0192"], db_url).returncode == 0
+    assert run_alembic(["upgrade", "0194"], db_url).returncode == 0
     down = run_alembic(["downgrade", "0191"], db_url)
     assert down.returncode == 0, down.stderr
     assert _constraint(db_url) == []
-    assert run_alembic(["upgrade", "0192"], db_url).returncode == 0
+    assert run_alembic(["upgrade", "0194"], db_url).returncode == 0
     assert len(_constraint(db_url)) == 1

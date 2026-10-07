@@ -1,6 +1,6 @@
 """Constrain ``wf_runs.visibility`` to its known values (#2513).
 
-Revision ID: 0192
+Revision ID: 0194
 Revises: 0191
 
 The run readers (``RunReader.can_see``, the ``list_wf_runs`` reader filter, the
@@ -26,7 +26,7 @@ from collections.abc import Sequence
 
 from alembic import op
 
-revision: str = "0192"
+revision: str = "0194"
 down_revision: str | None = "0191"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
