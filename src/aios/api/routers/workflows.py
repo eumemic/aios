@@ -237,15 +237,17 @@ async def list_runs(
     workflow_id: str | None = None,
     status: str | None = None,
     parent_run_id: str | None = None,
+    include_archived: bool | None = None,
     limit: PageLimit = None,
 ) -> ListResponse[WfRun]:
-    """List the account's unarchived runs in ``created_at DESC, id DESC`` order.
+    """List the account's runs in ``created_at DESC, id DESC`` order: the unarchived
+    ones, or every one with ``include_archived=true``.
 
     This ordering applies before ``limit`` to both filtered and unfiltered reads,
     so a first-page ``?workflow_id=...&limit=N`` query returns the N most recently
     created matching runs. ``id DESC`` is the stable tiebreaker for equal creation
     timestamps. First page: optional ``workflow_id`` / ``status`` /
-    ``parent_run_id`` filters + ``limit``; subsequent pages:
+    ``parent_run_id`` / ``include_archived`` filters + ``limit``; subsequent pages:
     ``?cursor=<next_cursor>``. ``parent_run_id`` scopes to a run's child runs."""
     st = page_cursor(
         cursor,
@@ -253,6 +255,7 @@ async def list_runs(
             "workflow_id": workflow_id,
             "status": status,
             "parent_run_id": parent_run_id,
+            "include_archived": include_archived,
             "limit": limit,
         },
     )
@@ -262,6 +265,8 @@ async def list_runs(
         workflow_id = st.filters.get("workflow_id")
         status = st.filters.get("status")
         parent_run_id = st.filters.get("parent_run_id")
+        include_archived = st.filters.get("include_archived")
+    archived = bool(include_archived)
     items = await service.list_runs(
         pool,
         account_id=account_id,
@@ -271,12 +276,18 @@ async def list_runs(
         status=status,
         parent_run_id=parent_run_id,
         reader=None,
+        include_archived=archived,
     )
     return ListResponse[WfRun].paginate(
         items,
         page_limit,
         cursor=lambda x: x.id,
-        filters={"workflow_id": workflow_id, "status": status, "parent_run_id": parent_run_id},
+        filters={
+            "workflow_id": workflow_id,
+            "status": status,
+            "parent_run_id": parent_run_id,
+            "include_archived": archived,
+        },
     )
 
 

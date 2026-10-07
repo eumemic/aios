@@ -752,7 +752,10 @@ async def test_archive_run_terminal_archives_and_hides(wf_conn: asyncpg.Connecti
 
     # Dropped from the default (archived-blind) list…
     assert await wf_queries.list_wf_runs(wf_conn, account_id="acc_root") == []
-    # …but still fetchable by id, and its journal survives.
+    # …listed when archived runs are asked for…
+    listed = await wf_queries.list_wf_runs(wf_conn, account_id="acc_root", include_archived=True)
+    assert [r.id for r in listed] == [run_id]
+    # …and still fetchable by id, and its journal survives.
     fetched = await wf_queries.get_wf_run(wf_conn, run_id, account_id="acc_root")
     assert fetched.id == run_id
     assert fetched.archived_at is not None
