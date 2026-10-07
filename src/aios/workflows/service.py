@@ -272,7 +272,8 @@ async def create_run(
     * :class:`RunAuthority` — a sub-run: its parent run's *frozen* surface and vaults,
       so a chain never widens past its root whatever happens to the launching session
       later. ``as_agent`` (operator runs only) re-roots the surface bound at an agent
-      version, within the parent's.
+      version, within the parent's, and the sub-run and everything beneath it act for
+      that agent (principal ``agent``), not the operator.
 
     The snapshotted surface is ``clamp(workflow surface, bound)``. ``vault_ids`` binds
     credentials to the run (resolved at tool-call time, like a session's): omitted/null
@@ -455,7 +456,10 @@ async def create_run(
                     run_default_child_model = parent_run.default_child_model
                 launcher_session_id = parent_run.launcher_session_id
                 parent_run_id = parent_run.id
-                principal = parent_run.principal
+                # A run re-rooted at an agent version acts for that agent, and so does
+                # every run beneath it (#2476): code an agent wrote never holds the
+                # operator's privileges. The principal trigger stamps the same.
+                principal = "agent" if authority.as_agent is not None else parent_run.principal
                 # The nearest budgeted ancestor (#2476): a sub-run with no budget of its
                 # own is held to that run's ceiling.
                 budget_run_id = (

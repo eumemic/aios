@@ -72,6 +72,21 @@ def test_gate_run_tool_strings() -> None:
     assert gate_run_tool(run, "bash") is None
 
 
+def test_replay_tools_need_a_run_that_acts_for_the_operator() -> None:
+    """A run that acts for a session, or for an agent (an eval arm re-rooted with
+    ``as_agent``, and its sub-runs), can't read requests even with the tool declared."""
+    from aios.workflows.run_tools import gate_run_tool
+
+    declared = [ToolSpec(type="sample_requests")]
+    for principal in ("session", "agent"):
+        run: Any = SimpleNamespace(**vars(_run(tools=declared)), principal=principal)
+        assert gate_run_tool(run, "sample_requests") == {
+            "error": "tool 'sample_requests' is only callable from an operator run"
+        }
+    operator: Any = SimpleNamespace(**vars(_run(tools=declared)), principal="operator")
+    assert gate_run_tool(operator, "sample_requests") is None
+
+
 async def test_web_search_routed_when_declared() -> None:
     run = _run(tools=[ToolSpec(type="web_search")])
     with patch.object(

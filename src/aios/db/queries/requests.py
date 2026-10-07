@@ -68,8 +68,8 @@ async def present_blob_shas(
 # answered request has its own assistant message: the first one after its span,
 # since a session runs one inference at a time. The closing span may land after
 # ``end``, so the span read runs a day past it. Sessions a replay run spawned (its
-# tree is the only operator run stamped ``session``) are eval traffic, not
-# production, and are skipped.
+# tree is the only run stamped ``session`` that doesn't act for a session) are eval
+# traffic, not production, and are skipped.
 _SAMPLE_REQUEST_SPANS_SQL = """
 WITH agent_sessions AS (
     SELECT s.id
@@ -78,7 +78,7 @@ WITH agent_sessions AS (
        AND NOT EXISTS (
            SELECT 1 FROM wf_runs r
             WHERE r.id = s.parent_run_id
-              AND r.principal = 'operator' AND r.visibility = 'session'
+              AND r.principal <> 'session' AND r.visibility = 'session'
        )
 ),
 spans AS (

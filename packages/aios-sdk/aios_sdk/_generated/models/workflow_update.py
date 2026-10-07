@@ -51,11 +51,13 @@ class WorkflowUpdate:
                 `agent`). `version` pins a registered version; omitted, the version current at launch runs. The sub-run runs
                 under this run's surface intersected with the target's, and binds this run's vaults; a failed or gone sub-run
                 raises like a failed `agent`. `as_agent={"agent_id": ..., "version": N}` also intersects the sub-run's surface
-                with that agent version's; only a run an operator launched may pass it. `request_ref` hands the sub-run a
-                request this run can resolve (the one it was created with, or one its `sample_requests` call returned), which
-                the sub-run may then resolve itself; with `input=None` it starts with that request as a workflow-as-model run
-                would, with an `input` it starts with that input. `budget_usd` gives the sub-run a ceiling of its own, clamped
-                to what this run may still spend; without one it is held to this run's.
+                with that agent version's, and the sub-run and its own sub-runs then act for that agent, so operator-only
+                capabilities (the replay tools, `workflow:` child models, `as_agent`) are refused there; only a run that acts
+                for the operator may pass it. `request_ref` hands the sub-run a request this run can resolve (the one it was
+                created with, or one its `sample_requests` call returned), which the sub-run may then resolve itself; with
+                `input=None` it starts with that request as a workflow-as-model run would, with an `input` it starts with that
+                input. `budget_usd` gives the sub-run a ceiling of its own, clamped to what this run may still spend; without
+                one it is held to this run's.
                   - `tool(name, input)`: invoke a declared tool; tool errors are returned, not raised. An operator run that
                 declares the replay tools can read an agent's past requests: `tool("sample_requests", {"agent_id", "start",
                 "end", "n", "seed", "cluster_cap"})` returns `{"items": [...]}`, a seeded sample of the agent's answered

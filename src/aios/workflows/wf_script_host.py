@@ -239,7 +239,8 @@ def invoke_workflow(
     registered version of the workflow; omitted, it runs the version current at
     launch. ``as_agent={"agent_id": ..., "version": N}`` (operator runs only) clamps the
     sub-run to that agent version's surface as well, so an eval arm runs with the
-    authority that agent would give it.
+    authority that agent would give it; the sub-run and its own sub-runs act for that
+    agent, so operator-only capabilities (including ``as_agent``) are refused there.
 
     ``request_ref`` hands the sub-run a request this run can resolve: the one it was
     created with, or one its own ``sample_requests`` call returned. The sub-run may
