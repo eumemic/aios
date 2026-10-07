@@ -192,3 +192,45 @@ async def test_model_workflow_launch_inherits_session_vaults(
     assert launch.await_args is not None
     assert launch.await_args.kwargs["authority"].session_id == "ses_1"
     assert launch.await_args.kwargs.get("vault_ids") is None
+
+
+@pytest.mark.asyncio
+async def test_a_second_harvest_task_for_an_in_flight_key_is_not_spawned(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2480: the sweep can re-park a run between its creation and the park step's own
+    spawn. The step's spawn must then be a no-op: a second task for the key would let
+    the first one's done-callback drop the key while the other still polls."""
+    import asyncio
+
+    release = asyncio.Event()
+    started: list[str] = []
+
+    async def _park(pool: object, session_id: str, *, run_id: str, account_id: str) -> None:
+        started.append(run_id)
+        await release.wait()
+
+    monkeypatch.setattr(model_workflow, "_park_and_signal", _park)
+    model_workflow.reset_inflight_harvests()
+    key = ("ses_1", "run_1")
+    try:
+        # The sweep's re-park spawns the task, then the park step's own spawn races in.
+        assert model_workflow.relaunch_model_dispatch_park(
+            _FakePool(), "ses_1", run_id="run_1", account_id="acc_1"
+        )
+        model_workflow._launch_harvest_task(
+            _FakePool(), "ses_1", run_id="run_1", account_id="acc_1"
+        )
+        await asyncio.sleep(0)
+
+        assert started == ["run_1"], "one harvest task per in-flight key"
+        tasks = [t for t in model_workflow._PARK_TASKS if t.get_name().endswith(":ses_1:run_1")]
+        assert len(tasks) == 1
+        assert key in model_workflow._INFLIGHT_HARVESTS
+
+        release.set()
+        await asyncio.gather(*tasks)
+        assert key not in model_workflow._INFLIGHT_HARVESTS
+    finally:
+        release.set()
+        model_workflow.reset_inflight_harvests()
