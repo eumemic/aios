@@ -75,7 +75,8 @@ class OperatorAuthority:
 class SessionAuthority:
     """A run an agent session launched: ``call_workflow``, a workflow-as-model turn, or
     a trigger fire. The session's current surface and vaults bound it.
-    ``parent_run_id`` is lineage only: it sets the depth budget, never the authority."""
+    ``parent_run_id`` is lineage only: it sets the depth budget and the spend ceiling the
+    run inherits (#2476), never the authority."""
 
     session_id: str
     parent_run_id: str | None
@@ -642,8 +643,11 @@ class WfRunCreate(BaseModel):
         description=(
             "Optional USD spend ceiling for this run's whole creation subtree (its "
             "agent() children, their sub-agents, and sub-runs). Once the subtree has "
-            "spent it, the run and every sub-run without a budget of its own are "
-            "refused new agent(), call_llm and invoke_workflow calls."
+            "spent it, the run and every descendant run without a budget of its own "
+            "are refused new agent(), call_llm and invoke_workflow calls. A sub-run "
+            "given its own budget is held to that budget, set at launch to at most what "
+            "remained, so the subtree can overshoot by up to the budgets of sub-runs "
+            "still in flight."
         ),
     )
     default_child_model: str | None = Field(

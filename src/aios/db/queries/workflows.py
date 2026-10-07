@@ -947,8 +947,8 @@ async def run_budget_spent_microusd(
 async def get_run_budget_total_microusd(
     conn: asyncpg.Connection[Any], run_id: str, *, account_id: str
 ) -> int | None:
-    """A run's ``budget_usd`` ceiling in micro-USD, or ``None`` when it has none (or is
-    absent): the ceiling a sub-run without a budget of its own inherits (#2476)."""
+    """A run's ``budget_usd`` ceiling in micro-USD, or ``None`` when it has none or its
+    row is gone: the ceiling a sub-run without a budget of its own inherits (#2476)."""
     total: int | None = await conn.fetchval(
         "SELECT budget_total_microusd FROM wf_runs WHERE id = $1 AND account_id = $2",
         run_id,

@@ -50,8 +50,10 @@ class WfRunCreate:
             vault_ids (list[str] | Unset): Vault ids to bind to the run for credential resolution. When an agent launches
                 the run, these must be a subset of the launcher's own vaults; the HTTP path is unattenuated operator authority.
             budget_usd (float | None | Unset): Optional USD spend ceiling for this run's whole creation subtree (its agent()
-                children, their sub-agents, and sub-runs). Once the subtree has spent it, the run and every sub-run without a
-                budget of its own are refused new agent(), call_llm and invoke_workflow calls.
+                children, their sub-agents, and sub-runs). Once the subtree has spent it, the run and every descendant run
+                without a budget of its own are refused new agent(), call_llm and invoke_workflow calls. A sub-run given its own
+                budget is held to that budget, set at launch to at most what remained, so the subtree can overshoot by up to the
+                budgets of sub-runs still in flight.
             default_child_model (None | str | Unset): Optional model used by generic agent() children when they omit model=.
     """
 

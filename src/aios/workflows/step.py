@@ -178,10 +178,15 @@ class _Budget(NamedTuple):
         )
 
 
+# The capabilities a step reads the held budget for: the three that spend, and budget().
+_BUDGETED_CAPABILITIES = frozenset({"agent", "call_llm", "invoke_workflow", "budget"})
+
+
 async def _held_budget(conn: asyncpg.Connection[Any], run: WfRun) -> _Budget | None:
     """Read the budget ``run`` is held to, or ``None`` when neither it nor any ancestor
     has one. A sub-run with a budget of its own was clamped to its caller's remaining
-    budget when it was created, so it checks only its own."""
+    budget when it was created, so it checks only its own. A budget run whose row is
+    gone (pruned after it ended) leaves its descendants exhausted, not unbounded."""
     if run.budget_usd is not None:
         budget_run_id, total = run.id, round(run.budget_usd * 1_000_000)
     elif run.budget_run_id is not None:
@@ -190,7 +195,7 @@ async def _held_budget(conn: asyncpg.Connection[Any], run: WfRun) -> _Budget | N
             conn, budget_run_id, account_id=run.account_id
         )
         if inherited is None:
-            return None
+            return _Budget(0, 0)
         total = inherited
     else:
         return None
@@ -898,7 +903,19 @@ async def _run_workflow_step_body(
         # its own call_llm meter (#1633), every child, every grandchild (a child's own
         # call_agent), and every sub-run. A sub-run with no budget of its own is held to
         # its nearest budgeted ancestor's (#2476), so a sub-run can't spend past it.
-        budget = await _held_budget(conn, run)
+        # The rollup is read only when this step opens a capability that spends or
+        # reports the budget: under a budgeted root every unbudgeted descendant would
+        # otherwise walk the root's whole subtree on every step.
+        budget = (
+            await _held_budget(conn, run)
+            if any(
+                cap.capability_id in _BUDGETED_CAPABILITIES
+                and cap.call_key not in memo
+                and cap.call_key not in inflight
+                for cap in outcome.emitted
+            )
+            else None
+        )
         over_budget = budget is not None and budget.exhausted
 
         # Suspended: open any *new* frontier capability, then park.
@@ -1018,17 +1035,7 @@ async def _run_workflow_step_body(
                 # create_run and apply for free. A bad output_schema / target
                 # rejects as a CATCHABLE author error (call_result error journaled),
                 # so self-wake to replay and throw the AgentError at the await.
-                if over_budget:
-                    assert budget is not None
-                    await _journal_agent_rejection(
-                        conn,
-                        run=run,
-                        call_key=cap.call_key,
-                        kind="budget_exceeded",
-                        message=budget.refusal("new invoke_workflow() calls are refused"),
-                    )
-                    disposition = _escalate(disposition, "owed_drive")
-                    continue
+                # An exhausted budget is refused inside, after the re-attach check.
                 spawn = await _open_invoke_workflow_capability(conn, pool, run, cap, budget)
                 if spawn.rejected:
                     disposition = _escalate(disposition, "owed_drive")
@@ -1642,6 +1649,17 @@ async def _open_invoke_workflow_capability(
         return rejected
 
     sub_run_id = child_run_id(run.id, cap.call_key)
+    # An exhausted budget refuses a NEW sub-run only (#2476). A sub-run an earlier wake
+    # created before its call_started was journaled is re-attached whatever the budget,
+    # so a replay never orphans a running sub-run behind a refusal.
+    if (
+        budget is not None
+        and budget.exhausted
+        and not await wf_queries.run_exists(conn, sub_run_id, account_id=account_id)
+    ):
+        return await _reject(
+            "budget_exceeded", budget.refusal("new invoke_workflow() calls are refused")
+        )
     # Spawn (or idempotently re-attach) the sub-run. ``create_run`` owns its own
     # transaction on a separate pooled connection (like ``create_child_session``);
     # its create-or-reattach + caps are all internal. A 404 (workflow gone /

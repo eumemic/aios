@@ -23235,7 +23235,7 @@
               }
             ],
             "title": "Budget Usd",
-            "description": "Optional USD spend ceiling for this run's whole creation subtree (its agent() children, their sub-agents, and sub-runs). Once the subtree has spent it, the run and every sub-run without a budget of its own are refused new agent(), call_llm and invoke_workflow calls."
+            "description": "Optional USD spend ceiling for this run's whole creation subtree (its agent() children, their sub-agents, and sub-runs). Once the subtree has spent it, the run and every descendant run without a budget of its own are refused new agent(), call_llm and invoke_workflow calls. A sub-run given its own budget is held to that budget, set at launch to at most what remained, so the subtree can overshoot by up to the budgets of sub-runs still in flight."
           },
           "default_child_model": {
             "anyOf": [

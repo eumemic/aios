@@ -20,7 +20,9 @@ import pytest
 from aios.db.pool import create_pool
 from aios.db.queries import workflows as wf_queries
 from aios.harness import runtime
-from aios.models.workflows import OperatorAuthority, WfRun
+from aios.models.workflows import OperatorAuthority, RunAuthority, SessionAuthority, WfRun
+from aios.services import agents as agents_service
+from aios.services import sessions as sessions_service
 from aios.workflows import run_tools, service
 from aios.workflows.step import run_workflow_step
 
@@ -273,3 +275,162 @@ async def test_the_sweep_wakes_a_parked_sub_run_whose_ancestor_is_spent(
         over = await wf_queries.list_parked_run_ids_over_budget(conn)
     assert sub in over
     assert root not in over  # parked on invoke_workflow, not agent()
+
+
+_REPORT_BUDGET = "async def main(input):\n    return await budget()\n"
+
+
+async def _child_session(pool: asyncpg.Pool[Any]) -> str:
+    agent = await agents_service.create_agent(
+        pool,
+        account_id=_ACC,
+        name="child",
+        model="test/dummy",
+        system="",
+        tools=[],
+        description=None,
+        metadata={},
+        window_min=1000,
+        window_max=100000,
+    )
+    session = await sessions_service.create_session(
+        pool,
+        account_id=_ACC,
+        agent_id=agent.id,
+        environment_id=_ENV,
+        title=None,
+        metadata={},
+    )
+    return session.id
+
+
+async def _direct_sub_run(pool: asyncpg.Pool[Any], parent_id: str, workflow_id: str) -> str:
+    run = await service.create_run(
+        pool,
+        account_id=_ACC,
+        authority=RunAuthority(parent_id, None),
+        workflow_id=workflow_id,
+        environment_id=_ENV,
+    )
+    return run.id
+
+
+async def test_a_run_a_child_session_launches_is_held_to_the_lineage_budget(
+    pool: asyncpg.Pool[Any],
+) -> None:
+    """A session a budgeted run spawned launches a run (a WaM turn, ``call_workflow``):
+    the run's lineage parent names the budget it is held to, directly or through an
+    unbudgeted sub-run."""
+    report = await _workflow(pool, "report", _REPORT_BUDGET)
+    root = await _root(pool, report, input=None, budget_usd=1.0)
+    middle = await _direct_sub_run(pool, root, report)
+    session_id = await _child_session(pool)
+    for parent in (root, middle):
+        launched = await service.create_run(
+            pool,
+            account_id=_ACC,
+            authority=SessionAuthority(session_id, parent),
+            workflow_id=report,
+            environment_id=_ENV,
+        )
+        assert launched.principal == "session"
+        assert launched.budget_run_id == root
+    await _spend(pool, root, 0.3)
+    for _ in range(3):
+        await run_workflow_step(launched.id)
+    done = await _run(pool, launched.id)
+    assert done.output == {"total_usd": 1.0, "spent_usd": 0.3, "remaining_usd": 0.7}
+
+
+async def test_a_sub_run_created_before_a_lost_call_started_is_reattached_over_budget(
+    pool: asyncpg.Pool[Any],
+) -> None:
+    """A wake creates the sub-run (on its own connection) but rolls back before its
+    ``call_started`` is journaled; the budget is then spent. The replay re-attaches the
+    sub-run that exists instead of refusing the call and orphaning it."""
+    noop = await _workflow(pool, "noop", "async def main(input):\n    return 1\n")
+    caller = await _workflow(pool, "caller", _HAND_ON)
+    root = await _root(pool, caller, input={"wf": noop}, budget_usd=0.5)
+    real_append = wf_queries.append_run_event
+
+    async def _lose_invoke_call_started(*args: Any, **kwargs: Any) -> Any:
+        if (
+            kwargs.get("type") == "call_started"
+            and (kwargs.get("payload") or {}).get("capability") == "invoke_workflow"
+        ):
+            raise RuntimeError("lost before commit")
+        return await real_append(*args, **kwargs)
+
+    with (
+        mock.patch.object(wf_queries, "append_run_event", new=_lose_invoke_call_started),
+        pytest.raises(RuntimeError, match="lost before commit"),
+    ):
+        await run_workflow_step(root)
+    sub = await _sub_run(pool, root)
+    await _spend(pool, root, 0.5)
+    await run_workflow_step(root)
+    async with pool.acquire() as conn:
+        events = await wf_queries.list_run_events(conn, root)
+    started = [e for e in events if e.type == "call_started"]
+    assert [e.payload["child_run_id"] for e in started] == [sub]
+    assert not [e for e in events if e.type == "call_result"]  # not refused
+
+
+async def test_a_sub_run_with_its_own_budget_outlives_its_spent_ancestor(
+    pool: asyncpg.Pool[Any],
+) -> None:
+    """A sub-run given its own budget checks only that budget, so its ancestor's spend
+    doesn't stop it: the documented overshoot bound."""
+    leaf = await _workflow(
+        pool, "leaf", "async def main(input):\n    await gate('g')\n    return await budget()\n"
+    )
+    caller = await _workflow(pool, "caller", _HAND_ON)
+    root = await _root(pool, caller, input={"wf": leaf, "budget": 0.25}, budget_usd=1.0)
+    await run_workflow_step(root)
+    sub = await _sub_run(pool, root)
+    await run_workflow_step(sub)
+    await _spend(pool, root, 1.0)
+    await _resume_gate(pool, sub)
+    for _ in range(3):
+        await run_workflow_step(sub)
+    done = await _run(pool, sub)
+    assert done.output == {"total_usd": 0.25, "spent_usd": 0.0, "remaining_usd": 0.25}
+
+
+async def test_the_sweep_wakes_every_sub_run_sharing_a_spent_budget_run(
+    pool: asyncpg.Pool[Any],
+) -> None:
+    noop = await _workflow(pool, "noop", "async def main(input):\n    return 1\n")
+    root = await _root(pool, noop, input=None, budget_usd=1.0)
+    subs = [await _direct_sub_run(pool, root, noop) for _ in range(2)]
+    async with pool.acquire() as conn:
+        for i, sub in enumerate(subs):
+            await wf_queries.append_run_event(
+                conn,
+                account_id=_ACC,
+                run_id=sub,
+                type="call_started",
+                call_key=f"k-agent-{i}",
+                payload={"capability": "agent", "child_session_id": "ses_none"},
+            )
+            await conn.execute("UPDATE wf_runs SET status = 'suspended' WHERE id = $1", sub)
+    await _spend(pool, root, 1.0)
+    async with pool.acquire() as conn:
+        over = await wf_queries.list_parked_run_ids_over_budget(conn)
+    assert set(subs) <= set(over)
+
+
+async def test_a_sub_run_whose_budget_run_is_pruned_is_held_to_nothing(
+    pool: asyncpg.Pool[Any],
+) -> None:
+    """The archive prune deletes run rows. A descendant still running under a pruned
+    budget run reads its budget as spent, not as unbounded."""
+    report = await _workflow(pool, "report", _REPORT_BUDGET)
+    root = await _root(pool, report, input=None, budget_usd=1.0)
+    sub = await _direct_sub_run(pool, root, report)
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM wf_runs WHERE id = $1", root)
+    for _ in range(3):
+        await run_workflow_step(sub)
+    done = await _run(pool, sub)
+    assert done.output == {"total_usd": 0.0, "spent_usd": 0.0, "remaining_usd": 0.0}

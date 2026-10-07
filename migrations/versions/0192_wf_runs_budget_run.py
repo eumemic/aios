@@ -11,8 +11,9 @@ run's ceiling.
 
 NULL on root runs, on sub-runs with no budgeted ancestor, and on every row written
 before this revision or by an application image from before it; those keep the old
-behaviour (no inherited ceiling). The column add is catalog-only. No FK, like
-``parent_run_id``'s audit siblings: run rows are never deleted.
+behaviour (no inherited ceiling). The column add is catalog-only. No FK: the archive
+prune deletes run rows, and a descendant whose budget run is gone is treated as having
+spent its budget rather than as unbounded.
 """
 
 from __future__ import annotations

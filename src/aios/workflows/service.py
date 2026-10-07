@@ -410,6 +410,17 @@ async def create_run(
                 held = await get_session_vault_ids(conn, launcher_session_id, account_id=account_id)
                 run_default_child_model = launcher_agent.model
                 principal = "session"
+                if parent_run_id is not None:
+                    # A run launched by a session an ancestor run spawned (a WaM turn,
+                    # call_workflow) is held to that lineage's budget too (#2476).
+                    lineage_parent = await wf_queries.get_wf_run(
+                        conn, parent_run_id, account_id=account_id
+                    )
+                    budget_run_id = (
+                        lineage_parent.id
+                        if lineage_parent.budget_usd is not None
+                        else lineage_parent.budget_run_id
+                    )
                 if workspace == "shared":
                     workspace_path = await get_session_workspace_path(
                         conn, launcher_session_id, account_id=account_id
