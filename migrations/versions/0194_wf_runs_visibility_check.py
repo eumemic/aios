@@ -12,7 +12,12 @@ CHECK makes anything else unrepresentable.
 Mechanics. The constraint is added ``NOT VALID`` under a bounded lock wait (a
 catalog-only change, enforced on every later write), then validated in an
 autocommit block, which takes only SHARE UPDATE EXCLUSIVE and so scans the
-populated table without blocking run inserts. A row with an unknown value fails
+populated table without blocking run inserts. The ``SET LOCAL lock_timeout``
+above is transaction-scoped and is committed away on entering the autocommit
+block, so the bound is re-armed at session scope (``SET lock_timeout``, reset to
+``DEFAULT`` afterward) inside the block before VALIDATE; otherwise VALIDATE would
+run with PostgreSQL's default unbounded lock wait and a conflicting vacuum or DDL
+could hang the deploy. A row with an unknown value fails
 the VALIDATE and so the deploy; the ``DROP ... IF EXISTS`` makes the migration
 re-runnable after such a failure leaves the unvalidated constraint behind.
 
@@ -42,7 +47,17 @@ def upgrade() -> None:
         "CHECK (visibility IN ('account', 'session')) NOT VALID"
     )
     with op.get_context().autocommit_block():
-        op.execute(f"ALTER TABLE wf_runs VALIDATE CONSTRAINT {CONSTRAINT}")
+        # Entering the autocommit block committed the transaction that held the
+        # ``SET LOCAL lock_timeout`` above, so VALIDATE would otherwise run with
+        # PostgreSQL's default (unbounded) lock wait and a conflicting vacuum or
+        # DDL could hang the deploy. Re-arm the bound at session scope here (not
+        # LOCAL: each statement in an autocommit block is its own transaction,
+        # so a LOCAL setting would be discarded before VALIDATE ran), then reset.
+        op.execute("SET lock_timeout = '5s'")
+        try:
+            op.execute(f"ALTER TABLE wf_runs VALIDATE CONSTRAINT {CONSTRAINT}")
+        finally:
+            op.execute("SET lock_timeout = DEFAULT")
 
 
 def downgrade() -> None:
