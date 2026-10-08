@@ -72,6 +72,12 @@ class _FakeDocker:
         # Image ids whose ``docker history`` probe fails (daemon hiccup, an
         # image-specific history error) — ``.Size`` is still readable.
         self.history_fails: set[str] = set()
+        # Image id -> the literal ``docker history`` stdout to return (rc 0):
+        # models a daemon that answers but in a shape the parser must reject.
+        self.history_output: dict[str, bytes] = {}
+        # Image ref -> stderr for a failing ``docker image inspect`` that is
+        # NOT "No such image" (a transient daemon error).
+        self.inspect_errors: dict[str, bytes] = {}
         self.stream_filters: list[Any] = []
         self.container_labels: dict[str, str] = {}
         self.images: dict[str, dict[str, Any]] = {}
@@ -116,6 +122,8 @@ class _FakeDocker:
             return 0, out.encode(), b""
         if sub == "image" and len(argv) > 2 and argv[2] == "inspect":
             ref = argv[-1]
+            if ref in self.inspect_errors:
+                return 1, b"", self.inspect_errors[ref]
             img = self._lookup(ref)
             if img is None:
                 return 1, b"", f"Error: No such image: {ref}".encode()
@@ -142,11 +150,15 @@ class _FakeDocker:
                 return 1, b"", f"Error: No such image: {ref}".encode()
             if img["id"] in self.history_fails:
                 return 1, b"", b"Error: history unavailable"
+            if img["id"] in self.history_output:
+                return 0, self.history_output[img["id"]], b""
             chain = img.get("chain", img["size"])
             # Split the chain over the image's layers: the top layer carries
-            # the view, the interior carries the dead history.
+            # the view, the interior carries the dead history, and the rest
+            # are empty — one history entry per layer, as the daemon reports.
             view = img["size"]
             lines = [f"{view}B", f"{max(0, chain - view)}B"]
+            lines += ["0B"] * max(0, int(img.get("depth", 1)) - len(lines))
             return 0, ("\n".join(lines) + "\n").encode(), b""
         if sub == "commit":
             tag = argv[-1]
@@ -1004,6 +1016,31 @@ class TestBaseRelativeChainTriggers:
         assert out.kind == "committed", "4 KB of dead history must never buy a multi-GB copy"
         assert not fake_docker.pipelines
 
+    @pytest.mark.asyncio
+    async def test_reclaim_between_base_view_and_base_chain_flattens(
+        self, fake_docker: _FakeDocker
+    ) -> None:
+        """P1: ``_flatten`` is ``export | import`` of the container's CURRENT
+        view — it copies the base's VIEW, never its history, and the shared
+        base's chain stays resident either way. So flatten - commit =
+        base_view - reclaimable, and the break-even is the base VIEW.
+
+        Base 1 GB view / 10 GB chain; session added 5 GB of chain over 1 GB
+        of view ⇒ 4 GB reclaimable: base_view (1) < 4 <= base_chain (10).
+        Flattening writes ~2 GB and frees 5 GB; a base_chain gate refused it,
+        and with no budget nothing else would ever reclaim it short of the
+        depth ceiling."""
+        self._base(fake_docker, view=1 * GB, chain=10 * GB)
+        self._parent_on_base(fake_docker, view=2 * GB, chain=15 * GB)
+        fake_docker.size_rw = 1_000_000
+
+        out = await DockerBackend().snapshot(
+            "cid", "tag:latest", empty_floor_bytes=8192, flatten_if_unique_bytes_over=None
+        )
+
+        assert out.kind == "flattened", "4 GB reclaim for a 1 GB view copy must flatten"
+        assert fake_docker.pipelines
+
 
 class TestChainUnitMismatch:
     """A failed ``docker history`` probe leaves that image measured as its VIEW
@@ -1148,8 +1185,246 @@ class TestHistorySizeParsing:
     def test_human_readable_sizes_parse(self, rendered: str, expected: int) -> None:
         assert _sum_history_sizes(rendered) == expected
 
-    def test_lines_sum_and_unparseable_lines_are_skipped(self) -> None:
-        assert _sum_history_sizes("1GB\n0B\n\n<missing>\n500MB\n") == 1_500_000_000
+    @pytest.mark.parametrize(
+        ("rendered", "expected"),
+        [
+            ("1KiB", 1024),
+            ("1.5MiB", int(1.5 * 1024**2)),
+            ("2GiB", 2 * 1024**3),
+            ("1TiB", 1024**4),
+            # ``HumanSizeWithPrecision(x, 3)`` uses ``%.3g`` — exponent form
+            # appears for 1000 <= x < 1000 of the next unit after rounding.
+            ("1e+03kB", 1_000_000),
+        ],
+    )
+    def test_iec_and_exponent_sizes_parse(self, rendered: str, expected: int) -> None:
+        assert _sum_history_sizes(rendered) == expected
+
+    def test_lines_sum(self) -> None:
+        assert _sum_history_sizes("1GB\n0B\n\n500MB\n", expected_layers=3) == 1_500_000_000
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            "N/A\nN/A\n",  # every line unparseable
+            "MiB\n",  # a bare unit, no number
+            "",  # rc 0, empty body
+            "\n\n",  # rc 0, blank lines only
+            "1GB\nN/A\n500MB\n",  # mixed: one line is an unknown number of bytes
+            "1GB\n<missing>\n",  # mixed
+            "1GB\n12QB\n",  # unknown unit
+            "-5MB\n",  # negative
+            "nanGB\n",  # non-finite
+        ],
+    )
+    def test_unparseable_history_is_not_a_measurement(self, body: str) -> None:
+        """FAIL CLOSED: any line that does not parse is an unknown number of
+        bytes, so the sum is not a measurement — never a partial floor."""
+        assert _sum_history_sizes(body) is None
+
+    def test_fewer_lines_than_layers_is_not_a_measurement(self) -> None:
+        """History lists at least one entry per filesystem layer; a shorter
+        body is truncated and its sum an under-count."""
+        assert _sum_history_sizes("1GB\n2GB\n", expected_layers=3) is None
+        assert _sum_history_sizes("1GB\n2GB\n0B\n", expected_layers=3) == 3_000_000_000
+
+
+class TestUnparseableHistoryIsNotCached:
+    """F2 (seat review at c6394d49): ``docker history`` can exit 0 with a body
+    the parser rejects. Pre-fix the unparsed lines summed to 0, the clamp
+    ``max(0, view)`` turned that into the VIEW, and the view was CACHED as the
+    image's chain — content-addressed, so forever. Base-relative accounting
+    then subtracted a real base chain from it and clamped the session to 0."""
+
+    @staticmethod
+    def _image(fake_docker: _FakeDocker) -> None:
+        fake_docker.images["img_S1"] = {
+            "id": "img_S1",
+            "size": 6 * GB,
+            "chain": 20 * GB,
+            "depth": 3,
+            "labels": {},
+        }
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "body",
+        [b"N/A\nN/A\nN/A\n", b"", b"6GB\nN/A\n14GB\n"],
+        ids=["all_na", "empty_body", "mixed"],
+    )
+    async def test_unparseable_body_reports_no_chain_and_is_not_cached(
+        self, fake_docker: _FakeDocker, body: bytes
+    ) -> None:
+        self._image(fake_docker)
+        fake_docker.history_output["img_S1"] = body
+        backend = DockerBackend()
+
+        cost = await backend.image_disk_cost("img_S1")
+        assert cost.view == 6 * GB
+        assert cost.chain is None, "an unparsed history must not pass the view off as a chain"
+
+        # Not cached: once the daemon answers properly the chain is measured.
+        del fake_docker.history_output["img_S1"]
+        assert (await backend.image_disk_cost("img_S1")).chain == 20 * GB
+
+    @pytest.mark.asyncio
+    async def test_unparseable_child_history_is_never_accounted_zero(
+        self, fake_docker: _FakeDocker
+    ) -> None:
+        """The reviewer's reproduction: child history rc 0 but 'N/A' lines,
+        base (2 GB view / 6 GB chain) measured. Pre-fix: child "chain" = its
+        3 GB view, 3 GB - 6 GB clamps to unique_bytes 0."""
+        fake_docker.images["base:latest"] = {
+            "id": "base_img",
+            "size": 2 * GB,
+            "chain": 6 * GB,
+            "depth": 2,
+            "labels": {},
+        }
+        fake_docker.parent_image = "img_S1"
+        fake_docker.images["img_S1"] = {
+            "id": "img_S1",
+            "size": 3 * GB,
+            "chain": 9 * GB,
+            "depth": 3,
+            "labels": {"aios.base_image": "base:latest"},
+        }
+        fake_docker.container_labels = {"aios.base_image": "base:latest"}
+        fake_docker.size_rw = 1_000_000
+        fake_docker.commit_view = 3 * GB
+        fake_docker.commit_chain = 9 * GB
+        fake_docker.history_output["committed"] = b"N/A\nN/A\n"
+
+        out = await DockerBackend().snapshot(
+            "cid", "tag:latest", empty_floor_bytes=8192, flatten_if_unique_bytes_over=None
+        )
+
+        assert out.kind == "committed"
+        assert out.unique_bytes > 0, "an unparsed chain must never be accounted as 0 bytes"
+
+
+class TestUninspectableBase:
+    """F1 (seat review at c6394d49): ``_image_disk_cost_or_none`` returns
+    ``None`` for ANY failure to inspect the base — a transient daemon error as
+    much as "No such image". Read as "no base", the base terms become 0, the
+    base's OWN internal dead history (apt-shaped 2 GB view / 6 GB chain) is
+    attributed to the session, and the dead-history trigger flattens on a
+    guess: a private copy of the base's view for nothing."""
+
+    BASE_REF = "base:latest"
+
+    @classmethod
+    def _setup(cls, fake_docker: _FakeDocker, *, parent_view: int, parent_chain: int) -> None:
+        fake_docker.images[cls.BASE_REF] = {
+            "id": "base_img",
+            "size": 2 * GB,
+            "chain": 6 * GB,
+            "depth": 8,
+            "labels": {},
+        }
+        fake_docker.parent_image = "img_S1"
+        fake_docker.images["img_S1"] = {
+            "id": "img_S1",
+            "size": parent_view,
+            "chain": parent_chain,
+            "depth": 16,
+            "labels": {"aios.base_image": cls.BASE_REF},
+        }
+        fake_docker.container_labels = {"aios.base_image": cls.BASE_REF}
+        fake_docker.size_rw = 1_000_000
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("budget", [None, 4 * GIB], ids=["no_budget", "default_budget"])
+    async def test_transient_base_inspect_error_does_not_flatten(
+        self, fake_docker: _FakeDocker, budget: int | None
+    ) -> None:
+        # The session added 10 MB of view and 20 MB of chain: nothing to reclaim.
+        self._setup(
+            fake_docker, parent_view=2 * GB + 10 * 1000**2, parent_chain=6 * GB + 20 * 1000**2
+        )
+        fake_docker.inspect_errors[self.BASE_REF] = (
+            b"Error response from daemon: context deadline exceeded"
+        )
+
+        out = await DockerBackend().snapshot(
+            "cid", "tag:latest", empty_floor_bytes=8192, flatten_if_unique_bytes_over=budget
+        )
+
+        assert out.kind == "committed", "an uninspectable base must not buy a flatten on a guess"
+        assert not fake_docker.pipelines
+        assert out.unique_bytes > 0, "and the session must not be accounted free meanwhile"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("budget", [None, 4 * GIB], ids=["no_budget", "default_budget"])
+    async def test_absent_base_does_not_flatten(
+        self, fake_docker: _FakeDocker, budget: int | None
+    ) -> None:
+        self._setup(
+            fake_docker, parent_view=2 * GB + 10 * 1000**2, parent_chain=6 * GB + 20 * 1000**2
+        )
+        del fake_docker.images[self.BASE_REF]  # inspect -> "No such image"
+
+        out = await DockerBackend().snapshot(
+            "cid", "tag:latest", empty_floor_bytes=8192, flatten_if_unique_bytes_over=budget
+        )
+
+        assert out.kind == "committed"
+        assert not fake_docker.pipelines
+
+    @pytest.mark.asyncio
+    async def test_uninspectable_large_base_view_is_not_charged_to_the_budget(
+        self, fake_docker: _FakeDocker
+    ) -> None:
+        """over_budget on an unknown base sees only what is provable without
+        it — the writable layer. Charging the parent's whole view (base terms
+        0) would push every session on a >budget base over the budget and
+        flatten it on a guess, the same failure through the other trigger."""
+        self._setup(fake_docker, parent_view=5 * GB + 10 * 1000**2, parent_chain=9 * GB)
+        fake_docker.images[self.BASE_REF]["size"] = 5 * GB
+        fake_docker.images[self.BASE_REF]["chain"] = 9 * GB - 20 * 1000**2
+        fake_docker.inspect_errors[self.BASE_REF] = b"Error response from daemon: i/o timeout"
+
+        out = await DockerBackend().snapshot(
+            "cid", "tag:latest", empty_floor_bytes=8192, flatten_if_unique_bytes_over=4 * GIB
+        )
+
+        assert out.kind == "committed"
+        assert not fake_docker.pipelines
+
+    @pytest.mark.asyncio
+    async def test_control_readable_base_still_flattens_real_dead_history(
+        self, fake_docker: _FakeDocker
+    ) -> None:
+        """Same apt-shaped base, readable. The session added 8 GB of chain over
+        0.1 GB of view: 7.9 GB reclaimable exceeds the 2 GB base view it copies
+        (and the 6 GB base chain, so this control is green under either gate
+        and isolates F1 from P1)."""
+        self._setup(fake_docker, parent_view=2 * GB + 100 * 1000**2, parent_chain=14 * GB)
+
+        out = await DockerBackend().snapshot(
+            "cid", "tag:latest", empty_floor_bytes=8192, flatten_if_unique_bytes_over=None
+        )
+
+        assert out.kind == "flattened"
+        assert fake_docker.pipelines
+
+    @pytest.mark.asyncio
+    async def test_depth_ceiling_still_flattens_with_an_uninspectable_base(
+        self, fake_docker: _FakeDocker
+    ) -> None:
+        """The depth ceiling is measured on the parent alone, so it stays the
+        backstop that bounds a chain while its base cannot be inspected."""
+        self._setup(
+            fake_docker, parent_view=2 * GB + 10 * 1000**2, parent_chain=6 * GB + 20 * 1000**2
+        )
+        fake_docker.images["img_S1"]["depth"] = _FLATTEN_DEPTH_CEILING - 1
+        fake_docker.inspect_errors[self.BASE_REF] = b"Error response from daemon: i/o timeout"
+
+        out = await DockerBackend().snapshot(
+            "cid", "tag:latest", empty_floor_bytes=8192, flatten_if_unique_bytes_over=None
+        )
+
+        assert out.kind == "flattened"
 
 
 # ── env-keys scrub scope (the verified container-bricker guard) ──────────────

@@ -16,7 +16,7 @@
   budget-less trigger short of the depth ceiling. That ratio is measured
   base-relative, like the projected-unique figure beside it: a flatten can only
   reclaim history THIS session added, never the shared base's own interior
-  chain, which the flatten would copy forward verbatim. A session that writes
+  chain, which stays resident (shared) whatever the session does. A session that writes
   then deletes clamps its added view to zero, so the ratio's positivity guard is
   on the added chain: a fully dead added chain is the strongest case to flatten,
   not one exempt from the trigger. Measured over the whole
@@ -37,6 +37,19 @@
   notice. The flatten trigger compares view against view when either chain is
   unmeasurable, so it can no longer invent dead history and flatten a session
   into a private copy of its base.
+
+- The dead-history flatten no longer fires on a guess, and its break-even is
+  the base's VIEW. A base that cannot be inspected (a transient daemon error or
+  "No such image") used to read as a 0-byte base, so the base's own dead
+  history was charged to the session and flattened it; now the trigger treats
+  every base-relative figure as unknown — dead-history cannot fire, the budget
+  sees only the writable layer, the depth ceiling still applies. A
+  `docker history` that exits 0 with an unparseable body (`N/A`, an unknown
+  unit, empty, fewer lines than layers) reports `chain = None` and is not
+  cached, instead of caching the view as the chain; IEC units (`MiB`) parse,
+  anything else fails closed. A flatten is `export | import` of the current
+  view: it copies the base's view, never its history, so it now fires when the
+  reclaimable session-added history exceeds the base view, not the base chain.
 
 - `sessions.snapshot_bytes` is now one quantity no matter which writer wrote it
   last. The snapshot commit/flatten path recorded the `.Size` view while the GC

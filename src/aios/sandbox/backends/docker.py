@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import json
+import math
 import platform
 import shutil
 import tempfile
@@ -1076,7 +1077,39 @@ class DockerBackend:
         parent_size = parent_fields[1] if parent_fields else 0
         parent_depth = parent_fields[2] if parent_fields else 1
         parent_cost = await self._image_disk_cost_or_none(parent_image) if parent_fields else None
+        if parent_fields and parent_cost is None:
+            # Inspected a moment ago, unmeasurable now: known only by its view.
+            parent_cost = ImageDiskCost(view=parent_size, chain=None)
         rw = size_rw if size_rw is not None else 0
+        # The BASE must be known before anything base-relative means anything.
+        # ``base_cost is None`` is ambiguous: with no ``base_ref`` it means
+        # "no shared base" (base terms are genuinely 0), but with a
+        # ``base_ref`` it means the base could not be inspected — a transient
+        # daemon error and a verified "No such image" alike
+        # (``_image_disk_cost_or_none`` swallows both). Reading that as a
+        # 0-byte base attributes the base's OWN internal dead history (the
+        # ordinary apt-shaped 2 GB view / 6 GB chain) to the session and buys
+        # a flatten on a guess. So an uninspectable base makes every
+        # base-relative figure UNKNOWN:
+        #
+        # - dead_history cannot fire (it is base-relative by construction);
+        # - over_budget sees only what is provable without the base: the
+        #   writable layer ``rw`` (the session-added chain's lower bound is 0);
+        # - the depth ceiling is unchanged — layer count is measured on the
+        #   parent alone, and it is the backstop that keeps a chain bounded
+        #   for as long as the base stays uninspectable.
+        #
+        # Committing on an unknown base is the cheap, self-correcting choice:
+        # a failed probe is never cached, so the next snapshot re-measures,
+        # while accounting (``base_relative_disk_bytes`` with no base) charges
+        # the image its FULL chain meanwhile — over-count, never free.
+        base_known = not base_ref or base_cost is not None
+        if not base_known:
+            log.warning(
+                "sandbox.snapshot_base_unmeasurable",
+                container_id=sandbox_id[:12],
+                base_ref=base_ref,
+            )
         # UNITS: the chain figures below are only meaningful when EVERY image
         # in the subtraction was measured as a chain. A failed ``docker
         # history`` probe yields only a view (``chain is None``); subtracting a
@@ -1086,12 +1119,14 @@ class DockerBackend:
         # compares like with like: view minus view (the pre-#2349 metric) for
         # BOTH sides. Then added_chain == added_view, so the dead-history ratio
         # cannot fire. That is deliberate: a flatten is the disk-EXPENSIVE
-        # action (it writes a private copy of the base), so it is never taken
-        # on a guess. The budget still sees the view delta, the depth ceiling
-        # still bounds the chain, and only successful probes are cached, so
-        # the next snapshot re-measures.
-        chains_measured = (parent_cost is None or parent_cost.chain is not None) and (
-            base_cost is None or base_cost.chain is not None
+        # action (it writes a private copy of the base's view), so it is never
+        # taken on a guess. The budget still sees the view delta, the depth
+        # ceiling still bounds the chain, and only successful probes are
+        # cached, so the next snapshot re-measures.
+        chains_measured = (
+            base_known
+            and (parent_cost is None or parent_cost.chain is not None)
+            and (base_cost is None or base_cost.chain is not None)
         )
         if chains_measured:
             base_chain = base_cost.best if base_cost is not None else 0
@@ -1100,12 +1135,12 @@ class DockerBackend:
             base_chain = base_size
             parent_chain = parent_size
         # Everything the trigger reasons about is BASE-RELATIVE: a flatten can
-        # only reclaim (or duplicate) dead history in the layers THIS SESSION
-        # added on top of its shared base — never the base's own internal chain,
-        # which the flatten would copy forward verbatim (#2349, company#383 F1).
+        # only reclaim dead history in the layers THIS SESSION added on top of
+        # its shared base — never the base's own internal chain, which stays
+        # resident (shared) whatever this session does (#2349, company#383 F1).
         added_chain = max(0, parent_chain - base_chain)
         added_view = max(0, parent_size - base_size)
-        projected_unique = added_chain + rw
+        projected_unique = (added_chain if base_known else 0) + rw
         over_budget = (
             flatten_if_unique_bytes_over is not None
             and projected_unique > flatten_if_unique_bytes_over
@@ -1125,25 +1160,34 @@ class DockerBackend:
         #
         # The ratio alone is SCALE-FREE — it asks only whether the added chain is
         # PROPORTIONALLY dead, never whether the dead bytes are worth what the
-        # flatten costs. But a flatten produces a STANDALONE image (see
-        # ``_flatten`` and ``_unique_bytes``: a flattened image shares no layers
-        # with the base and is charged its FULL chain). So the flatten un-shares
-        # the base — it writes a private ``base_chain``-byte copy of the base's
-        # content while the shared base stays resident for every other session —
-        # and the only disk it can actually reclaim is the SESSION-ADDED dead
-        # history, ``added_chain - added_view``. Firing on the ratio alone lets a
-        # few MB (or 4 KB) of proportionally-dead history buy a multi-GB private
-        # base copy: net on-disk disk goes UP by ~one base per session (the #2349
-        # pathology with the sign flipped, company#383 F1's headline clause).
-        # The flatten is therefore worthwhile ONLY when the dead history it
-        # reclaims outweighs the base it duplicates; gate the ratio on that
-        # absolute-reclaim floor so the trigger fires only when a flatten reduces
-        # total on-disk bytes.
+        # flatten costs. What a flatten costs follows from what ``_flatten``
+        # does: ``docker export | docker import`` of the container's CURRENT
+        # filesystem view. It writes ONE standalone layer of roughly
+        # ``parent_view + rw`` bytes — the base's VIEW (``base_size``) plus the
+        # session-added view — and never copies the base's history: superseded
+        # bytes inside the base's layers are not in the export. The shared base
+        # keeps its full chain on disk for every other session either way, so
+        # the base's chain is neither copied nor freed by this flatten. What the
+        # flatten frees is the session-added chain (once the tag moves off it).
+        # Against a commit (which keeps ``added_chain`` and adds ``rw``):
+        #
+        #     flatten - commit = (base_view + added_view) - added_chain
+        #                      = base_view - reclaimable
+        #
+        # so the flatten reduces total on-disk bytes exactly when the
+        # session-added dead history it reclaims exceeds the base VIEW it
+        # duplicates. Gating on the base CHAIN instead would only err toward
+        # missed reclaim: an apt-shaped base (small view, long chain) would
+        # block a flatten that frees GBs. Firing on the ratio alone lets a few
+        # MB (or 4 KB) of proportionally-dead history buy a multi-GB private
+        # copy of the base's view: net disk goes UP by ~one base view per
+        # session (the #2349 pathology with the sign flipped, company#383 F1).
         reclaimable = added_chain - added_view
         dead_history = (
-            added_chain > 0
+            chains_measured
+            and added_chain > 0
             and added_chain > _CHAIN_DEAD_HISTORY_RATIO * added_view
-            and reclaimable > base_chain
+            and reclaimable > base_size
         )
         retry_attempt = self._snapshot_timeout_attempts.get(sandbox_id, 0)
         snapshot_timeout_s = _snapshot_timeout_s(
@@ -1884,7 +1928,7 @@ class DockerBackend:
         fields = await self._inspect_image_fields(image)
         if fields is None:
             raise SandboxBackendError(f"image not found: {image}")
-        image_id, size, _depth, _labels = fields
+        image_id, size, depth, _labels = fields
         cached = self._chain_bytes.get(image_id)
         if cached is not None:
             return ImageDiskCost(view=size, chain=cached)
@@ -1898,9 +1942,25 @@ class DockerBackend:
                 stderr=stderr_bytes.decode("utf-8", errors="replace").strip(),
             )
             return ImageDiskCost(view=size, chain=None)
-        total = _sum_history_sizes(stdout_bytes.decode("utf-8", errors="replace"))
-        # The chain can never cost LESS than the view it presents; a parse that
-        # says otherwise (an unexpected history format) is not trusted downward.
+        total = _sum_history_sizes(
+            stdout_bytes.decode("utf-8", errors="replace"), expected_layers=depth
+        )
+        if total is None:
+            # rc 0 but the body did not parse as one size per layer (``N/A``,
+            # an unknown unit, an empty body, fewer entries than layers). That
+            # is NOT a measurement: clamping 0 up to the view would cache the
+            # VIEW as a "chain" forever (ids are content-addressed) and feed
+            # mixed units to every base-relative subtraction. Report the view
+            # only, and do not cache, so the next call re-probes.
+            log.warning(
+                "sandbox.image_history_unparseable",
+                image_id=image_id[:19],
+                stdout=stdout_bytes[:200].decode("utf-8", errors="replace"),
+            )
+            return ImageDiskCost(view=size, chain=None)
+        # The chain can never cost LESS than the view it presents; a fully
+        # parsed sum below it (rounding in the 3-significant-figure rendering)
+        # is not trusted downward.
         chain = max(total, size)
         if len(self._chain_bytes) >= _CHAIN_BYTES_CACHE_MAX:
             self._chain_bytes.clear()
@@ -1972,24 +2032,37 @@ def _parse_json_labels(raw: str) -> dict[str, str]:
     return {str(k): str(v) for k, v in parsed.items()}
 
 
-def _sum_history_sizes(raw: str) -> int:
-    """Sum a ``docker history --format '{{.Size}}'`` payload.
+def _sum_history_sizes(raw: str, *, expected_layers: int = 1) -> int | None:
+    """Sum a ``docker history --format '{{.Size}}'`` payload, or ``None``.
 
     Docker renders sizes human-readably (``1.13GB``, ``0B``, ``12.4kB``) —
     ``{{.Size}}`` is the formatted field, not the raw byte count, on both the
-    overlay2 and containerd stores. Parse the unit rather than assuming digits,
-    and ignore any line that does not parse (a partially readable history still
-    yields a floor, and the caller clamps the result up to ``.Size``).
+    overlay2 and containerd stores. Parse the unit rather than assuming digits.
+
+    FAIL CLOSED: the sum is a measurement only if EVERY non-blank line parses
+    and there is at least one line per filesystem layer (``expected_layers`` =
+    ``len(.RootFS.Layers)``; history also lists 0-byte config-only steps, so
+    it may have MORE lines, never fewer for a complete answer). A skipped line
+    is an unknown number of bytes, so a partial sum is an UNDER-count that,
+    clamped up to the view, would masquerade as a measured chain. Returns
+    ``None`` instead, and the caller reports the chain as unmeasured.
     """
+    lines = [line.strip() for line in raw.splitlines() if line.strip()]
+    if not lines or len(lines) < max(1, expected_layers):
+        return None
     total = 0.0
-    for line in raw.splitlines():
-        parsed = _parse_docker_size(line.strip())
-        if parsed is not None:
-            total += parsed
+    for line in lines:
+        parsed = _parse_docker_size(line)
+        if parsed is None:
+            return None
+        total += parsed
     return int(total)
 
 
-# Docker's size renderer is decimal SI (units.HumanSize): 1 kB == 1000 B.
+# Docker's history renderer is decimal SI (``units.HumanSizeWithPrecision``:
+# B, kB, MB, GB, ...; 1 kB == 1000 B). The IEC binary units are accepted too
+# (``units.BytesSize`` renders KiB/MiB/GiB elsewhere in the CLI) so a renderer
+# change cannot silently read 1 GiB as 1 GB — anything else is rejected.
 _SIZE_UNITS = {
     "b": 1,
     "kb": 1000,
@@ -1997,11 +2070,20 @@ _SIZE_UNITS = {
     "gb": 1000**3,
     "tb": 1000**4,
     "pb": 1000**5,
+    "eb": 1000**6,
+    "kib": 1024,
+    "mib": 1024**2,
+    "gib": 1024**3,
+    "tib": 1024**4,
+    "pib": 1024**5,
+    "eib": 1024**6,
 }
 
 
 def _parse_docker_size(value: str) -> float | None:
-    """Parse one human-readable Docker size (``0B``, ``1.13GB``) into bytes."""
+    """Parse one human-readable Docker size (``0B``, ``1.13GB``, ``1e+03kB``)
+    into bytes; ``None`` for anything unrecognised (``N/A``, a bare unit, an
+    unknown unit, a negative or non-finite number)."""
     if not value:
         return None
     digits = value.rstrip()
@@ -2016,6 +2098,8 @@ def _parse_docker_size(value: str) -> float | None:
     try:
         magnitude = float(number)
     except ValueError:
+        return None
+    if not math.isfinite(magnitude) or magnitude < 0:
         return None
     multiplier = _SIZE_UNITS.get(unit or "b")
     if multiplier is None:
