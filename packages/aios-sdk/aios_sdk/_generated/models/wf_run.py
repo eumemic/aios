@@ -55,8 +55,9 @@ class WfRun:
             account_id (str):
             environment_id (str):
             principal (WfRunPrincipal): Who the run acts for: `operator` (launched through the operator API, or a sub-run of
-                an operator run) or `session` (launched by an agent session, directly or through its runs). Fixed at creation;
-                deleting the launching session doesn't change it.
+                an operator run), `session` (launched by an agent session, directly or through its runs) or `agent` (an operator
+                run's sub-run invoked with `as_agent`, or a sub-run of one: it acts with that agent's authority, so operator-
+                only capabilities are refused). Fixed at creation; deleting the launching session doesn't change it.
             visibility (WfRunVisibility): Who may read the run through agent tools: `account` (any session in the account)
                 or `session` (only its launching session). A workflow-as-model run is `session`, and so is a run that declares a
                 replay tool (`sample_requests`, `get_request`); it has no launching session, so no agent can read it. Sub-runs
@@ -75,8 +76,8 @@ class WfRun:
             parent_run_id (None | str | Unset):
             launcher_session_id (None | str | Unset):
             as_agent (AsAgent | None | Unset): Set when an operator run invoked this run with `as_agent`: the agent version
-                whose surface it was clamped to, within the parent run's. Only the surface changes; the model and vaults still
-                come from the parent run.
+                whose surface it was clamped to, within the parent run's. The model and vaults still come from the parent run.
+                The run and its sub-runs act for that agent (principal `agent`), so operator-only capabilities are refused.
             request_ref (None | RequestRef | Unset): The request this run works on, when it was created with one: a
                 workflow-as-model turn's own request, or one handed to a sub-run. The run can resolve this request and no other.
                 Such a run's `input` is null: the script's input (the request plus this ref) is the `run_started` event in its

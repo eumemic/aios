@@ -501,7 +501,7 @@ async def test_an_as_agent_sub_run_of_a_replay_run_drops_the_replay_tools(
     assert sub is not None
     assert [t.type for t in sub.tools] == ["read"]
     assert (sub.principal, sub.visibility, sub.launcher_session_id) == (
-        "operator",
+        "agent",
         "session",
         None,
     )

@@ -591,7 +591,7 @@ async def test_as_agent_reroots_an_operator_subrun_at_the_agent_surface(
     sub = await _run(pool, cs.payload["child_run_id"])
     assert sub.as_agent == AsAgent(agent_id=agent_id, version=1)
     assert [t.type for t in surface_of(sub).tools] == ["read"]
-    assert sub.principal == "operator"
+    assert sub.principal == "agent"  # it acts for the agent, not the operator (#2476)
     async with pool.acquire() as conn:
         facts = await wf_queries.sub_run_facts(conn, parent_run, account_id="acc_wf", max_nodes=10)
     assert [n["as_agent"] for n in facts["nodes"]] == [{"agent_id": agent_id, "version": 1}]
@@ -641,12 +641,101 @@ async def test_as_agent_is_refused_to_a_run_that_acts_for_a_session(
 
     events = await _list(pool, parent_run)
     refusals = [e.payload["error"]["kind"] for e in events if e.type == "call_result"]
-    assert refusals == ["invoke_workflow_refused"]
+    assert refusals == ["invoke_workflow_forbidden"]
     async with pool.acquire() as conn:
         sub_runs = await conn.fetchval(
             "SELECT count(*) FROM wf_runs WHERE parent_run_id = $1", parent_run
         )
     assert sub_runs == 0
+
+
+async def test_a_full_run_cap_is_refused_as_capacity_not_authority(
+    wf_runtime: asyncpg.Pool[Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A run cap is capacity, ``invoke_workflow_refused``, which frees up as runs
+    finish; an authority refusal is ``invoke_workflow_forbidden``, which never does."""
+    from aios.config import get_settings
+
+    pool = wf_runtime
+    child_wf = await _insert_workflow(pool, "child", "async def main(input):\n    return 1\n")
+    parent_wf = await _insert_workflow(pool, "parent", _INVOKE_PARENT)
+    parent_run = await _make_run(pool, parent_wf, input={"wf": child_wf})
+    full = get_settings().model_copy(update={"workflow_runs_per_account_max": 1})
+    monkeypatch.setattr("aios.workflows.service.get_settings", lambda: full)
+
+    await run_workflow_step(parent_run)
+
+    events = await _list(pool, parent_run)
+    [refused] = [e.payload["error"] for e in events if e.type == "call_result"]
+    assert refused["kind"] == "invoke_workflow_refused"
+    assert "outstanding-run cap" in refused["message"]
+
+
+# An operator root re-roots an arm at an agent version; the arm runs input['script'].
+_ROOT_OF_ARM = (
+    "async def main(input):\n"
+    "    return await invoke_workflow(input['arm'], input, as_agent=input['as_agent'])\n"
+)
+
+
+async def _arm(pool: asyncpg.Pool[Any], arm_script: str, **input: Any) -> str:
+    """Launch an operator root that invokes an ``as_agent`` arm; return the arm's id."""
+    agent_id = await _agent_with_tools(pool, "candidate-agent", [])
+    arm_wf = await _insert_workflow(pool, "arm", arm_script)
+    root_wf = await _insert_workflow(pool, "root", _ROOT_OF_ARM)
+    root = await _make_run(
+        pool,
+        root_wf,
+        input={"arm": arm_wf, "as_agent": {"agent_id": agent_id, "version": 1}, **input},
+    )
+    await run_workflow_step(root)
+    async with pool.acquire() as conn:
+        arm_id: str = await conn.fetchval("SELECT id FROM wf_runs WHERE parent_run_id = $1", root)
+    return arm_id
+
+
+async def test_an_as_agent_arm_cannot_re_root_its_own_sub_runs(
+    wf_runtime: asyncpg.Pool[Any],
+) -> None:
+    """#2476: code an agent wrote runs as that agent, so it can't pick another agent's
+    authority with ``as_agent`` either."""
+    pool = wf_runtime
+    arm = await _arm(pool, _INVOKE_AS_AGENT, wf=await _broad_child(pool))
+    assert (await _run(pool, arm)).principal == "agent"
+
+    await run_workflow_step(arm)
+
+    events = await _list(pool, arm)
+    assert [e.payload["error"]["kind"] for e in events if e.type == "call_result"] == [
+        "invoke_workflow_forbidden"
+    ]
+
+
+async def test_an_as_agent_arms_sub_runs_act_for_the_agent_too(
+    wf_runtime: asyncpg.Pool[Any],
+) -> None:
+    """#2476: the whole subtree under an ``as_agent`` arm acts for the agent, so a
+    sub-run two hops down still can't route a child's inference through a workflow."""
+    pool = wf_runtime
+    leaf_wf = await _insert_workflow(pool, "leaf-binds-wf-model", _BINDS_WORKFLOW_MODEL)
+    arm = await _arm(pool, _INVOKE_PARENT, wf=leaf_wf)
+    await run_workflow_step(arm)
+    async with pool.acquire() as conn:
+        leaf_id = await conn.fetchval("SELECT id FROM wf_runs WHERE parent_run_id = $1", arm)
+    leaf = await _run(pool, leaf_id)
+    assert leaf.principal == "agent"
+    assert leaf.as_agent is None  # inherited from the arm, not re-rooted
+
+    await run_workflow_step(leaf_id)
+
+    async with pool.acquire() as conn:
+        leaf_events = await wf_queries.list_run_events(conn, leaf_id)
+        children = await conn.fetchval(
+            "SELECT count(*) FROM sessions WHERE parent_run_id = $1", leaf_id
+        )
+    result = next(e for e in leaf_events if e.type == "call_result")
+    assert result.payload["error"]["kind"] == "workflow_model_forbidden"
+    assert children == 0
 
 
 async def test_operator_originated_invoke_workflow_subrun_may_bind_workflow_model(

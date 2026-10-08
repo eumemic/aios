@@ -738,6 +738,8 @@ _REQUEST_COPY_MARKS = {
     # stood in for by the run itself.
     "replay_root": "visibility = 'session'",
     "replay_sub": "visibility = 'session', parent_run_id = id",
+    # An eval arm (``as_agent``) and its sub-runs act for an agent (#2476).
+    "replay_arm": "visibility = 'session', principal = 'agent', parent_run_id = id",
     # A workflow-as-model turn's sub-run is ``session``-visible too, but acts for a
     # session: not a replay tree, and with no ref it keeps the default windows.
     "session_sub": ("visibility = 'session', principal = 'session', parent_run_id = id"),
@@ -746,7 +748,7 @@ _REQUEST_COPY_MARKS = {
 
 # Kinds that keep the default windows, and kinds whose ``input`` the prune clears.
 _DEFAULT_WINDOW = {"session_sub", "plain"}
-_INPUT_CLEARED = {"model_dispatch", "replay_sub"}
+_INPUT_CLEARED = {"model_dispatch", "replay_sub", "replay_arm"}
 
 
 async def _mark(conn: asyncpg.Connection[Any], run_id: str, kind: str) -> None:

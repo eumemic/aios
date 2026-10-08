@@ -37,7 +37,7 @@ from aios.models.agents import (
 
 WorkspaceMode = Literal["shared", "fresh"]
 
-RunPrincipal = Literal["operator", "session"]  # see ``WfRun.principal``
+RunPrincipal = Literal["operator", "session", "agent"]  # see ``WfRun.principal``
 RunVisibility = Literal["account", "session"]  # see ``WfRun.visibility``
 
 
@@ -251,17 +251,20 @@ class WfRun(BaseModel):
     principal: RunPrincipal = Field(
         description=(
             "Who the run acts for: `operator` (launched through the operator API, or a "
-            "sub-run of an operator run) or `session` (launched by an agent session, "
-            "directly or through its runs). Fixed at creation; deleting the launching "
-            "session doesn't change it."
+            "sub-run of an operator run), `session` (launched by an agent session, "
+            "directly or through its runs) or `agent` (an operator run's sub-run invoked "
+            "with `as_agent`, or a sub-run of one: it acts with that agent's authority, "
+            "so operator-only capabilities are refused). Fixed at creation; deleting the "
+            "launching session doesn't change it."
         )
     )
     as_agent: AsAgent | None = Field(
         default=None,
         description=(
             "Set when an operator run invoked this run with `as_agent`: the agent "
-            "version whose surface it was clamped to, within the parent run's. Only the "
-            "surface changes; the model and vaults still come from the parent run."
+            "version whose surface it was clamped to, within the parent run's. The model "
+            "and vaults still come from the parent run. The run and its sub-runs act for "
+            "that agent (principal `agent`), so operator-only capabilities are refused."
         ),
     )
     request_ref: RequestRef | None = Field(
@@ -412,7 +415,7 @@ WORKFLOW_SCRIPT_CONTRACT = """Workflow script contract:
   `main`.
 - Injected capability API, available without imports:
   - `agent(input, *, agent_id=None, output_schema=None, model=None, label=None)`: invoke a generic or named agent and await its result.
-  - `invoke_workflow(workflow_id, input, *, version=None, output_schema=None, label=None, as_agent=None, request_ref=None, budget_usd=None)`: invoke another workflow as a sub-run and await its result (the run dual of `agent`). `version` pins a registered version; omitted, the version current at launch runs. The sub-run runs under this run's surface intersected with the target's, and binds this run's vaults; a failed or gone sub-run raises like a failed `agent`. `as_agent={"agent_id": ..., "version": N}` also intersects the sub-run's surface with that agent version's; only a run an operator launched may pass it. `request_ref` hands the sub-run a request this run can resolve (the one it was created with, or one its `sample_requests` call returned), which the sub-run may then resolve itself; with `input=None` it starts with that request as a workflow-as-model run would, with an `input` it starts with that input. `budget_usd` gives the sub-run a ceiling of its own, clamped to what this run may still spend; without one it is held to this run's.
+  - `invoke_workflow(workflow_id, input, *, version=None, output_schema=None, label=None, as_agent=None, request_ref=None, budget_usd=None)`: invoke another workflow as a sub-run and await its result (the run dual of `agent`). `version` pins a registered version; omitted, the version current at launch runs. The sub-run runs under this run's surface intersected with the target's, and binds this run's vaults; a failed or gone sub-run raises like a failed `agent`. `as_agent={"agent_id": ..., "version": N}` also intersects the sub-run's surface with that agent version's, and the sub-run and its own sub-runs then act for that agent, so operator-only capabilities (the replay tools, `workflow:` child models, `as_agent`) are refused there; only a run that acts for the operator may pass it. `request_ref` hands the sub-run a request this run can resolve (the one it was created with, or one its `sample_requests` call returned), which the sub-run may then resolve itself; with `input=None` it starts with that request as a workflow-as-model run would, with an `input` it starts with that input. `budget_usd` gives the sub-run a ceiling of its own, clamped to what this run may still spend; without one it is held to this run's.
   - `tool(name, input)`: invoke a declared tool; tool errors are returned, not raised. An operator run that declares the replay tools can read an agent's past requests: `tool("sample_requests", {"agent_id", "start", "end", "n", "seed", "cluster_cap"})` returns `{"items": [...]}`, a seeded sample of the agent's answered requests in `[start, end)` (ISO-8601 times), each with a `request_ref`, its session, time, model, `response_event_id` and whether it is `missing`. `tool("get_request", {"request_ref", "model"})` rebuilds one as `{messages, tools, params, fidelity}`. A ref a sample returned can be passed to `call_llm(request_ref=)`, `invoke_workflow(request_ref=)` and `get_request`.
   - `call_llm(request)`: run one raw inference turn and await the assistant turn. `request` carries `model` (omit to use the run's default child model; a `workflow:` target is rejected), `messages` (required), optional `tools` (schemas OFFERED — the model may request a call, but call_llm never runs it), and optional `params` (provider knobs). The result is `{"content", "tool_calls", "finish_reason", "usage", "cost", "message"}`, or `{"error": ...}` — a model error is returned, not raised. Its cost is metered against this run's `budget_usd` ceiling, so a budget-exhausted run refuses further `call_llm`. Use it to route/judge/fact-check around inference; use `agent(...)` when you want the tool calls executed. `call_llm(request_ref=ref, model=None)` sends a request this run can resolve instead (the one it was created with, or one its `sample_requests` call returned), rendered for `model`; with the model it was captured for it keeps that request's provider params; a request captured for a `workflow:` binding keeps them for any model, with an endpoint admitted only from the allowlist; otherwise another model gets none. Any other ref resolves as an error value.
   - `gate()`: suspend until an external resume delivers a value.

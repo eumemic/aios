@@ -234,12 +234,16 @@ def invoke_workflow(
     keyed on the request id (#1126). An ``output_schema`` constrains the sub-run's
     terminal output; a mismatch fails the sub-run loud (``output_schema_violation``)
     and surfaces here as an :class:`AgentError`. A sub-run that errors or goes gone
-    raises :class:`AgentError` at the ``await``. ``label`` is an observability
-    annotation and does not enter the call key. ``version`` pins the sub-run to that
+    raises :class:`AgentError` at the ``await``. A launch this run may not make (an
+    ungranted ref, ``as_agent`` without operator authority, vaults it doesn't hold)
+    raises kind ``invoke_workflow_forbidden``; one the account can't take right now (the
+    run cap) or the chain can't (the depth cap) raises ``invoke_workflow_refused``.
+    ``label`` is an observability annotation and does not enter the call key. ``version`` pins the sub-run to that
     registered version of the workflow; omitted, it runs the version current at
     launch. ``as_agent={"agent_id": ..., "version": N}`` (operator runs only) clamps the
     sub-run to that agent version's surface as well, so an eval arm runs with the
-    authority that agent would give it.
+    authority that agent would give it; the sub-run and its own sub-runs act for that
+    agent, so operator-only capabilities (including ``as_agent``) are refused there.
 
     ``request_ref`` hands the sub-run a request this run can resolve: the one it was
     created with, or one its own ``sample_requests`` call returned. The sub-run may

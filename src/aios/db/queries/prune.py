@@ -59,12 +59,13 @@ import asyncpg
 
 def _replay_tree(alias: str) -> str:
     """A run in a replay tree (#2475): one that declares a replay tool, or a sub-run of
-    one. Exactly the runs that are operator-principal yet ``session``-visible: the
-    visibility trigger (0191) stamps a replay run ``session`` and its sub-runs inherit
-    it, while every other ``session`` run (a workflow-as-model turn, its sub-runs) acts
-    for a session. Any of them may hold requests it read, in its journal or, for a
-    sub-run handed one as plain input, on its row."""
-    return f"({alias}.principal = 'operator' AND {alias}.visibility = 'session')"
+    one. Exactly the runs that don't act for a session (``operator``, or ``agent`` for
+    an eval arm and its sub-runs, #2476) yet are ``session``-visible: the visibility
+    trigger (0191) stamps a replay run ``session`` and its sub-runs inherit it, while
+    every other ``session`` run (a workflow-as-model turn, its sub-runs) acts for a
+    session. Any of them may hold requests it read, in its journal or, for a sub-run
+    handed one as plain input, on its row."""
+    return f"({alias}.principal <> 'session' AND {alias}.visibility = 'session')"
 
 
 def _request_copy(alias: str) -> str:

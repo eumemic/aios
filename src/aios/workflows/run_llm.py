@@ -240,7 +240,9 @@ async def invoke_call_llm(*, run: WfRun, spec: dict[str, Any]) -> tuple[dict[str
         tools = rebuilt.request["tools"]
         fidelity = rebuilt.fidelity
         params, launcher_extra = run_replay.captured_params_for(rebuilt, model)
-        # An operator run (an eval arm) gets its own prompt-cache key.
+        # A run that doesn't act for the session (an operator run, or an eval arm acting
+        # for an agent) gets its own prompt-cache key, so eval traffic never shares the
+        # production session's.
         session_id = ref.session_id if run.principal == "session" else run.id
     else:
         messages = spec.get("messages")

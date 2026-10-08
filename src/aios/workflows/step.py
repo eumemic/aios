@@ -1624,7 +1624,7 @@ async def _open_invoke_workflow_capability(
     if request_ref_spec is not None:
         if not await run_replay.request_ref_granted(conn, run, request_ref_spec):
             return await _reject(
-                "invoke_workflow_refused",
+                "invoke_workflow_forbidden",
                 "invoke_workflow() can hand on only a request this run was given or sampled",
             )
         request_ref = RequestRef.model_validate(request_ref_spec)
@@ -1694,7 +1694,11 @@ async def _open_invoke_workflow_capability(
         return await _reject("workflow_not_found", f"workflow {workflow_id!r} not found")
     except ConflictError as exc:
         return await _reject("bad_invoke_workflow", str(exc))
-    except (WorkflowRunDepthExceededError, RateLimitedError, ForbiddenError) as exc:
+    except ForbiddenError as exc:
+        # Authority: retrying the same call can never succeed.
+        return await _reject("invoke_workflow_forbidden", str(exc))
+    except (WorkflowRunDepthExceededError, RateLimitedError) as exc:
+        # Capacity: the run cap frees up as runs finish; the depth cap doesn't.
         return await _reject("invoke_workflow_refused", str(exc))
 
     cap_payload: dict[str, Any] = {

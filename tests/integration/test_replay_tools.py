@@ -365,21 +365,32 @@ async def test_a_sampled_request_is_paired_with_its_own_answer(
 async def test_the_sample_skips_eval_traffic_and_reports_missing_blobs(
     pool: asyncpg.Pool[Any],
 ) -> None:
-    """A session a replay run spawned is eval traffic, not production. A request whose
-    blob is gone is reported ``missing`` without a rebuild."""
+    """A session a replay run spawned is eval traffic, not production, and so is one an
+    eval arm acting for the agent spawned (#2476). A request whose blob is gone is
+    reported ``missing`` without a rebuild."""
     await _blobs(pool, "sha-system", "sha-tools")  # no params blob
     agent = await _agent(pool)
     prod = await _session(pool, agent)
     eval_child = await _session(pool, agent)
+    arm_child = await _session(pool, agent)
     run = await _replay_run(pool)
+    arm = await _replay_run(pool)
     async with pool.acquire() as conn:
+        # Stand-in for an as_agent arm under the replay run (stamped by the triggers).
         await conn.execute(
-            "UPDATE sessions SET parent_run_id = $1, agent_version = 1 WHERE id = $2",
+            "UPDATE wf_runs SET principal = 'agent', parent_run_id = $1 WHERE id = $2",
             run.id,
-            eval_child,
+            arm.id,
         )
+        for parent, child in ((run.id, eval_child), (arm.id, arm_child)):
+            await conn.execute(
+                "UPDATE sessions SET parent_run_id = $1, agent_version = 1 WHERE id = $2",
+                parent,
+                child,
+            )
     prod_span, _ = await _request(pool, prod, agent, _DAY)
     await _request(pool, eval_child, agent, _DAY)
+    await _request(pool, arm_child, agent, _DAY)
 
     result = await _sample(run, agent_id=agent)
 
