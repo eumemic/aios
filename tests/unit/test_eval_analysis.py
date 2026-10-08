@@ -330,3 +330,106 @@ def test_outputs_are_finite() -> None:
     out = _analyze([_record(i) for i in range(40)])
     text = json.dumps(out)
     assert "Infinity" not in text and "NaN" not in text
+
+
+# ── the monitor's alarm ───────────────────────────────────────────────────────
+
+_WEEKLY = 0.05 / 52
+
+
+def _analyze_bar() -> dict[str, Any]:
+    """The bar ``_analyze`` uses."""
+    bar = copy.deepcopy(BAR)
+    bar["limits"].update(degenerate=0.1, tool_calls=0.1)
+    return bar
+
+
+def _alarms(records: list[dict[str, Any]]) -> list[str]:
+    out = _analyze(records, mode="monitor", alpha=_WEEKLY)
+    return list(NS["alarms"](out, _analyze_bar()))
+
+
+def test_an_unchanged_candidate_raises_no_alarm() -> None:
+    assert _alarms([_record(i) for i in range(40)]) == []
+
+
+def test_failing_to_re_prove_is_not_an_alarm() -> None:
+    """W = 0.45 with a wide bound: the gate's FAIL, but nothing shown worse."""
+    outcomes = ["loss"] * 20 + ["tie"] * 4 + ["win"] * 16
+    records = [_record(i, cand=o) for i, o in enumerate(outcomes)]
+    assert _analyze(records)["verdict"] == "FAIL"
+    assert _alarms(records) == []
+
+
+def test_a_candidate_shown_worse_alarms() -> None:
+    assert _alarms([_record(i, cand="loss") for i in range(40)]) == ["win_rate"]
+
+
+def test_an_invalid_judge_cannot_raise_the_win_rate_alarm() -> None:
+    records = [_record(i, cand="loss", neg="win") for i in range(40)]
+    assert _alarms(records) == []
+
+
+def test_a_limit_shown_worse_alarms_whatever_the_judge() -> None:
+    records = [
+        _record(i, cand="loss", neg="win", cand_arm=_arm(degenerate=True)) for i in range(40)
+    ]
+    assert _alarms(records) == ["degenerate"]
+
+
+def test_too_few_clusters_never_alarm() -> None:
+    assert _alarms([_record(i, cand="loss") for i in range(10)]) == []
+
+
+def test_the_monitor_main_reports_its_alarms() -> None:
+    records = [_record(i, cand="loss") for i in range(40)]
+    bar = _analyze_bar()
+    bar["bootstrap_rounds"] = 200
+    inputs = {
+        "mode": "monitor",
+        "bar": bar,
+        "alpha": _WEEKLY,
+        "records": records,
+        "exclusions": {},
+        "considered": 40,
+        "flags": [],
+        "seed": "s",
+    }
+    out = _monitor_main(inputs)
+    assert out["alarm"] is True
+    assert out["alarms"] == ["win_rate"]
+    # The week's false-alarm rate is split across the alarm tests (Bonferroni).
+    assert out["stats"]["alarm_alpha"] == pytest.approx(_WEEKLY / 4)
+    assert list(NS["ALARM_TESTS"]) == ["win_rate", "degenerate", "tool_calls", "cost"]
+    assert 0.0 < out["stats"]["detectable_w"] < 0.5 - bar["delta"]
+
+
+def _monitor_main(inputs: dict[str, Any]) -> dict[str, Any]:
+    coroutine = NS["main"](inputs)
+    with pytest.raises(StopIteration) as done:
+        coroutine.send(None)
+    return dict(done.value.value)
+
+
+def test_the_monitor_tests_the_judge_at_the_bars_level_not_the_alarms() -> None:
+    """A control shown worse at the bar's level (W_neg = 0.35 over 40 clusters) is a
+    valid judge. At the alarm's level, about 1e-4, the same control would read as
+    not shown worse, and the week would be INVALID and deaf to a regression."""
+    outcomes = ["loss"] * 26 + ["win"] * 14
+    records = [_record(i, neg=o) for i, o in enumerate(outcomes)]
+    out = _analyze(records, mode="monitor", alpha=_WEEKLY / 4)
+    assert out["stats"]["control"]["w"]["upper"] < 0.5
+    assert out["reasons"]["invalid"] == []
+    strict = NS["cluster_mean"](
+        [NS["SCORE"][o] for o in outcomes], [r["cluster"] for r in records], _WEEKLY / 4
+    )
+    assert strict["upper"] >= 0.5
+
+
+def test_latency_is_not_a_monitor_alarm() -> None:
+    """A percentile bootstrap can't bound a tail at the alarm's level, so a slower
+    candidate is reported, not alarmed on."""
+    records = [_record(i, cand_arm=_arm(duration_ms=50_000)) for i in range(40)]
+    out = _analyze(records, mode="monitor", alpha=_WEEKLY / 4)
+    assert out["stats"]["latency_p95"]["lower"] > 2.0
+    assert NS["alarms"](out, _analyze_bar()) == []

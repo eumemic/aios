@@ -1,0 +1,52 @@
+{
+  "delta": 0.1,
+  "alpha": 0.05,
+  "sample_size": 500,
+  "cluster_cap": 2,
+  "min_clusters": 30,
+  "max_exclusion_rate": 0.2,
+  "wave_size": 6,
+  "max_attempts": 3,
+  "bootstrap_rounds": 1000,
+  "limits": {
+    "degenerate": 0.05,
+    "tool_calls": 0.05,
+    "cost": 1.0,
+    "latency": 1.0
+  },
+  "control": {
+    "min_clusters": 30,
+    "tie_ceiling": 0.5
+  },
+  "judge": {
+    "model": "openrouter/openai/gpt-6-luna",
+    "params": {},
+    "tail": 8,
+    "max_chars": 4000
+  },
+  "budget": {
+    "arm_usd": 0.5,
+    "candidate_margin": 2.0,
+    "judge_usd": 0.5
+  },
+  "planning": {
+    "w": 0.5,
+    "score_var": 0.25,
+    "icc": 0.3,
+    "w_neg": 0.3,
+    "control_var": 0.25,
+    "control_eligible": 0.6,
+    "degenerate_rate": 0.005,
+    "tool_call_rate": 0.005,
+    "cost_ratio": 1.0,
+    "cost_cv": 1.0,
+    "latency_ratio": 1.0,
+    "latency_cv": 1.0,
+    "item_cost_usd": 1.0,
+    "candidate_fanout": 1
+  },
+  "monitor": {
+    "n": 200,
+    "alpha_year": 0.05
+  }
+}

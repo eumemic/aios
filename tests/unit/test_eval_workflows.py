@@ -6,6 +6,8 @@ arm's output; the drift test holds it to the binding boundary's
 
 from __future__ import annotations
 
+import json
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -37,7 +39,12 @@ def _templates() -> list[tuple[str, str, list[dict[str, str]]]]:
         ("item", eval_item.build(r0=_REF, judge=_REF), eval_item.TOOLS),
         (
             "gate",
-            paired_eval.build(bar={"x": 1}, item=_REF, analysis=_REF),
+            paired_eval.build(mode="gate", bar={"x": 1}, item=_REF, analysis=_REF),
+            paired_eval.TOOLS,
+        ),
+        (
+            "monitor",
+            paired_eval.build(mode="monitor", bar={"x": 1}, item=_REF, analysis=_REF),
             paired_eval.TOOLS,
         ),
     ]
@@ -52,7 +59,9 @@ def test_every_template_validates_against_its_declared_tools(
 
 def test_a_template_missing_its_tools_is_rejected() -> None:
     with pytest.raises(ValidationError, match="sample_requests"):
-        validate_workflow_script(paired_eval.build(bar={}, item=_REF, analysis=_REF), [])
+        validate_workflow_script(
+            paired_eval.build(mode="gate", bar={}, item=_REF, analysis=_REF), []
+        )
 
 
 def test_render_fills_every_token_and_only_known_ones() -> None:
@@ -65,8 +74,39 @@ def test_render_fills_every_token_and_only_known_ones() -> None:
 
 def test_a_rendered_value_reads_back_unchanged() -> None:
     bar = {"delta": 0.1, "judge": {"model": "m", "params": {"temperature": 0}}, "flag": True}
-    gate = load(paired_eval.build(bar=bar, item=_REF, analysis=_REF))
+    gate = load(paired_eval.build(mode="gate", bar=bar, item=_REF, analysis=_REF))
     assert gate["BAR"] == bar
+
+
+def test_the_gate_template_has_two_modes_only() -> None:
+    with pytest.raises(ValueError, match="mode"):
+        paired_eval.build(mode="weekly", bar={}, item=_REF, analysis=_REF)
+
+
+# ── the monitor's week ────────────────────────────────────────────────────────
+
+MONITOR = load(paired_eval.build(mode="monitor", bar={}, item=_REF, analysis=_REF))
+
+
+@pytest.mark.parametrize("day", range(0, 800, 7))
+def test_the_window_is_the_utc_iso_week_before_the_fire(day: int) -> None:
+    for hour in (0, 13, 23):
+        fired = datetime(2025, 12, 1, tzinfo=UTC) + timedelta(days=day + day % 5, hours=hour)
+        monday = (fired - timedelta(days=fired.weekday())).replace(hour=0)
+        window = MONITOR["monitor_window"](fired.isoformat())
+        assert window == {
+            "start": (monday - timedelta(days=7)).isoformat(),
+            "end": monday.isoformat(),
+        }
+
+
+def test_every_fire_in_a_week_picks_the_same_window() -> None:
+    windows = {
+        json.dumps(MONITOR["monitor_window"](f"2026-10-{d:02d}T{h:02d}:30:00.123456+00:00"))
+        for d in range(5, 12)
+        for h in (0, 12, 23)
+    }
+    assert len(windows) == 1
 
 
 # ── model families ────────────────────────────────────────────────────────────

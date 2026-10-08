@@ -19,12 +19,13 @@ excluded and replaced, and that a candidate can't turn its losses into exclusion
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import copy
 import hashlib
 import json
 import re
-from collections.abc import AsyncIterator
-from datetime import UTC, datetime, timedelta
+from collections.abc import AsyncIterator, Iterator
+from datetime import UTC, datetime, timedelta, tzinfo
 from pathlib import Path
 from typing import Any
 from unittest import mock
@@ -34,17 +35,20 @@ import asyncpg
 import pytest
 from evals.workflows import eval_analysis, eval_item, eval_judge, eval_r0, paired_eval
 
-from aios.config import get_settings
+from aios.config import Settings, get_settings
 from aios.db.pool import create_pool
 from aios.db.queries import workflows as wf_queries
 from aios.errors import NotFoundError
 from aios.harness import runtime
 from aios.harness.completion import LlmRequest, LlmResponse
+from aios.harness.trigger_runner import run_trigger_step
 from aios.ids import EVENT, make_id
 from aios.models.agents import ToolSpec
+from aios.models.triggers import OperatorTriggerCreate
 from aios.models.workflows import TERMINAL_RUN_STATUSES, OperatorAuthority, WfRun
 from aios.services import agents as agents_service
 from aios.services import sessions as sessions_service
+from aios.services import triggers as trig_service
 from aios.services import workflows as wf_service
 from aios.services.requests import Rebuilt
 from aios.workflows import run_llm, run_tools, service
@@ -83,7 +87,7 @@ def _bar(**changes: Any) -> dict[str, Any]:
     bar["budget"].update(arm_usd=0.5, candidate_margin=0.5, judge_usd=0.5)
     for key, value in changes.items():
         if isinstance(value, dict):
-            bar[key].update(value)
+            bar.setdefault(key, {}).update(value)
         else:
             bar[key] = value
     return bar
@@ -141,11 +145,15 @@ def _conversation(code: str) -> list[dict[str, Any]]:
 
 
 async def _corpus(
-    pool: asyncpg.Pool[Any], models: dict[int, str] | None = None
+    pool: asyncpg.Pool[Any],
+    times: list[datetime] | None = None,
+    models: dict[int, str] | None = None,
 ) -> tuple[str, dict[str, list[dict[str, Any]]]]:
-    """An agent and one answered request per session, each on its own day, captured
-    for GOOD unless ``models`` names another model for that session. Returns the agent
-    and each session's conversation."""
+    """An agent and one answered request per session, sent at ``times`` (default: one a
+    day from ``_DAY``) and captured for GOOD unless ``models`` names another model for
+    that session. Returns the agent and each session's conversation."""
+    if times is None:
+        times = [_DAY + timedelta(days=i) for i in range(_SESSIONS)]
     agent = await agents_service.create_agent(
         pool,
         account_id=_ACC,
@@ -167,12 +175,11 @@ async def _corpus(
                 sha,
                 b"{}",
             )
-    for i in range(_SESSIONS):
+    for i, at in enumerate(times):
         session = await sessions_service.create_session(
             pool, account_id=_ACC, agent_id=agent.id, environment_id=_ENV, title=None, metadata={}
         )
         conversations[session.id] = _conversation(f"c{i}x")
-        at = _DAY + timedelta(days=i)
         model = (models or {}).get(i, GOOD)
         record = {
             "payload_sha": f"payload-{i}",
@@ -184,22 +191,32 @@ async def _corpus(
             "binding": {"kind": "agent", "agent_id": agent.id, "version": 1},
         }
         async with pool.acquire() as conn:
-            span = await _event(
-                conn, session.id, 100, {"event": "model_request_start", "request": record}, at
-            )
-            await _event(
-                conn,
-                session.id,
-                101,
-                {
-                    "event": "model_request_end",
-                    "model_request_start_id": span,
-                    "is_error": False,
-                    "model": GOOD,
-                },
-                at + timedelta(seconds=1),
-                kind="span",
-            )
+            if model.startswith("workflow:"):
+                # A turn of the deployed workflow: its park, then a clean harvest.
+                run_id = make_id(EVENT)
+                park = {"event": "model_workflow_park", "request": record, "run_id": run_id}
+                await _event(conn, session.id, 100, park, at)
+                harvest = {"event": "model_workflow_harvest_end", "run_id": run_id}
+                await _event(
+                    conn, session.id, 101, dict(harvest, is_error=False), at + timedelta(seconds=1)
+                )
+            else:
+                span = await _event(
+                    conn, session.id, 100, {"event": "model_request_start", "request": record}, at
+                )
+                await _event(
+                    conn,
+                    session.id,
+                    101,
+                    {
+                        "event": "model_request_end",
+                        "model_request_start_id": span,
+                        "is_error": False,
+                        "model": GOOD,
+                    },
+                    at + timedelta(seconds=1),
+                    kind="span",
+                )
             await _event(
                 conn,
                 session.id,
@@ -245,12 +262,17 @@ class FakeModels:
         cost: float,
         overloads: int,
         unavailable: set[str],
+        captured: str = GOOD,
+        params: dict[str, Any] | None = None,
     ) -> None:
         self.conversations = conversations
         self.cost = cost
         self.overloads = overloads  # the first arm calls a provider rejects as overloaded
         self.unavailable = unavailable  # sessions whose requests can't be rebuilt
+        self.captured = captured  # the model every request was captured for
+        self.params = params or {}  # the params every request was captured with
         self.calls: list[str] = []
+        self.sent: list[tuple[str, dict[str, Any] | None]] = []  # (model, params) per arm call
 
     async def rebuild(self, pool: Any, **kwargs: Any) -> Rebuilt:
         if kwargs["session_id"] in self.unavailable:
@@ -259,15 +281,17 @@ class FakeModels:
             request={
                 "messages": self.conversations[kwargs["session_id"]],
                 "tools": None,
-                "params": {},
+                "params": self.params,
             },
             fidelity="exact",
-            record={"model": GOOD, "capability_model": GOOD},
+            record={"model": self.captured, "capability_model": self.captured},
         )
 
     async def call(self, request: LlmRequest, *, model: str, auth: Any = None) -> LlmResponse:
         self.calls.append(model)
         prompt = str(request.messages[-1].get("content"))
+        if "Which reply is the better next assistant turn?" not in prompt:
+            self.sent.append((model, request.params))
         if "Which reply is the better next assistant turn?" in prompt:
             content = self._judge(prompt)
         elif self.overloads:
@@ -376,7 +400,11 @@ async def main(input):
 
 
 async def _register(
-    pool: asyncpg.Pool[Any], bar: dict[str, Any], *, analysis_script: str | None = None
+    pool: asyncpg.Pool[Any],
+    bar: dict[str, Any],
+    *,
+    mode: str = "gate",
+    analysis_script: str | None = None,
 ) -> dict[str, Any]:
     r0 = await _workflow(pool, "eval-r0", eval_r0.build(), eval_r0.TOOLS)
     judge = await _workflow(pool, "eval-judge", eval_judge.build(), eval_judge.TOOLS)
@@ -386,8 +414,8 @@ async def _register(
     item = await _workflow(pool, "eval-item", eval_item.build(r0=r0, judge=judge), eval_item.TOOLS)
     return await _workflow(
         pool,
-        "wam-gate",
-        paired_eval.build(bar=bar, item=item, analysis=analysis),
+        f"wam-{mode}",
+        paired_eval.build(mode=mode, bar=bar, item=item, analysis=analysis),
         paired_eval.TOOLS,
     )
 
@@ -442,7 +470,7 @@ async def _gate(
     unavailable: int = 0,
     run_cap: int | None = None,
 ) -> tuple[dict[str, Any], FakeModels]:
-    agent, conversations = await _corpus(pool, captured)
+    agent, conversations = await _corpus(pool, models=captured)
     gate = await _register(pool, bar, analysis_script=analysis_script)
     candidate = await _workflow(
         pool, "candidate", candidate_script or _CANDIDATE % candidate_model, []
@@ -470,6 +498,16 @@ async def _gate(
             "candidate_created_at": _DAY.isoformat(),
         },
     )
+    with _faked(models, settings):
+        done = await _settle(pool, run.id)
+    assert done.status == "completed", done.output
+    return done.output, models
+
+
+@contextlib.contextmanager
+def _faked(models: FakeModels, settings: Settings | None = None) -> Iterator[None]:
+    """Requests rebuild from the fake corpus and every inference goes to the fakes.
+    ``settings`` replace the ones run launches read (the account's run cap)."""
     with (
         mock.patch("aios.workflows.run_replay.rebuild_request", models.rebuild),
         mock.patch("aios.workflows.run_llm.rebuild_request", models.rebuild),
@@ -480,11 +518,9 @@ async def _gate(
             "aios.workflows.run_llm.model_providers_service.resolve_provider_auth_or_conflict",
             AsyncMock(return_value=(object(), None)),
         ),
-        mock.patch("aios.workflows.service.get_settings", return_value=settings),
+        mock.patch("aios.workflows.service.get_settings", return_value=settings or get_settings()),
     ):
-        done = await _settle(pool, run.id)
-    assert done.status == "completed", done.output
-    return done.output, models
+        yield
 
 
 # ── acceptance ────────────────────────────────────────────────────────────────
@@ -691,3 +727,126 @@ async def test_a_failed_analysis_keeps_the_records(pool: asyncpg.Pool[Any]) -> N
     assert "a bug in the statistics" in out["analysis_error"]
     assert len(out["records"]) == 12
     assert all(r["outcomes"]["cand"] == "tie" for r in out["records"])
+
+
+# ── the weekly monitor ────────────────────────────────────────────────────────
+
+# A Monday fire, so the monitored week is the one before: 2026-08-31 to 2026-09-07.
+_FIRED = datetime(2026, 9, 7, 3, 17, 42, tzinfo=UTC)
+_WEEK = datetime(2026, 8, 31, tzinfo=UTC)
+
+
+class _FrozenClock(datetime):
+    @classmethod
+    def now(cls, tz: tzinfo | None = None) -> datetime:  # type: ignore[override]
+        return _FIRED
+
+
+async def _monitor(
+    pool: asyncpg.Pool[Any], *, candidate_model: str, parked: bool = False
+) -> tuple[dict[str, Any], FakeModels]:
+    """Fire an operator cron trigger for the monitor at a pinned time and drive the run
+    it launches. The corpus sits in the week before the fire, plus one request in the
+    fire's own week that the monitor must leave out. ``parked``: every request is a turn
+    of the deployed workflow (its park), captured with params, as after a deploy."""
+    times = [_WEEK + timedelta(hours=6 * i) for i in range(_SESSIONS)]
+    all_times = [*times, _FIRED - timedelta(hours=2)]
+    captured = {i: _DEPLOYED for i in range(len(all_times))} if parked else None
+    agent, conversations = await _corpus(pool, all_times, models=captured)
+    # At the alarm's level (alpha_year / 52 / 4) 0 of 12 bounds a rate at 0.5004, so
+    # the binary limits get room for the small corpus to PASS.
+    bar = _bar(monitor={"n": 12, "alpha_year": 0.05}, limits={"degenerate": 0.6, "tool_calls": 0.6})
+    monitor = await _register(pool, bar, mode="monitor")
+    candidate = await _workflow(pool, "deployed", _CANDIDATE % candidate_model, [])
+    echo = await trig_service.add_operator_trigger(
+        pool,
+        OperatorTriggerCreate.model_validate(
+            {
+                "name": "wam-weekly",
+                "source": {"kind": "cron", "schedule": "17 3 * * 1"},
+                "environment_id": _ENV,
+                "action": {
+                    "kind": "workflow",
+                    "workflow_id": monitor["id"],
+                    "version": monitor["version"],
+                    "max_outstanding_runs": 1,
+                    "budget_usd": 1000.0,
+                    "input_template": {
+                        "agent": {"agent_id": agent, "version": 1},
+                        "baseline_model": GOOD,
+                        "candidate": {
+                            "workflow_id": candidate["id"],
+                            "version": candidate["version"],
+                        },
+                        "seed": "m",
+                    },
+                },
+            }
+        ),
+        account_id=_ACC,
+    )
+    models = FakeModels(
+        conversations,
+        0.001,
+        0,
+        set(),
+        captured=_DEPLOYED if parked else GOOD,
+        params=_CAPTURED_PARAMS if parked else None,
+    )
+    with _faked(models):
+        with mock.patch("aios.harness.trigger_runner.datetime", _FrozenClock):
+            await run_trigger_step(echo.id)
+        async with pool.acquire() as conn:
+            run_id = await conn.fetchval("SELECT id FROM wf_runs WHERE trigger_id = $1", echo.id)
+        done = await _settle(pool, run_id)
+    assert done.status == "completed", done.output
+    assert done.principal == "operator"
+    return dict(done.output), models
+
+
+_DEPLOYED = "workflow:wf_deployed@1"
+_CAPTURED_PARAMS = {"temperature": 0.2}
+
+
+async def test_the_monitor_runs_the_deployed_workflows_own_turns(
+    pool: asyncpg.Pool[Any],
+) -> None:
+    """After a deploy every request is a park of the workflow. None is screened out as
+    captured for another model; the candidate starts from the park's request; and the
+    baseline, sent by ref to the model the agent ran before, keeps the params the turn
+    was captured with, the same ones the workflow received."""
+    out, models = await _monitor(pool, candidate_model=GOOD, parked=True)
+    assert out["sample"]["returned"] == _SESSIONS
+    assert out["sample"]["eligible"] == _SESSIONS
+    assert out["exclusions"] == {}
+    assert out["stats"]["n"] == 12
+    assert out["alarm"] is False and out["verdict"] == "PASS", (out["reasons"], out["stats"])
+    arm_calls = [params for model, params in models.sent if model == GOOD]
+    # Each item: the baseline (by ref), the candidate (from its materialized input),
+    # and the control (inline, from get_request) all send the captured params.
+    assert len(arm_calls) == 3 * 12
+    assert all(params == _CAPTURED_PARAMS for params in arm_calls)
+
+
+async def test_the_weekly_monitor_is_quiet_for_an_unchanged_model(
+    pool: asyncpg.Pool[Any],
+) -> None:
+    out, _ = await _monitor(pool, candidate_model=GOOD)
+    assert out["window"] == {
+        "start": "2026-08-31T00:00:00+00:00",
+        "end": "2026-09-07T00:00:00+00:00",
+    }
+    assert out["seed"] == "m|2026-08-31"
+    assert out["alpha"] == pytest.approx(0.05 / 52)
+    assert out["sample"]["returned"] == _SESSIONS  # the fire's own week is left out
+    assert out["alarm"] is False and out["alarms"] == []
+    assert out["verdict"] == "PASS"
+
+
+async def test_the_weekly_monitor_alarms_when_the_deployed_model_is_worse(
+    pool: asyncpg.Pool[Any],
+) -> None:
+    out, _ = await _monitor(pool, candidate_model=WEAK)
+    assert out["alarm"] is True
+    assert out["alarms"] == ["win_rate"]
+    assert out["stats"]["w"]["upper"] < 0.5 - out["bar"]["delta"]
