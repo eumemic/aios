@@ -577,3 +577,100 @@ async def test_the_tasks_api_workflow_arm_keeps_the_replay_tools_and_is_private(
     reader = await _session(pool, "tasks-reader")
     with pytest.raises(NotFoundError):
         await wf_service.get_run(pool, run.id, account_id="acc_vis", reader=RunReader(reader))
+
+
+# ── #2513: the properties the #2479 review's surviving mutants showed untested ──
+
+
+async def test_a_private_run_completing_through_the_step_fires_no_other_sessions_trigger(
+    pool: asyncpg.Pool[Any],
+) -> None:
+    """The real terminal path (``run_workflow_step`` → ``_commit_terminal_and_dispatch``)
+    must hand the run's visibility to the fire matcher, not a constant ``account``."""
+    owner = await _session(pool, "owner")
+    other = await _session(pool, "other")
+    run = await _dispatch_run(pool, owner)
+    assert run.workflow_id is not None
+    target = await _workflow(pool)
+    trigger_ids: dict[str, str] = {}
+    for session_id in (owner, other):
+        echo = await triggers_service.add_trigger(
+            pool,
+            session_id,
+            TriggerCreate.model_validate(
+                {
+                    "name": f"watch-{next(_names)}",
+                    "source": {"kind": "run_completion", "workflow_id": run.workflow_id},
+                    "action": {"kind": "workflow", "workflow_id": target},
+                }
+            ),
+            account_id="acc_vis",
+        )
+        trigger_ids[session_id] = echo.id
+
+    with (
+        mock.patch("aios.workflows.step.defer_wake", new=AsyncMock()),
+        mock.patch("aios.workflows.step.defer_run_wake", new=AsyncMock()),
+        mock.patch("aios.workflows.step.defer_trigger_fire", new=AsyncMock()) as fired,
+    ):
+        await run_workflow_step(run.id)
+
+    async with pool.acquire() as conn:
+        status = await conn.fetchval("SELECT status FROM wf_runs WHERE id = $1", run.id)
+        fire_owners = await conn.fetch(
+            "SELECT trigger_id FROM trigger_runs WHERE trigger_context = 'run_completion'"
+        )
+    assert status == "completed"
+    assert [r["trigger_id"] for r in fire_owners] == [trigger_ids[owner]]
+    assert [c.args[0] for c in fired.await_args_list] == [trigger_ids[owner]]
+
+
+async def test_a_cursor_naming_an_invisible_run_reads_like_an_unknown_one(
+    pool: asyncpg.Pool[Any],
+) -> None:
+    """``list_runs(after=<private run>)`` must return the same page as an unknown id,
+    or the cursor would tell another session that the private run exists."""
+    owner = await _session(pool, "owner")
+    other = await _session(pool, "other")
+    shared = await service.create_run(
+        pool,
+        account_id="acc_vis",
+        authority=SessionAuthority(owner, None),
+        workflow_id=await _workflow(pool),
+        environment_id="env_vis",
+    )
+    private = await _dispatch_run(pool, owner)
+    reader = RunReader(other)
+
+    unknown = await wf_service.list_runs(
+        pool, account_id="acc_vis", after="wfr_does_not_exist", reader=reader
+    )
+    invisible = await wf_service.list_runs(
+        pool, account_id="acc_vis", after=private.id, reader=reader
+    )
+    assert [r.id for r in invisible] == [r.id for r in unknown] == []
+    # The owner's cursor on the same run pages past it to the older shared run.
+    paged = await wf_service.list_runs(
+        pool, account_id="acc_vis", after=private.id, reader=RunReader(owner)
+    )
+    assert [r.id for r in paged] == [shared.id]
+
+
+async def test_a_reader_with_no_session_never_sees_a_run_whose_launcher_was_deleted(
+    pool: asyncpg.Pool[Any],
+) -> None:
+    """Deleting the launching session nulls ``launcher_session_id``. A run-side reader
+    with no session (an operator run's) must not match that NULL."""
+    owner = await _session(pool, "owner")
+    private = await _dispatch_run(pool, owner)
+    async with pool.acquire() as conn:
+        await queries.delete_session(conn, owner, account_id="acc_vis")
+        orphaned = await wf_queries.get_wf_run(conn, private.id, account_id="acc_vis")
+    assert (orphaned.visibility, orphaned.launcher_session_id) == ("session", None)
+
+    no_session = RunReader(None)
+    assert not no_session.can_see(orphaned)
+    with pytest.raises(NotFoundError):
+        await wf_service.get_run(pool, private.id, account_id="acc_vis", reader=no_session)
+    listed = await wf_service.list_runs(pool, account_id="acc_vis", reader=no_session)
+    assert private.id not in {r.id for r in listed}

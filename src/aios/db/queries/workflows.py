@@ -618,14 +618,15 @@ async def list_wf_runs(
     status: str | None = None,
     parent_run_id: str | None = None,
     launcher_session_id: str | None = None,
-    reader: RunReader | None = None,
+    reader: RunReader | None,
     include_archived: bool = False,
 ) -> list[WfRun]:
     """Keyset-paginated list of an account's runs, newest first: the unarchived ones,
     or every one with ``include_archived``.
 
     ``reader`` is an agent-side read: it keeps only the runs :meth:`RunReader.can_see`
-    admits. ``None`` is the operator API, which lists every run.
+    admits. ``None`` is the operator API, which lists every run. It has no default, so
+    the unfiltered view is always asked for by name (#2513).
 
     ``parent_run_id`` scopes to a run's children — the runs a workflow's nested
     ``workflow()`` calls spawned, plus (#819) trigger-launched runs whose
