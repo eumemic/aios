@@ -619,8 +619,10 @@ async def list_wf_runs(
     parent_run_id: str | None = None,
     launcher_session_id: str | None = None,
     reader: RunReader | None = None,
+    include_archived: bool = False,
 ) -> list[WfRun]:
-    """Keyset-paginated list of an account's runs (non-archived), newest first.
+    """Keyset-paginated list of an account's runs, newest first: the unarchived ones,
+    or every one with ``include_archived``.
 
     ``reader`` is an agent-side read: it keeps only the runs :meth:`RunReader.can_see`
     admits. ``None`` is the operator API, which lists every run.
@@ -642,7 +644,7 @@ async def list_wf_runs(
     ('pending','running','suspended')``).
     """
     args: list[Any] = [account_id]
-    where = ["archived_at IS NULL", "account_id = $1"]
+    where = ["account_id = $1"] if include_archived else ["archived_at IS NULL", "account_id = $1"]
     for column, value in (
         ("workflow_id", workflow_id),
         ("status", status),

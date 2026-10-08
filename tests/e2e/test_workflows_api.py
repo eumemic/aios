@@ -278,6 +278,21 @@ async def test_runs_parent_run_id_filter(http_client: httpx.AsyncClient, pool: A
     assert [x["id"] for x in r.json()["data"]] == [child.id]  # only the child
 
 
+async def test_runs_include_archived_needs_a_scope(http_client: httpx.AsyncClient) -> None:
+    """``include_archived`` is only accepted with ``workflow_id`` or ``parent_run_id``:
+    the recency indexes cover unarchived rows only, so an account-wide archived read
+    would sort the whole table."""
+    r = await http_client.get("/v1/runs", params={"include_archived": "true"})
+    assert r.status_code == 422, r.text
+    wf = (
+        await http_client.post("/v1/workflows", json={"name": f"a-{_uniq()}", "script": _SCRIPT})
+    ).json()
+    r = await http_client.get(
+        "/v1/runs", params={"include_archived": "true", "workflow_id": wf["id"]}
+    )
+    assert r.status_code == 200, r.text
+
+
 async def test_requires_auth(http_client: httpx.AsyncClient) -> None:
     r = await http_client.get("/v1/workflows", headers={"Authorization": ""})
     assert r.status_code == 401, r.text

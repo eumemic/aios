@@ -239,9 +239,12 @@ jobs:
         # package lives at the package root, not under ``src/``) are
         # workspace members whose source had never been linted/typed.  The
         # echo-http connector has no ``src/`` and is omitted.
+        #
+        # ``evals`` holds the eval workflow templates and operator scripts;
+        # mypy reaches them through the tests that import them.
         run: |
-          uv run ruff check src tests packages/aios-sdk/aios_sdk connectors/signal/src connectors/slack/src connectors/sms/src connectors/telegram/src connectors/whatsapp/src packages/aios-connector-http/aios_connector_http packages/aios-browser-driver/aios_browser_driver
-          uv run ruff format --check src tests packages/aios-sdk/aios_sdk connectors/signal/src connectors/slack/src connectors/sms/src connectors/telegram/src connectors/whatsapp/src packages/aios-connector-http/aios_connector_http packages/aios-browser-driver/aios_browser_driver
+          uv run ruff check src tests evals packages/aios-sdk/aios_sdk connectors/signal/src connectors/slack/src connectors/sms/src connectors/telegram/src connectors/whatsapp/src packages/aios-connector-http/aios_connector_http packages/aios-browser-driver/aios_browser_driver
+          uv run ruff format --check src tests evals packages/aios-sdk/aios_sdk connectors/signal/src connectors/slack/src connectors/sms/src connectors/telegram/src connectors/whatsapp/src packages/aios-connector-http/aios_connector_http packages/aios-browser-driver/aios_browser_driver
 
       - name: Type check (mypy)
         run: uv run mypy src tests packages/aios-sdk/aios_sdk connectors/signal/src connectors/slack/src connectors/sms/src connectors/telegram/src connectors/whatsapp/src packages/aios-connector-http/aios_connector_http packages/aios-browser-driver/aios_browser_driver

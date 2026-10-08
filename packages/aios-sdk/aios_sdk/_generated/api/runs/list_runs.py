@@ -16,6 +16,7 @@ def _get_kwargs(
     workflow_id: None | str | Unset = UNSET,
     status: None | str | Unset = UNSET,
     parent_run_id: None | str | Unset = UNSET,
+    include_archived: bool | None | Unset = UNSET,
     limit: int | None | Unset = UNSET,
     authorization: None | str | Unset = UNSET,
 ) -> dict[str, Any]:
@@ -52,6 +53,13 @@ def _get_kwargs(
     else:
         json_parent_run_id = parent_run_id
     params["parent_run_id"] = json_parent_run_id
+
+    json_include_archived: bool | None | Unset
+    if isinstance(include_archived, Unset):
+        json_include_archived = UNSET
+    else:
+        json_include_archived = include_archived
+    params["include_archived"] = json_include_archived
 
     json_limit: int | None | Unset
     if isinstance(limit, Unset):
@@ -109,18 +117,21 @@ def sync_detailed(
     workflow_id: None | str | Unset = UNSET,
     status: None | str | Unset = UNSET,
     parent_run_id: None | str | Unset = UNSET,
+    include_archived: bool | None | Unset = UNSET,
     limit: int | None | Unset = UNSET,
     authorization: None | str | Unset = UNSET,
 ) -> Response[HTTPValidationError | ListResponseWfRun]:
     """List Runs
 
-     List the account's unarchived runs in ``created_at DESC, id DESC`` order.
+     List the account's runs in ``created_at DESC, id DESC`` order: the unarchived
+    ones, or every one with ``include_archived=true``, which needs ``workflow_id`` or
+    ``parent_run_id`` (a 422 otherwise).
 
     This ordering applies before ``limit`` to both filtered and unfiltered reads,
     so a first-page ``?workflow_id=...&limit=N`` query returns the N most recently
     created matching runs. ``id DESC`` is the stable tiebreaker for equal creation
     timestamps. First page: optional ``workflow_id`` / ``status`` /
-    ``parent_run_id`` filters + ``limit``; subsequent pages:
+    ``parent_run_id`` / ``include_archived`` filters + ``limit``; subsequent pages:
     ``?cursor=<next_cursor>``. ``parent_run_id`` scopes to a run's child runs.
 
     Args:
@@ -128,6 +139,7 @@ def sync_detailed(
         workflow_id (None | str | Unset):
         status (None | str | Unset):
         parent_run_id (None | str | Unset):
+        include_archived (bool | None | Unset):
         limit (int | None | Unset):
         authorization (None | str | Unset):
 
@@ -144,6 +156,7 @@ def sync_detailed(
         workflow_id=workflow_id,
         status=status,
         parent_run_id=parent_run_id,
+        include_archived=include_archived,
         limit=limit,
         authorization=authorization,
     )
@@ -162,18 +175,21 @@ def sync(
     workflow_id: None | str | Unset = UNSET,
     status: None | str | Unset = UNSET,
     parent_run_id: None | str | Unset = UNSET,
+    include_archived: bool | None | Unset = UNSET,
     limit: int | None | Unset = UNSET,
     authorization: None | str | Unset = UNSET,
 ) -> HTTPValidationError | ListResponseWfRun | None:
     """List Runs
 
-     List the account's unarchived runs in ``created_at DESC, id DESC`` order.
+     List the account's runs in ``created_at DESC, id DESC`` order: the unarchived
+    ones, or every one with ``include_archived=true``, which needs ``workflow_id`` or
+    ``parent_run_id`` (a 422 otherwise).
 
     This ordering applies before ``limit`` to both filtered and unfiltered reads,
     so a first-page ``?workflow_id=...&limit=N`` query returns the N most recently
     created matching runs. ``id DESC`` is the stable tiebreaker for equal creation
     timestamps. First page: optional ``workflow_id`` / ``status`` /
-    ``parent_run_id`` filters + ``limit``; subsequent pages:
+    ``parent_run_id`` / ``include_archived`` filters + ``limit``; subsequent pages:
     ``?cursor=<next_cursor>``. ``parent_run_id`` scopes to a run's child runs.
 
     Args:
@@ -181,6 +197,7 @@ def sync(
         workflow_id (None | str | Unset):
         status (None | str | Unset):
         parent_run_id (None | str | Unset):
+        include_archived (bool | None | Unset):
         limit (int | None | Unset):
         authorization (None | str | Unset):
 
@@ -198,6 +215,7 @@ def sync(
         workflow_id=workflow_id,
         status=status,
         parent_run_id=parent_run_id,
+        include_archived=include_archived,
         limit=limit,
         authorization=authorization,
     ).parsed
@@ -210,18 +228,21 @@ async def asyncio_detailed(
     workflow_id: None | str | Unset = UNSET,
     status: None | str | Unset = UNSET,
     parent_run_id: None | str | Unset = UNSET,
+    include_archived: bool | None | Unset = UNSET,
     limit: int | None | Unset = UNSET,
     authorization: None | str | Unset = UNSET,
 ) -> Response[HTTPValidationError | ListResponseWfRun]:
     """List Runs
 
-     List the account's unarchived runs in ``created_at DESC, id DESC`` order.
+     List the account's runs in ``created_at DESC, id DESC`` order: the unarchived
+    ones, or every one with ``include_archived=true``, which needs ``workflow_id`` or
+    ``parent_run_id`` (a 422 otherwise).
 
     This ordering applies before ``limit`` to both filtered and unfiltered reads,
     so a first-page ``?workflow_id=...&limit=N`` query returns the N most recently
     created matching runs. ``id DESC`` is the stable tiebreaker for equal creation
     timestamps. First page: optional ``workflow_id`` / ``status`` /
-    ``parent_run_id`` filters + ``limit``; subsequent pages:
+    ``parent_run_id`` / ``include_archived`` filters + ``limit``; subsequent pages:
     ``?cursor=<next_cursor>``. ``parent_run_id`` scopes to a run's child runs.
 
     Args:
@@ -229,6 +250,7 @@ async def asyncio_detailed(
         workflow_id (None | str | Unset):
         status (None | str | Unset):
         parent_run_id (None | str | Unset):
+        include_archived (bool | None | Unset):
         limit (int | None | Unset):
         authorization (None | str | Unset):
 
@@ -245,6 +267,7 @@ async def asyncio_detailed(
         workflow_id=workflow_id,
         status=status,
         parent_run_id=parent_run_id,
+        include_archived=include_archived,
         limit=limit,
         authorization=authorization,
     )
@@ -261,18 +284,21 @@ async def asyncio(
     workflow_id: None | str | Unset = UNSET,
     status: None | str | Unset = UNSET,
     parent_run_id: None | str | Unset = UNSET,
+    include_archived: bool | None | Unset = UNSET,
     limit: int | None | Unset = UNSET,
     authorization: None | str | Unset = UNSET,
 ) -> HTTPValidationError | ListResponseWfRun | None:
     """List Runs
 
-     List the account's unarchived runs in ``created_at DESC, id DESC`` order.
+     List the account's runs in ``created_at DESC, id DESC`` order: the unarchived
+    ones, or every one with ``include_archived=true``, which needs ``workflow_id`` or
+    ``parent_run_id`` (a 422 otherwise).
 
     This ordering applies before ``limit`` to both filtered and unfiltered reads,
     so a first-page ``?workflow_id=...&limit=N`` query returns the N most recently
     created matching runs. ``id DESC`` is the stable tiebreaker for equal creation
     timestamps. First page: optional ``workflow_id`` / ``status`` /
-    ``parent_run_id`` filters + ``limit``; subsequent pages:
+    ``parent_run_id`` / ``include_archived`` filters + ``limit``; subsequent pages:
     ``?cursor=<next_cursor>``. ``parent_run_id`` scopes to a run's child runs.
 
     Args:
@@ -280,6 +306,7 @@ async def asyncio(
         workflow_id (None | str | Unset):
         status (None | str | Unset):
         parent_run_id (None | str | Unset):
+        include_archived (bool | None | Unset):
         limit (int | None | Unset):
         authorization (None | str | Unset):
 
@@ -298,6 +325,7 @@ async def asyncio(
             workflow_id=workflow_id,
             status=status,
             parent_run_id=parent_run_id,
+            include_archived=include_archived,
             limit=limit,
             authorization=authorization,
         )
