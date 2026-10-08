@@ -9,6 +9,7 @@ reads, so the tests control exactly what each budget run has spent.
 
 from __future__ import annotations
 
+import sys
 from collections.abc import AsyncIterator
 from typing import Any
 from unittest import mock
@@ -246,6 +247,44 @@ async def test_a_non_positive_budget_is_an_author_error(pool: asyncpg.Pool[Any])
     for _ in range(2):
         await run_workflow_step(root)
     assert "budget_usd > 0" in (await _run(pool, root)).output["raised"]
+
+
+@pytest.mark.parametrize("asked", [1e-7, 0.0000005, 1e13, sys.float_info.max])
+@pytest.mark.parametrize("caller_budget", [None, 1.0])
+async def test_a_budget_out_of_micro_usd_range_is_an_author_error(
+    pool: asyncpg.Pool[Any], asked: float, caller_budget: float | None
+) -> None:
+    """A positive finite budget that rounds to 0 micro-USD, or past bigint, is
+    refused as a catchable author error before the sub-run's row is written (#2535)."""
+    noop = await _workflow(pool, "noop", "async def main(input):\n    return 1\n")
+    caller = await _workflow(
+        pool,
+        "caller",
+        "async def main(input):\n"
+        "    try:\n"
+        "        return await invoke_workflow(input['wf'], None, budget_usd=input['budget'])\n"
+        "    except AgentError as e:\n"
+        "        return {'kind': e.kind, 'msg': str(e)}\n",
+    )
+    root = await _root(pool, caller, input={"wf": noop, "budget": asked}, budget_usd=caller_budget)
+    for _ in range(3):
+        await run_workflow_step(root)
+    done = await _run(pool, root)
+    assert done.output["kind"] == "bad_invoke_workflow"
+    assert "budget_usd" in done.output["msg"]
+    async with pool.acquire() as conn:
+        assert (
+            await conn.fetchval("SELECT count(*) FROM wf_runs WHERE parent_run_id = $1", root) == 0
+        )
+
+
+async def test_a_budget_of_one_micro_usd_still_spawns(pool: asyncpg.Pool[Any]) -> None:
+    noop = await _workflow(pool, "noop", "async def main(input):\n    return 1\n")
+    caller = await _workflow(pool, "caller", _HAND_ON)
+    root = await _root(pool, caller, input={"wf": noop, "budget": 0.000001}, budget_usd=None)
+    await run_workflow_step(root)
+    sub = await _run(pool, await _sub_run(pool, root))
+    assert sub.budget_usd == pytest.approx(0.000001)
 
 
 async def test_the_sweep_wakes_a_parked_sub_run_whose_ancestor_is_spent(

@@ -178,8 +178,21 @@ class _Budget(NamedTuple):
         )
 
 
+# ``wf_runs.budget_total_microusd`` is a bigint (#2535).
+_MAX_BUDGET_MICROUSD = 2**63 - 1
+
 # The capabilities a step reads the held budget for: the three that spend, and budget().
 _BUDGETED_CAPABILITIES = frozenset({"agent", "call_llm", "invoke_workflow", "budget"})
+
+
+def _budget_microusd(budget_usd: int | float) -> float:
+    """``budget_usd`` in micro-USD as ``insert_wf_run`` rounds it (#2535); a non-finite
+    float, or one too large to scale, is ``inf``. An int may be arbitrarily large, so it
+    is scaled exactly rather than through a float that could overflow."""
+    if isinstance(budget_usd, int):
+        return budget_usd * 1_000_000
+    scaled = budget_usd * 1_000_000
+    return round(scaled) if math.isfinite(scaled) else math.inf
 
 
 async def _held_budget(conn: asyncpg.Connection[Any], run: WfRun) -> _Budget | None:
@@ -1601,18 +1614,20 @@ async def _open_invoke_workflow_capability(
         )
     # A budget of its own (#2476), clamped to what this run may still spend, so a
     # sub-run's ceiling never exceeds its caller's. The host checked it's a positive
-    # finite number; the worker re-checks the wire value.
+    # finite number; the worker re-checks the wire value, and that it is a positive
+    # bigint once rounded to micro-USD (#2535): a tiny value rounds to 0 and a huge
+    # one overflows, either of which would fail the row's insert, not the author.
     budget_usd = spec.get("budget_usd")
     if budget_usd is not None:
         if (
             isinstance(budget_usd, bool)
             or not isinstance(budget_usd, int | float)
-            or not math.isfinite(budget_usd)
-            or budget_usd <= 0
+            or not 1 <= _budget_microusd(budget_usd) <= _MAX_BUDGET_MICROUSD
         ):
             return await _reject(
                 "bad_invoke_workflow",
-                f"invoke_workflow() requires budget_usd to be a positive number, got "
+                f"invoke_workflow() requires budget_usd to be a positive number from "
+                f"$0.000001 to ${_MAX_BUDGET_MICROUSD // 1_000_000:,}, got "
                 f"{budget_usd!r}",
             )
         if budget is not None:
