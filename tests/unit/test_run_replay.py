@@ -84,6 +84,22 @@ async def test_another_model_gets_no_captured_params() -> None:
     assert rebuild.await_args.kwargs["target_model"] == "openrouter/judge"
 
 
+async def test_a_workflow_capture_keeps_its_params_for_another_model() -> None:
+    """The bound run was handed these params, so a baseline arm on another model gets
+    them too; their endpoint is admitted only from the allowlist when sent inline."""
+    workflow_capture = Rebuilt(
+        request=_rebuilt().request,
+        fidelity="rerendered",
+        record={"model": "workflow:wf_cand@2", "capability_model": "openrouter/prod"},
+    )
+    result, _ = await _get(workflow_capture, model="openrouter/baseline")
+    assert result["params"] == _PARAMS
+    assert run_replay.captured_params_for(workflow_capture, "openrouter/baseline") == (
+        _PARAMS,
+        None,
+    )
+
+
 @pytest.mark.parametrize(
     "rebuilt",
     [Missing(what="blob", record={}), NotFoundError("gone"), RuntimeError("decode")],

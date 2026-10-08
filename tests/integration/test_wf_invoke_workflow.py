@@ -862,8 +862,10 @@ async def test_sub_runs_reports_each_sub_run_with_its_version_label_and_usage(
             "cache_read_input_tokens": 0,
             "cache_creation_input_tokens": 0,
             "cost_microusd": 1234,
+            "uncached_cost_microusd": None,  # not in litellm's cost map
         }
     ]
+    assert isinstance(facts["litellm_version"], str)
 
 
 _FANS_OUT = (

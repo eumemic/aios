@@ -17,7 +17,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from aios.config import Settings
-from aios.harness.completion import LlmResponse, ModelCallDeadlineError
+from aios.harness.completion import LlmResponse, ModelCallDeadlineError, estimate_cost_usd
 from aios.models.model_providers import ProviderAuth
 from aios.services.requests import Missing, Rebuilt
 from aios.workflows import run_llm
@@ -365,6 +365,27 @@ async def test_by_ref_with_another_model_sends_no_captured_params() -> None:
     assert request.session_id == "wfr_1"  # an operator run gets its own cache key
 
 
+async def test_by_ref_of_a_workflow_capture_keeps_params_but_not_their_endpoint() -> None:
+    """A request captured for a ``workflow:`` binding handed its params to the bound
+    run, so another model keeps them; nothing vouches for the endpoint, so an
+    ``api_base`` in them must be allowlisted, as inline."""
+    workflow_capture = _rebuilt(captured_model="workflow:wf_cand@3")
+    result, cost, m = await _call_by_ref(
+        _ref_run("operator"), workflow_capture, model="openrouter/baseline"
+    )
+    assert "untrusted endpoint" in result["error"]
+    assert cost == 0
+    m.assert_not_awaited()
+
+    no_endpoint = Rebuilt(
+        request={**workflow_capture.request, "params": {"temperature": 0.3}},
+        fidelity="exact",
+        record=workflow_capture.record,
+    )
+    _, _, m = await _call_by_ref(_ref_run("operator"), no_endpoint, model="openrouter/baseline")
+    assert m.await_args.args[0].params == {"temperature": 0.3}
+
+
 async def test_by_ref_defaults_to_the_runs_default_child_model() -> None:
     _, _, m = await _call_by_ref(_ref_run("operator"), _rebuilt(), model=None)
     assert m.await_args.kwargs["model"] == "gpt-4o-mini"
@@ -432,3 +453,74 @@ def test_inline_call_llm_spec_is_unchanged() -> None:
     """An inline call's spec, and so its call key, is what it was before refs."""
     cap = call_llm({"model": "m", "messages": [{"role": "user", "content": "x"}]})
     assert set(cap._spec) == {"model", "messages", "tools", "params", "session_id"}
+
+
+# ─── sub_runs() uncached cost (#2476) ─────────────────────────────────────────
+
+
+def test_price_uncached_prices_every_usage_entry_without_the_cache() -> None:
+    facts = {
+        "nodes": [
+            {
+                "usage": [
+                    {
+                        "model": "anthropic/claude-sonnet-4-5",
+                        "input_tokens": 1000,
+                        "output_tokens": 10,
+                        "cache_read_input_tokens": 900,
+                        "cache_creation_input_tokens": 0,
+                        "cost_microusd": 500,
+                    },
+                    {"model": None, "input_tokens": 5, "output_tokens": 5},
+                ]
+            }
+        ],
+        "truncated": False,
+    }
+    with patch("aios.workflows.run_llm.estimate_cost_usd", return_value=0.0042) as est:
+        priced = run_llm.price_uncached(facts)
+    # Cache counters are left out, so every prompt token is priced as input.
+    est.assert_called_once_with(
+        "anthropic/claude-sonnet-4-5", {"input_tokens": 1000, "output_tokens": 10}
+    )
+    usage = priced["nodes"][0]["usage"]
+    assert usage[0]["uncached_cost_microusd"] == 4200
+    assert usage[0]["cost_microusd"] == 500
+    assert usage[1]["uncached_cost_microusd"] is None
+    assert isinstance(priced["litellm_version"], str)
+
+
+def test_price_uncached_is_none_for_a_model_outside_the_cost_map() -> None:
+    facts = {
+        "nodes": [{"usage": [{"model": "nope/unknown", "input_tokens": 1, "output_tokens": 1}]}]
+    }
+    assert run_llm.price_uncached(facts)["nodes"][0]["usage"][0]["uncached_cost_microusd"] is None
+
+
+def test_price_uncached_against_the_real_cost_map_ignores_the_cache_discount() -> None:
+    # Unpatched: pins the premise that litellm counts cache tokens inside the prompt
+    # total, so pricing input_tokens with no cache detail is the uncached price.
+    model = "anthropic/claude-sonnet-4-5"
+    usage = {
+        "model": model,
+        "input_tokens": 1000,
+        "output_tokens": 10,
+        "cache_read_input_tokens": 900,
+        "cache_creation_input_tokens": 0,
+    }
+    priced = run_llm.price_uncached({"nodes": [{"usage": [usage]}]})
+    uncached = priced["nodes"][0]["usage"][0]["uncached_cost_microusd"]
+    cached = estimate_cost_usd(
+        model, {"input_tokens": 1000, "output_tokens": 10, "cache_read_input_tokens": 900}
+    )
+    assert cached is not None
+    assert uncached is not None
+    assert uncached > _to_microusd(cached)
+
+
+def test_price_uncached_looks_up_an_unknown_model_once() -> None:
+    usage = [{"model": "nope/unknown", "input_tokens": i, "output_tokens": 1} for i in range(3)]
+    with patch("aios.workflows.run_llm.estimate_cost_usd", return_value=None) as est:
+        priced = run_llm.price_uncached({"nodes": [{"usage": usage}]})
+    est.assert_called_once()
+    assert all(u["uncached_cost_microusd"] is None for u in priced["nodes"][0]["usage"])

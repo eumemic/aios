@@ -239,13 +239,13 @@ def invoke_workflow(
     sub-run to that agent version's surface as well, so an eval arm runs with the
     authority that agent would give it.
 
-    ``request_ref`` hands the sub-run a request this run can resolve (the
-    ``request_ref`` in a workflow-as-model run's input). Pass ``None`` as ``input``:
-    the sub-run starts with that request rebuilt, in the shape a workflow-as-model run
-    gets, so an eval arm sees what production would have given it.
+    ``request_ref`` hands the sub-run a request this run can resolve: the one it was
+    created with, or one its own ``sample_requests`` call returned. The sub-run may
+    then resolve that ref itself. With ``input=None`` the sub-run starts with that
+    request rebuilt, in the shape a workflow-as-model run gets, so an eval arm sees
+    what production would have given it; with an ``input`` it starts with that input
+    instead and can send or read the request by ref.
     """
-    if request_ref is not None and input is not None:
-        raise ValueError("invoke_workflow() takes input=None with request_ref")
     annotations: dict[str, Any] = {}
     if label is not None:
         annotations["label"] = label
@@ -289,8 +289,11 @@ def sub_runs() -> _Capability:
     """Read facts about every session and run this run created, directly or through
     its descendants: kind, label, workflow or agent and the version that ran, status,
     timings, and usage per model. Metadata only, never their inputs or outputs.
-    Returns ``{"nodes": [...], "truncated": bool}``; each call reads the facts as of
-    that point in the run."""
+    Returns ``{"nodes": [...], "truncated": bool, "litellm_version": str}``; each call
+    reads the facts as of that point in the run. A usage entry carries its charged
+    ``cost_microusd`` and ``uncached_cost_microusd``, its tokens priced with no
+    prompt-cache discount (``None`` for a model outside litellm's cost map), so two arms
+    sharing a prefix compare the same whichever ran first."""
     return _Capability("sub_runs", None)
 
 
@@ -373,12 +376,14 @@ def call_llm(request: Any = None, *, request_ref: Any = None, model: Any = None)
     (no external mutation), so a re-drive is safe beyond the duplicated spend.
 
     **By reference.** ``call_llm(request_ref=input["request_ref"], model=...)`` sends
-    the request this run was created with (a workflow-as-model run's own request, or
-    one handed to it), rendered for ``model`` (default: the run's default child
-    model). The journal keeps only the ref. Called with the model the request was
-    captured for, it keeps that request's provider params, endpoint included; with
-    another model it sends none. A run can send only the request it was created with:
-    any other ref resolves as an ``{"error": …}`` value.
+    a request this run can resolve (the one it was created with, such as a
+    workflow-as-model run's own request or one handed to it, or one its own
+    ``sample_requests`` call returned), rendered for ``model`` (default: the run's
+    default child model). The journal keeps only the ref. Called with the model the
+    request was captured for, it keeps that request's provider params, endpoint
+    included. A request captured for a ``workflow:`` binding keeps its params for any
+    model, but an endpoint in them must be on the allowlist, as inline. Otherwise
+    another model gets no params. Any other ref resolves as an ``{"error": …}`` value.
     """
     if request_ref is not None:
         if request is not None:

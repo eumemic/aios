@@ -40,8 +40,10 @@ class WorkflowCreate:
             `version` pins a registered version; omitted, the version current at launch runs. The sub-run runs under this
             run's surface intersected with the target's, and binds this run's vaults; a failed or gone sub-run raises like a
             failed `agent`. `as_agent={"agent_id": ..., "version": N}` also intersects the sub-run's surface with that agent
-            version's; only a run an operator launched may pass it. `request_ref` (with `input=None`) hands the sub-run the
-            request this run was created with: it starts with that request as a workflow-as-model run would.
+            version's; only a run an operator launched may pass it. `request_ref` hands the sub-run a request this run can
+            resolve (the one it was created with, or one its `sample_requests` call returned), which the sub-run may then
+            resolve itself; with `input=None` it starts with that request as a workflow-as-model run would, with an `input`
+            it starts with that input.
               - `tool(name, input)`: invoke a declared tool; tool errors are returned, not raised. An operator run that
             declares the replay tools can read an agent's past requests: `tool("sample_requests", {"agent_id", "start",
             "end", "n", "seed", "cluster_cap"})` returns `{"items": [...]}`, a seeded sample of the agent's answered
@@ -55,15 +57,18 @@ class WorkflowCreate:
             (provider knobs). The result is `{"content", "tool_calls", "finish_reason", "usage", "cost", "message"}`, or
             `{"error": ...}` — a model error is returned, not raised. Its cost is metered against this run's `budget_usd`
             ceiling, so a budget-exhausted run refuses further `call_llm`. Use it to route/judge/fact-check around
-            inference; use `agent(...)` when you want the tool calls executed. `call_llm(request_ref=input["request_ref"],
-            model=None)` sends the request this run was created with instead, rendered for `model`; with the model it was
-            captured for it keeps that request's provider params, with another it sends none. Any other ref resolves as an
-            error value.
+            inference; use `agent(...)` when you want the tool calls executed. `call_llm(request_ref=ref, model=None)` sends
+            a request this run can resolve instead (the one it was created with, or one its `sample_requests` call
+            returned), rendered for `model`; with the model it was captured for it keeps that request's provider params; a
+            request captured for a `workflow:` binding keeps them for any model, with an endpoint admitted only from the
+            allowlist; otherwise another model gets none. Any other ref resolves as an error value.
               - `gate()`: suspend until an external resume delivers a value.
               - `budget()`: read this run's shared child-spend budget, or None when unset.
               - `sub_runs()`: read facts about every session and run this run created, directly or through descendants:
-            `{"nodes": [...], "truncated": bool}`, each node with its kind, label, workflow or agent and the version that
-            ran, status, timings, and usage per model. Metadata only.
+            `{"nodes": [...], "truncated": bool, "litellm_version": str}`, each node with its kind, label, workflow or agent
+            and the version that ran, status, timings, and usage per model (tokens, `cost_microusd` as charged, and
+            `uncached_cost_microusd`, the same tokens priced with no prompt-cache discount, or null for a model outside the
+            cost map). Metadata only.
               - `parallel(thunks)`: run zero-argument callables concurrently (for example,
                 `lambda: agent(...)`). A failed agent branch yields `None` at the barrier instead
                 of raising. Fan-out width is capped by `MAX_PARALLEL_FANOUT` (currently 1000).

@@ -82,7 +82,7 @@ def payload(request: LlmRequest) -> dict[str, Any]:
 
 
 @cache
-def _litellm_version() -> str:
+def litellm_version() -> str:
     """The installed litellm version: read from package metadata once per process,
     not on every send."""
     return version("litellm")
@@ -132,7 +132,7 @@ def capture_request(
     shas = {part: hashlib.sha256(body).hexdigest() for part, body in bodies.items()}
     record: dict[str, Any] = {
         "render_version": RENDER_VERSION,
-        "litellm_version": _litellm_version(),
+        "litellm_version": litellm_version(),
         "model": model,
         "capability_model": capability_model,
         "binding": binding.model_dump(mode="json"),
