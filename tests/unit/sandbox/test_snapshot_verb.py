@@ -69,6 +69,9 @@ class _FakeDocker:
         # defaults (view = size_rw + 100 KB; chain = exactly the view).
         self.commit_view: int | None = None
         self.commit_chain: int | None = None
+        # Image ids whose ``docker history`` probe fails (daemon hiccup, an
+        # image-specific history error) — ``.Size`` is still readable.
+        self.history_fails: set[str] = set()
         self.stream_filters: list[Any] = []
         self.container_labels: dict[str, str] = {}
         self.images: dict[str, dict[str, Any]] = {}
@@ -137,6 +140,8 @@ class _FakeDocker:
             img = self._lookup(ref)
             if img is None:
                 return 1, b"", f"Error: No such image: {ref}".encode()
+            if img["id"] in self.history_fails:
+                return 1, b"", b"Error: history unavailable"
             chain = img.get("chain", img["size"])
             # Split the chain over the image's layers: the top layer carries
             # the view, the interior carries the dead history.
@@ -767,13 +772,13 @@ class TestChainCostTriggers:
         fake_docker.size_rw = 1_000_000
         backend = DockerBackend()
 
-        assert await backend.image_chain_bytes("img_S1") == 20 * GB
+        assert (await backend.image_disk_cost("img_S1")).chain == 20 * GB
         probes = len([c for c in fake_docker.calls if c[1] == "history"])
-        assert await backend.image_chain_bytes("img_S1") == 20 * GB
+        assert (await backend.image_disk_cost("img_S1")).chain == 20 * GB
         assert len([c for c in fake_docker.calls if c[1] == "history"]) == probes
 
     @pytest.mark.asyncio
-    async def test_unreadable_history_degrades_to_the_view(
+    async def test_unreadable_history_reports_the_view_and_no_chain(
         self, fake_docker: _FakeDocker, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A history probe that cannot answer must not report a chain CHEAPER
@@ -791,7 +796,11 @@ class TestChainCostTriggers:
 
         monkeypatch.setattr("aios.sandbox.backends.docker.run_docker_cli", cli)
 
-        assert await DockerBackend().image_chain_bytes("img_S1") == 6 * GB
+        cost = await DockerBackend().image_disk_cost("img_S1")
+        # The view survives, but it is NOT passed off as the chain: a caller
+        # that subtracted a base chain from it would be mixing units.
+        assert cost.view == 6 * GB
+        assert cost.chain is None
 
 
 class TestBaseRelativeChainTriggers:
@@ -994,6 +1003,131 @@ class TestBaseRelativeChainTriggers:
 
         assert out.kind == "committed", "4 KB of dead history must never buy a multi-GB copy"
         assert not fake_docker.pipelines
+
+
+class TestChainUnitMismatch:
+    """A failed ``docker history`` probe leaves that image measured as its VIEW
+    (``.Size``), not its chain. Subtracting a successfully measured base CHAIN
+    from a child VIEW (or a base VIEW from a child chain) mixes units: the
+    accounting can clamp to 0 — silencing the pool budget and the
+    ``snapshot_bytes`` notice — and the trigger can see phantom dead history
+    and flatten a session into a private copy of its base. The base is only
+    subtracted when BOTH sides were measured as chains."""
+
+    BASE_REF = "base:latest"
+
+    @classmethod
+    def _apt_shaped_base(cls, fake_docker: _FakeDocker) -> None:
+        """A shared base whose own chain is 3x its view (the ordinary
+        ``apt-get install … && rm -rf /var/lib/apt/lists`` shape)."""
+        fake_docker.images[cls.BASE_REF] = {
+            "id": "base_img",
+            "size": 2 * GB,
+            "chain": 6 * GB,
+            "depth": 8,
+            "labels": {},
+        }
+
+    @classmethod
+    def _parent_on_base(cls, fake_docker: _FakeDocker, *, view: int, chain: int) -> None:
+        fake_docker.parent_image = "img_S1"
+        fake_docker.images["img_S1"] = {
+            "id": "img_S1",
+            "size": view,
+            "chain": chain,
+            "depth": 16,
+            "labels": {"aios.base_image": cls.BASE_REF},
+        }
+        fake_docker.container_labels = {"aios.base_image": cls.BASE_REF}
+
+    @pytest.mark.asyncio
+    async def test_child_probe_fails_base_chain_ok_is_never_accounted_zero(
+        self, fake_docker: _FakeDocker
+    ) -> None:
+        """Child history fails ⇒ child reads its 3 GB VIEW; the base's CHAIN
+        (6 GB) measured fine. ``3 GB view - 6 GB chain`` clamps to 0 though the
+        session added 3 GB of layers: the over-limit notice and pool reclaim
+        go silent. The figure must be at least the like-for-like
+        view-minus-view lower bound, and never 0."""
+        self._apt_shaped_base(fake_docker)
+        self._parent_on_base(fake_docker, view=3 * GB, chain=9 * GB)
+        fake_docker.size_rw = 1_000_000
+        fake_docker.commit_view = 3 * GB
+        fake_docker.commit_chain = 9 * GB
+        fake_docker.history_fails = {"committed"}
+
+        out = await DockerBackend().snapshot(
+            "cid", "tag:latest", empty_floor_bytes=8192, flatten_if_unique_bytes_over=None
+        )
+
+        assert out.kind == "committed"
+        assert out.unique_bytes > 0, "an unmeasurable chain must never be accounted as 0 bytes"
+        assert out.unique_bytes >= 3 * GB - 2 * GB, "below even the view-minus-view lower bound"
+
+    @pytest.mark.asyncio
+    async def test_base_probe_fails_does_not_buy_a_base_copy(
+        self, fake_docker: _FakeDocker
+    ) -> None:
+        """Base history fails ⇒ base reads its 2 GB VIEW against the parent's
+        measured 6.5 GB CHAIN. Mixed, the session appears to have added 4.5 GB
+        of chain over 0.1 GB of view — phantom dead history that clears the
+        ``reclaimable > base_chain`` gate against the 2 GB base VIEW, so the
+        snapshot flattens into a standalone copy of a 6 GB-on-disk base to
+        reclaim 0.4 GB. A trigger that cannot measure both sides in one unit
+        must not take the disk-costly flatten on the strength of a guess."""
+        self._apt_shaped_base(fake_docker)
+        fake_docker.history_fails = {"base_img"}
+        self._parent_on_base(fake_docker, view=2 * GB + 100 * 1000**2, chain=6 * GB + 500 * 1000**2)
+        fake_docker.size_rw = 1_000_000
+
+        out = await DockerBackend().snapshot(
+            "cid", "tag:latest", empty_floor_bytes=8192, flatten_if_unique_bytes_over=None
+        )
+
+        assert out.kind == "committed", "mixed units invented dead history and flattened"
+        assert not fake_docker.pipelines
+
+    @pytest.mark.asyncio
+    async def test_base_probe_fails_accounting_does_not_subtract_a_view_from_a_chain(
+        self, fake_docker: _FakeDocker
+    ) -> None:
+        """Design pin for the base-fails accounting case: with only the child
+        measured as a chain there is no like-for-like base figure to subtract,
+        so the child is charged its full chain (over-count: the safe side for
+        disk), never ``child chain - base view``."""
+        self._apt_shaped_base(fake_docker)
+        fake_docker.history_fails = {"base_img"}
+        self._parent_on_base(fake_docker, view=3 * GB, chain=9 * GB)
+        fake_docker.size_rw = 1_000_000
+        fake_docker.commit_view = 3 * GB
+        fake_docker.commit_chain = 9 * GB
+
+        out = await DockerBackend().snapshot(
+            "cid", "tag:latest", empty_floor_bytes=8192, flatten_if_unique_bytes_over=None
+        )
+
+        assert out.kind == "committed"
+        assert out.unique_bytes == 9 * GB
+
+    @pytest.mark.asyncio
+    async def test_both_probes_fail_write_then_delete_is_never_accounted_zero(
+        self, fake_docker: _FakeDocker
+    ) -> None:
+        """Both probes fail ⇒ both read as views. A write-then-delete session's
+        view equals the base's view, so view-minus-view is 0 though the session
+        holds real layers. Unmeasurable must not read as free."""
+        self._apt_shaped_base(fake_docker)
+        fake_docker.history_fails = {"base_img", "img_S1", "committed"}
+        self._parent_on_base(fake_docker, view=2 * GB, chain=9 * GB)
+        fake_docker.size_rw = 1_000_000
+        fake_docker.commit_view = 2 * GB
+        fake_docker.commit_chain = 9 * GB
+
+        out = await DockerBackend().snapshot(
+            "cid", "tag:latest", empty_floor_bytes=8192, flatten_if_unique_bytes_over=None
+        )
+
+        assert out.unique_bytes > 0, "an unmeasurable chain must never be accounted as 0 bytes"
 
 
 class TestHistorySizeParsing:

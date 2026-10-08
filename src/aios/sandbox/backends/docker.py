@@ -47,6 +47,7 @@ from aios.sandbox.backends.base import (
     MANAGED_LABEL_VALUE,
     SESSION_LABEL_KEY,
     CommandResult,
+    ImageDiskCost,
     ManagedImage,
     ManagedSandboxRef,
     SandboxBackendError,
@@ -54,6 +55,7 @@ from aios.sandbox.backends.base import (
     SandboxSnapshotTimeoutError,
     SandboxSpec,
     SnapshotOutcome,
+    base_relative_disk_bytes,
     split_label_list,
 )
 from aios.sandbox.network import (
@@ -1068,13 +1070,35 @@ class DockerBackend:
         #    commit-per-idle-exit chain can hold 20 GB of overlay layers while
         #    reporting 6.6 GB — under any budget an operator would set, forever,
         #    which is exactly why nothing on server-b ever flattened.
-        base_chain = await self._image_chain_bytes_or_zero(base_ref)
-        base_size = await self._image_size_or_zero(base_ref)
+        base_cost = await self._image_disk_cost_or_none(base_ref)
+        base_size = base_cost.view if base_cost is not None else 0
         parent_fields = await self._inspect_image_fields(parent_image)
         parent_size = parent_fields[1] if parent_fields else 0
         parent_depth = parent_fields[2] if parent_fields else 1
-        parent_chain = await self._image_chain_bytes_or_zero(parent_image) if parent_fields else 0
+        parent_cost = await self._image_disk_cost_or_none(parent_image) if parent_fields else None
         rw = size_rw if size_rw is not None else 0
+        # UNITS: the chain figures below are only meaningful when EVERY image
+        # in the subtraction was measured as a chain. A failed ``docker
+        # history`` probe yields only a view (``chain is None``); subtracting a
+        # base chain from a parent view (or a base view from a parent chain)
+        # mixes units and can both clamp the added cost to 0 and invent
+        # phantom dead history. When either chain is unmeasurable the trigger
+        # compares like with like: view minus view (the pre-#2349 metric) for
+        # BOTH sides. Then added_chain == added_view, so the dead-history ratio
+        # cannot fire. That is deliberate: a flatten is the disk-EXPENSIVE
+        # action (it writes a private copy of the base), so it is never taken
+        # on a guess. The budget still sees the view delta, the depth ceiling
+        # still bounds the chain, and only successful probes are cached, so
+        # the next snapshot re-measures.
+        chains_measured = (parent_cost is None or parent_cost.chain is not None) and (
+            base_cost is None or base_cost.chain is not None
+        )
+        if chains_measured:
+            base_chain = base_cost.best if base_cost is not None else 0
+            parent_chain = parent_cost.best if parent_cost is not None else 0
+        else:
+            base_chain = base_size
+            parent_chain = parent_size
         # Everything the trigger reasons about is BASE-RELATIVE: a flatten can
         # only reclaim (or duplicate) dead history in the layers THIS SESSION
         # added on top of its shared base — never the base's own internal chain,
@@ -1840,8 +1864,8 @@ class DockerBackend:
         labels = _labels_from_config_json(parts[3]) if len(parts) > 3 else {}
         return image_id, size, depth, labels
 
-    async def image_chain_bytes(self, image: str) -> int:
-        """Return Σ of ``image``'s layer sizes — what the chain costs ON DISK.
+    async def image_disk_cost(self, image: str) -> ImageDiskCost:
+        """Return ``image``'s VIEW and, when measurable, its on-disk CHAIN.
 
         ``.Size`` is the current filesystem VIEW: a file written in layer 1 and
         overwritten in layer 9 is counted once, even though overlay still holds
@@ -1849,9 +1873,13 @@ class DockerBackend:
         sum is the storage the chain actually occupies and the only figure a
         disk control can be enforced against (#2349).
 
-        Falls back to ``.Size`` when history is unreadable (a missing/errored
-        probe must not silently report a cheaper chain than the view we can
-        already prove); raises only when the image itself cannot be inspected.
+        When history is unreadable ``chain`` is ``None`` — NOT the view under
+        the chain's name. A view passed off as a chain and then subtracted
+        against a successfully measured base chain mixes units and can clamp a
+        multi-GB session to 0 bytes, silencing flatten, pool reclaim and the
+        ``snapshot_bytes`` notice. Callers combine figures only through
+        :func:`base_relative_disk_bytes`, which refuses mixed units. Raises only
+        when the image itself cannot be inspected.
         """
         fields = await self._inspect_image_fields(image)
         if fields is None:
@@ -1859,7 +1887,7 @@ class DockerBackend:
         image_id, size, _depth, _labels = fields
         cached = self._chain_bytes.get(image_id)
         if cached is not None:
-            return cached
+            return ImageDiskCost(view=size, chain=cached)
         rc, stdout_bytes, stderr_bytes = await run_docker_cli(
             ["docker", "history", "--no-trunc", "--format", "{{.Size}}", image_id]
         )
@@ -1869,7 +1897,7 @@ class DockerBackend:
                 image_id=image_id[:19],
                 stderr=stderr_bytes.decode("utf-8", errors="replace").strip(),
             )
-            return size
+            return ImageDiskCost(view=size, chain=None)
         total = _sum_history_sizes(stdout_bytes.decode("utf-8", errors="replace"))
         # The chain can never cost LESS than the view it presents; a parse that
         # says otherwise (an unexpected history format) is not trusted downward.
@@ -1877,29 +1905,16 @@ class DockerBackend:
         if len(self._chain_bytes) >= _CHAIN_BYTES_CACHE_MAX:
             self._chain_bytes.clear()
         self._chain_bytes[image_id] = chain
-        return chain
+        return ImageDiskCost(view=size, chain=chain)
 
-    async def _image_chain_bytes_or_zero(self, ref: str | None) -> int:
-        """Chain cost for accounting; 0 when the ref is unknown/absent."""
+    async def _image_disk_cost_or_none(self, ref: str | None) -> ImageDiskCost | None:
+        """Disk cost for accounting; ``None`` when the ref is unknown/absent."""
         if not ref:
-            return 0
+            return None
         try:
-            return await self.image_chain_bytes(ref)
+            return await self.image_disk_cost(ref)
         except SandboxBackendError:
-            return 0
-
-    async def _image_size_or_zero(self, ref: str | None) -> int:
-        """Base size for accounting; 0 when the base ref is unknown/absent.
-
-        Over-counting (charging full size when the base can't be resolved) is
-        safe for budget enforcement — it never under-reports the host filling.
-        """
-        if not ref:
-            return 0
-        try:
-            return await self.image_size(ref)
-        except SandboxBackendError:
-            return 0
+            return None
 
     async def _unique_bytes(
         self,
@@ -1920,15 +1935,18 @@ class DockerBackend:
         GC writer — the disk over-limit notice then never fired for precisely
         the superseded-history chains this feature exists to catch.
 
-        ``image_chain_bytes`` reads ``docker history`` and clamps up to the
-        view, so it never reports below ``.Size`` and degrades to the view only
-        when history is unreadable."""
-        _image_id, _size, _depth, labels = image_fields
-        chain = await self._image_chain_bytes_or_zero(image_ref)
-        if labels.get(FLATTENED_LABEL_KEY) == FLATTENED_LABEL_VALUE:
-            return chain
-        base_chain = await self._image_chain_bytes_or_zero(base_ref)
-        return max(0, chain - base_chain)
+        The base is subtracted only when BOTH chains were measured; if either
+        ``docker history`` probe failed the image is charged its full
+        best-known cost (see :func:`base_relative_disk_bytes`) — an
+        unmeasurable image is over-counted, never accounted as 0."""
+        _image_id, size, _depth, labels = image_fields
+        cost = await self._image_disk_cost_or_none(image_ref)
+        if cost is None:
+            # Inspected a moment ago; vanished since. Charge the view we saw.
+            cost = ImageDiskCost(view=size, chain=None)
+        flattened = labels.get(FLATTENED_LABEL_KEY) == FLATTENED_LABEL_VALUE
+        base = None if flattened else await self._image_disk_cost_or_none(base_ref)
+        return base_relative_disk_bytes(cost, base, flattened=flattened)
 
 
 # Shared with the registry's resume-time placeholder neutralization so the

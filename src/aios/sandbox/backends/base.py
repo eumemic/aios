@@ -279,6 +279,52 @@ class ManagedImage:
     labels: dict[str, str]
 
 
+@dataclass(frozen=True, slots=True)
+class ImageDiskCost:
+    """One image's size, carrying WHICH unit was actually measured.
+
+    ``view`` is ``.Size`` (always readable when the image exists). ``chain`` is
+    Σ layer bytes from ``docker history``, or ``None`` when that probe failed.
+    The two are different units: a chain is >= its view, often by multiples.
+    """
+
+    view: int
+    chain: int | None
+
+    @property
+    def best(self) -> int:
+        """The most faithful single figure: the chain if measured, else the view."""
+        return self.chain if self.chain is not None else self.view
+
+
+def base_relative_disk_bytes(
+    image: ImageDiskCost, base: ImageDiskCost | None, *, flattened: bool
+) -> int:
+    """Unique on-disk bytes an image adds over its shared base — the ONE rule
+    every accounting writer (snapshot commit/flatten, GC pointer-heal, pool
+    budget, per-account cap) uses.
+
+    The base is subtracted only when BOTH sides were measured as chains. Any
+    other combination is unmeasurable as a base-relative figure:
+
+    - child view - base chain (child history failed) can clamp to 0 although
+      the session holds GBs of layers — silencing pool reclaim and the
+      ``snapshot_bytes`` notice;
+    - view - view (both failed) is 0 for a write-then-delete session;
+    - child chain - base view (base history failed) is a different unit again.
+
+    So an unmeasurable pair is charged the image's FULL best-known cost, the
+    same over-count the codebase already takes for an unresolvable base
+    ("over-count is safe; never under-report"). Disk accounting fails toward
+    "the host is filling", never toward "this session is free".
+    A flattened (standalone) image shares nothing with the base and is always
+    charged in full; ``base is None`` means no/unresolvable base.
+    """
+    if flattened or base is None or image.chain is None or base.chain is None:
+        return image.best
+    return max(0, image.chain - base.chain)
+
+
 # Outcome of a single snapshot verb (``SandboxBackend.snapshot``).
 SnapshotKind = Literal["committed", "flattened", "skipped_empty", "skipped_stale"]
 
@@ -498,19 +544,21 @@ class SandboxBackend(Protocol):
         """
         ...
 
-    async def image_chain_bytes(self, image: str) -> int:
-        """Return ``image``'s on-disk chain cost: the SUM of its layer sizes.
+    async def image_disk_cost(self, image: str) -> ImageDiskCost:
+        """Return ``image``'s VIEW (``.Size``) and, when it can be measured,
+        its on-disk CHAIN cost (Σ layer sizes).
 
-        This is the figure every disk control must be enforced against
-        (#2349). ``image_size`` reports the current filesystem *view*, which
-        charges a byte once no matter how many superseded copies the interior
-        layers still hold — so a commit-per-idle-exit chain can occupy 20 GB
-        while reporting 6.6 GB, and both the flatten trigger and the pool
-        budget silently never fire.
-
-        Backends that cannot decompose a chain may return ``image_size``; the
-        contract is only that the answer is never LESS than the view. Raises
-        :class:`SandboxBackendError` on an absent image or unreachable daemon.
+        The chain is the figure every disk control must be enforced against
+        (#2349): the view charges a byte once no matter how many superseded
+        copies the interior layers still hold, so a commit-per-idle-exit chain
+        can occupy 20 GB while reporting 6.6 GB. ``chain`` is ``None`` when the
+        backend could not decompose the chain (history unreadable, or a backend
+        with no notion of layers) — it is NEVER silently replaced by the view,
+        because a view passed off as a chain and then subtracted against a
+        real base chain mixes units and can account a session at 0 bytes.
+        Combine measurements only through :func:`base_relative_disk_bytes`.
+        Raises :class:`SandboxBackendError` on an absent image or unreachable
+        daemon.
         """
         ...
 

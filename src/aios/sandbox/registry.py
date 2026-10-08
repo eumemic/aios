@@ -58,6 +58,7 @@ from aios.sandbox.backends.base import (
     SESSION_LABEL_KEY,
     VAULT_PLACEHOLDER_KEYS_LABEL_KEY,
     CommandResult,
+    ImageDiskCost,
     ManagedImage,
     SandboxBackend,
     SandboxBackendError,
@@ -65,6 +66,7 @@ from aios.sandbox.backends.base import (
     SandboxHandle,
     SandboxSnapshotTimeoutError,
     SandboxSpec,
+    base_relative_disk_bytes,
     split_label_list,
 )
 from aios.sandbox.git_proxy import GitProxy
@@ -3311,7 +3313,7 @@ class SandboxRegistry:
             return GcPressureResult()
         if dry_run is None:
             dry_run = get_settings().sandbox_snapshot_pool_reclaim_mode == "dry_run"
-        base_sizes: dict[str, int] = {}
+        base_sizes: dict[str, ImageDiskCost | None] = {}
         sized = [
             (v, await self._unique_bytes_for_image(v.image, base_sizes))
             for v in retained
@@ -3534,7 +3536,7 @@ class SandboxRegistry:
         from aios.harness import runtime
 
         totals: dict[str, int] = {}
-        base_sizes: dict[str, int] = {}
+        base_sizes: dict[str, ImageDiskCost | None] = {}
         for v in retained:
             if v.is_canonical and v.session_id in states:
                 account = states[v.session_id].account_id
@@ -3638,7 +3640,9 @@ class SandboxRegistry:
         # would make an external ``docker image prune -af`` destructive.
         if not isinstance(self._store, LocalDaemonStore):
             return
-        base_sizes: dict[str, int] = {}  # shared across the pass (sessions share a base)
+        base_sizes: dict[
+            str, ImageDiskCost | None
+        ] = {}  # shared across the pass (sessions share a base)
         for v in retained:
             if not v.is_canonical:
                 continue
@@ -3658,10 +3662,12 @@ class SandboxRegistry:
                 ub = await self._unique_bytes_for_image(v.image, base_sizes)
                 await self._write_snapshot_pointer(sid, v.removal_ref, ub)
 
-    async def _unique_bytes_for_image(self, image: ManagedImage, base_sizes: dict[str, int]) -> int:
+    async def _unique_bytes_for_image(
+        self, image: ManagedImage, base_sizes: dict[str, ImageDiskCost | None]
+    ) -> int:
         """Unique bytes for accounting: full chain cost for a flattened
         (standalone) image, else ``tag chain - base chain``. ``base_sizes``
-        caches base lookups.
+        caches base lookups (``None`` = base unresolvable).
 
         The figure is the on-disk CHAIN cost (Σ layer bytes), not ``.Size``
         (#2349). ``.Size`` is the current filesystem view: it charges a byte
@@ -3671,34 +3677,41 @@ class SandboxRegistry:
         unenforceable — it read 28.6 GB used against a 60 GB budget while the
         tagged images held ~38 GB of unique layer bytes, and logged
         ``reclaimed_bytes: 0`` every tick in enforce mode.
-        """
-        image_bytes = await self._chain_bytes_for_image(image)
-        if image.labels.get(FLATTENED_LABEL_KEY) == FLATTENED_LABEL_VALUE:
-            return image_bytes
-        base_ref = image.labels.get(BASE_IMAGE_LABEL_KEY)
-        if not base_ref:
-            return image_bytes
-        if base_ref not in base_sizes:
-            try:
-                base_sizes[base_ref] = await self._backend.image_chain_bytes(base_ref)
-            except SandboxBackendError:
-                base_sizes[base_ref] = 0  # over-count is safe; never under-report
-        return max(0, image_bytes - base_sizes[base_ref])
 
-    async def _chain_bytes_for_image(self, image: ManagedImage) -> int:
-        """On-disk chain cost of an enumerated image, falling back to its view.
+        The base is subtracted only when BOTH the image's and the base's chains
+        were measured (:func:`base_relative_disk_bytes`). A failed history
+        probe on either side makes the pair unmeasurable, and the image is then
+        charged its full best-known cost — never ``view - chain``, which clamps
+        a multi-GB session to 0 and silences pool reclaim and the cap notice.
+        """
+        cost = await self._disk_cost_for_image(image)
+        flattened = image.labels.get(FLATTENED_LABEL_KEY) == FLATTENED_LABEL_VALUE
+        base_ref = image.labels.get(BASE_IMAGE_LABEL_KEY)
+        base: ImageDiskCost | None = None
+        if base_ref and not flattened:
+            if base_ref not in base_sizes:
+                try:
+                    base_sizes[base_ref] = await self._backend.image_disk_cost(base_ref)
+                except SandboxBackendError:
+                    base_sizes[base_ref] = None  # over-count is safe; never under-report
+            base = base_sizes[base_ref]
+        return base_relative_disk_bytes(cost, base, flattened=flattened)
+
+    async def _disk_cost_for_image(self, image: ManagedImage) -> ImageDiskCost:
+        """View + (when measurable) chain of an enumerated image.
 
         The enumeration carries ``.Size`` only, so the chain is measured by a
         second probe keyed on the (content-addressed, hence cacheable) image id.
-        An unreadable probe degrades to the view rather than failing the tick:
-        under-reporting reclaims less than it could, whereas raising here would
-        stop reclamation altogether — the failure this change exists to end.
+        An unreadable probe degrades to ``chain=None`` with the enumerated view
+        rather than failing the tick — raising here would stop reclamation
+        altogether — and :func:`base_relative_disk_bytes` then charges the full
+        view instead of subtracting a base it cannot compare against.
         """
         try:
-            return await self._backend.image_chain_bytes(image.image_id)
+            return await self._backend.image_disk_cost(image.image_id)
         except SandboxBackendError:
             log.warning("sandbox.chain_bytes_unavailable", image_id=image.image_id[:19])
-            return image.size_bytes
+            return ImageDiskCost(view=image.size_bytes, chain=None)
 
     async def _remove_canonical_image_and_clear_pointer(
         self,

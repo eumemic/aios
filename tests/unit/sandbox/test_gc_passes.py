@@ -1166,3 +1166,71 @@ async def test_unreadable_chain_probe_degrades_to_the_view_and_keeps_reclaiming(
     )
 
     assert pressure.pool_used_bytes == 6 * 1000**3  # the view, not a crash
+
+
+# ─── mixed chain/view units never account a session at 0 (#2349 review) ─────
+
+
+def _based_verdict(session_id: str, *, view_bytes: int) -> GcImageVerdict:
+    verdict = _canonical_verdict(session_id, size_bytes=view_bytes)
+    return replace(verdict, image=replace(verdict.image, labels={"aios.base_image": "base:latest"}))
+
+
+async def _pool_used(backend: FakeBackend, verdict: GcImageVerdict) -> int:
+    registry = SandboxRegistry(backend=backend)
+    sid = cast(str, verdict.session_id)
+    states = {sid: _acct_state(sid, account_id="acct", days_dormant=30)}
+    registry._fresh_pool_candidate_state = AsyncMock(return_value=states[sid])  # type: ignore[method-assign]
+    pressure = await registry._gc_pool_budget_pass(
+        [verdict], states, 1_000, get_settings().instance_id, dry_run=True
+    )
+    return pressure.pool_used_bytes
+
+
+@pytest.mark.asyncio
+async def test_child_chain_probe_fails_base_chain_ok_never_accounts_zero(
+    fake_pool: None,
+) -> None:
+    """The child's history probe fails, so it is known only by its 3 GB VIEW;
+    the base's CHAIN (6 GB, an apt-shaped base over a 2 GB view) measured fine.
+    ``3 GB view - 6 GB chain`` clamps to 0: the pool budget then believes the
+    session is free and never reclaims it. Unmeasurable must over-count."""
+    backend = FakeBackend()  # child absent from both tables ⇒ chain probe raises
+    backend.image_sizes_by_ref["base:latest"] = 2 * 1000**3
+    backend.image_chain_bytes_by_ref["base:latest"] = 6 * 1000**3
+    verdict = _based_verdict("sess_x", view_bytes=3 * 1000**3)
+
+    used = await _pool_used(backend, verdict)
+
+    assert used > 0, "an unmeasurable image must never be accounted as 0 bytes"
+    assert used >= 3 * 1000**3 - 2 * 1000**3  # at least the like-for-like view delta
+
+
+@pytest.mark.asyncio
+async def test_base_chain_probe_fails_child_chain_ok_charges_the_full_chain(
+    fake_pool: None,
+) -> None:
+    """The base cannot be measured as a chain; the child can. There is no
+    like-for-like base figure to subtract, so the child is charged its whole
+    chain (over-count, the safe side for disk)."""
+    backend = FakeBackend()
+    backend.image_chain_bytes_by_ref["img-sess_x"] = 9 * 1000**3
+    backend.image_sizes_by_ref["base:latest"] = 2 * 1000**3
+    backend.history_unavailable_refs.add("base:latest")
+    verdict = _based_verdict("sess_x", view_bytes=3 * 1000**3)
+
+    assert await _pool_used(backend, verdict) == 9 * 1000**3
+
+
+@pytest.mark.asyncio
+async def test_both_chain_probes_fail_never_accounts_zero(fake_pool: None) -> None:
+    """Both probes fail ⇒ both known only as views. A write-then-delete
+    session's view equals its base's view, so view-minus-view is 0 though the
+    session holds real layers. Charge the full view instead."""
+    backend = FakeBackend()
+    backend.image_sizes_by_ref["img-sess_x"] = 2 * 1000**3
+    backend.image_sizes_by_ref["base:latest"] = 2 * 1000**3
+    backend.history_unavailable_refs.update({"img-sess_x", "base:latest"})
+    verdict = _based_verdict("sess_x", view_bytes=2 * 1000**3)
+
+    assert await _pool_used(backend, verdict) == 2 * 1000**3

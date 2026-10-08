@@ -26,6 +26,18 @@
   flatten headroom gate still sizes on the view, since the export writes
   content, not history.
 
+- A failed `docker history` probe no longer mixes units. The backend now
+  reports an image's view and its chain separately, with `chain = None` when
+  history is unreadable, instead of passing the view off as the chain.
+  Base-relative accounting (snapshot commit/flatten, GC pointer-heal, pool
+  budget, per-account cap) subtracts the base only when BOTH chains were
+  measured. Otherwise it charges the image's full best-known cost, failing safe
+  for disk. Before, a child view minus a measured base chain clamped multi-GB
+  sessions to 0 bytes, which silenced pool reclaim and the `snapshot_bytes`
+  notice. The flatten trigger compares view against view when either chain is
+  unmeasurable, so it can no longer invent dead history and flatten a session
+  into a private copy of its base.
+
 - `sessions.snapshot_bytes` is now one quantity no matter which writer wrote it
   last. The snapshot commit/flatten path recorded the `.Size` view while the GC
   pointer-heal path recorded the on-disk chain cost, so the disk over-limit
