@@ -94,6 +94,7 @@ class WfRun:
             input_ (Any | Unset):
             output (Any | Unset):
             budget_usd (float | None | Unset):
+            budget_run_id (None | str | Unset):
             default_child_model (None | str | Unset):
             call_llm_cost_microusd (int | Unset):  Default: 0.
             call_llm_tokens_complete (bool | Unset):  Default: True.
@@ -135,6 +136,7 @@ class WfRun:
     input_: Any | Unset = UNSET
     output: Any | Unset = UNSET
     budget_usd: float | None | Unset = UNSET
+    budget_run_id: None | str | Unset = UNSET
     default_child_model: None | str | Unset = UNSET
     call_llm_cost_microusd: int | Unset = 0
     call_llm_tokens_complete: bool | Unset = True
@@ -292,6 +294,12 @@ class WfRun:
         else:
             budget_usd = self.budget_usd
 
+        budget_run_id: None | str | Unset
+        if isinstance(self.budget_run_id, Unset):
+            budget_run_id = UNSET
+        else:
+            budget_run_id = self.budget_run_id
+
         default_child_model: None | str | Unset
         if isinstance(self.default_child_model, Unset):
             default_child_model = UNSET
@@ -398,6 +406,8 @@ class WfRun:
             field_dict["output"] = output
         if budget_usd is not UNSET:
             field_dict["budget_usd"] = budget_usd
+        if budget_run_id is not UNSET:
+            field_dict["budget_run_id"] = budget_run_id
         if default_child_model is not UNSET:
             field_dict["default_child_model"] = default_child_model
         if call_llm_cost_microusd is not UNSET:
@@ -646,6 +656,15 @@ class WfRun:
 
         budget_usd = _parse_budget_usd(d.pop("budget_usd", UNSET))
 
+        def _parse_budget_run_id(data: object) -> None | str | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(None | str | Unset, data)
+
+        budget_run_id = _parse_budget_run_id(d.pop("budget_run_id", UNSET))
+
         def _parse_default_child_model(data: object) -> None | str | Unset:
             if data is None:
                 return data
@@ -780,6 +799,7 @@ class WfRun:
             input_=input_,
             output=output,
             budget_usd=budget_usd,
+            budget_run_id=budget_run_id,
             default_child_model=default_child_model,
             call_llm_cost_microusd=call_llm_cost_microusd,
             call_llm_tokens_complete=call_llm_tokens_complete,

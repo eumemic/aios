@@ -75,7 +75,8 @@ class OperatorAuthority:
 class SessionAuthority:
     """A run an agent session launched: ``call_workflow``, a workflow-as-model turn, or
     a trigger fire. The session's current surface and vaults bound it.
-    ``parent_run_id`` is lineage only: it sets the depth budget, never the authority."""
+    ``parent_run_id`` is lineage only: it sets the depth budget and the spend ceiling the
+    run inherits (#2476), never the authority."""
 
     session_id: str
     parent_run_id: str | None
@@ -325,6 +326,9 @@ class WfRun(BaseModel):
     input: Any = None  # arbitrary JSON: a workflow's input need not be an object
     output: Any = None  # arbitrary JSON: the script's return value
     budget_usd: float | None = None
+    # The nearest ancestor run with a ``budget_usd`` (#2476). A run with no budget of
+    # its own is held to that run's ceiling; ``None`` when no ancestor has one.
+    budget_run_id: str | None = None
     default_child_model: str | None = None
     # The run's own ``call_llm`` inference spend (#1633), in micro-USD. Raw inference
     # the run runs on the worker (``call_llm()``) has no child-session row, so it lives
@@ -408,11 +412,11 @@ WORKFLOW_SCRIPT_CONTRACT = """Workflow script contract:
   `main`.
 - Injected capability API, available without imports:
   - `agent(input, *, agent_id=None, output_schema=None, model=None, label=None)`: invoke a generic or named agent and await its result.
-  - `invoke_workflow(workflow_id, input, *, version=None, output_schema=None, label=None, as_agent=None, request_ref=None)`: invoke another workflow as a sub-run and await its result (the run dual of `agent`). `version` pins a registered version; omitted, the version current at launch runs. The sub-run runs under this run's surface intersected with the target's, and binds this run's vaults; a failed or gone sub-run raises like a failed `agent`. `as_agent={"agent_id": ..., "version": N}` also intersects the sub-run's surface with that agent version's; only a run an operator launched may pass it. `request_ref` hands the sub-run a request this run can resolve (the one it was created with, or one its `sample_requests` call returned), which the sub-run may then resolve itself; with `input=None` it starts with that request as a workflow-as-model run would, with an `input` it starts with that input.
+  - `invoke_workflow(workflow_id, input, *, version=None, output_schema=None, label=None, as_agent=None, request_ref=None, budget_usd=None)`: invoke another workflow as a sub-run and await its result (the run dual of `agent`). `version` pins a registered version; omitted, the version current at launch runs. The sub-run runs under this run's surface intersected with the target's, and binds this run's vaults; a failed or gone sub-run raises like a failed `agent`. `as_agent={"agent_id": ..., "version": N}` also intersects the sub-run's surface with that agent version's; only a run an operator launched may pass it. `request_ref` hands the sub-run a request this run can resolve (the one it was created with, or one its `sample_requests` call returned), which the sub-run may then resolve itself; with `input=None` it starts with that request as a workflow-as-model run would, with an `input` it starts with that input. `budget_usd` gives the sub-run a ceiling of its own, clamped to what this run may still spend; without one it is held to this run's.
   - `tool(name, input)`: invoke a declared tool; tool errors are returned, not raised. An operator run that declares the replay tools can read an agent's past requests: `tool("sample_requests", {"agent_id", "start", "end", "n", "seed", "cluster_cap"})` returns `{"items": [...]}`, a seeded sample of the agent's answered requests in `[start, end)` (ISO-8601 times), each with a `request_ref`, its session, time, model, `response_event_id` and whether it is `missing`. `tool("get_request", {"request_ref", "model"})` rebuilds one as `{messages, tools, params, fidelity}`. A ref a sample returned can be passed to `call_llm(request_ref=)`, `invoke_workflow(request_ref=)` and `get_request`.
   - `call_llm(request)`: run one raw inference turn and await the assistant turn. `request` carries `model` (omit to use the run's default child model; a `workflow:` target is rejected), `messages` (required), optional `tools` (schemas OFFERED — the model may request a call, but call_llm never runs it), and optional `params` (provider knobs). The result is `{"content", "tool_calls", "finish_reason", "usage", "cost", "message"}`, or `{"error": ...}` — a model error is returned, not raised. Its cost is metered against this run's `budget_usd` ceiling, so a budget-exhausted run refuses further `call_llm`. Use it to route/judge/fact-check around inference; use `agent(...)` when you want the tool calls executed. `call_llm(request_ref=ref, model=None)` sends a request this run can resolve instead (the one it was created with, or one its `sample_requests` call returned), rendered for `model`; with the model it was captured for it keeps that request's provider params; a request captured for a `workflow:` binding keeps them for any model, with an endpoint admitted only from the allowlist; otherwise another model gets none. Any other ref resolves as an error value.
   - `gate()`: suspend until an external resume delivers a value.
-  - `budget()`: read this run's shared child-spend budget, or None when unset.
+  - `budget()`: read the budget this run is held to, `{total_usd, spent_usd, remaining_usd}` over the budget run's whole subtree: its own `budget_usd`, else its nearest budgeted ancestor's; None when there is none. Once it is spent, new `agent()`, `call_llm` and `invoke_workflow` calls are refused.
   - `sub_runs()`: read facts about every session and run this run created, directly or through descendants: `{"nodes": [...], "truncated": bool, "litellm_version": str}`, each node with its kind, label, workflow or agent and the version that ran, status, timings, and usage per model (tokens, `cost_microusd` as charged, and `uncached_cost_microusd`, the same tokens priced with no prompt-cache discount, or null for a model outside the cost map). Metadata only.
   - `parallel(thunks)`: run zero-argument callables concurrently (for example,
     `lambda: agent(...)`). A failed agent branch yields `None` at the barrier instead
@@ -638,7 +642,12 @@ class WfRunCreate(BaseModel):
         gt=0,
         description=(
             "Optional USD spend ceiling for this run's whole creation subtree (its "
-            "agent() children, their sub-agents, and sub-runs)."
+            "agent() children, their sub-agents, and sub-runs). Once the subtree has "
+            "spent it, the run and every descendant run without a budget of its own "
+            "are refused new agent(), call_llm and invoke_workflow calls. A sub-run "
+            "given its own budget is held to that budget, set at launch to at most what "
+            "remained, so the subtree can overshoot by up to the budgets of sub-runs "
+            "still in flight."
         ),
     )
     default_child_model: str | None = Field(

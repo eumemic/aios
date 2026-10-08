@@ -60,6 +60,7 @@ _DB_HELPER_SYMBOLS = frozenset(
         "queries.acquire_workspace_hierarchy_advisory_xact_locks",
         "queries.add_trigger",
         "_rearm",
+        "_held_budget",
         "_validate_trigger_references",
         "queries.add_operator_trigger",
         "queries.get_operator_trigger",
