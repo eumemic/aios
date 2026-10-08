@@ -20,6 +20,7 @@ from typing import Any
 from aios.models.environments import EnvironmentConfig, LimitedNetworking
 from aios.sandbox.backends.base import (
     CommandResult,
+    ImageDiskCost,
     ManagedImage,
     ManagedSandboxRef,
     SandboxBackend,
@@ -101,6 +102,12 @@ class FakeBackend:
     # ``None`` value models "absent" for verified-negative ``image_labels``.
     image_labels_by_ref: dict[str, dict[str, str] | None] = field(default_factory=dict)
     image_sizes_by_ref: dict[str, int] = field(default_factory=dict)
+    # Σ layer bytes per ref (image id or tag). Absent ⇒ the chain costs exactly
+    # its view (``image_sizes_by_ref``); present ⇒ the chain carries dead
+    # history the view cannot see (#2349).
+    image_chain_bytes_by_ref: dict[str, int] = field(default_factory=dict)
+    # Refs whose chain probe fails: ``image_disk_cost`` reports the view only.
+    history_unavailable_refs: set[str] = field(default_factory=set)
     # Refs ``remove_image`` should refuse (return False) rather than remove.
     refuse_remove_refs: set[str] = field(default_factory=set)
     removed_image_refs: list[str] = field(default_factory=list)
@@ -249,6 +256,21 @@ class FakeBackend:
         if image not in self.image_sizes_by_ref:
             raise SandboxBackendError(f"fake image not found: {image}")
         return self.image_sizes_by_ref[image]
+
+    async def image_disk_cost(self, image: str) -> ImageDiskCost:
+        """View + on-disk chain cost (Σ layer bytes). The chain defaults to the
+        view, so a test that only sets ``image_sizes_by_ref`` sees view ==
+        chain; set ``image_chain_bytes_by_ref`` to model dead history in the
+        interior layers (the #2349 case), and ``history_unavailable_refs`` to
+        model a failed ``docker history`` probe (``chain=None``)."""
+        self.calls.append(("image_disk_cost", {"image": image}))
+        chain = self.image_chain_bytes_by_ref.get(image)
+        view = self.image_sizes_by_ref.get(image, chain)
+        if view is None:
+            raise SandboxBackendError(f"fake image not found: {image}")
+        if image in self.history_unavailable_refs:
+            return ImageDiskCost(view=view, chain=None)
+        return ImageDiskCost(view=view, chain=chain if chain is not None else view)
 
     async def image_labels(self, image: str) -> dict[str, str] | None:
         self.calls.append(("image_labels", {"image": image}))

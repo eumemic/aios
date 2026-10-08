@@ -2,6 +2,62 @@
 
 ## Unreleased
 
+- Snapshot flatten trigger and the snapshot pool budget now measure the on-disk
+  CHAIN cost (Σ layer bytes, via `docker history`, cached per content-addressed
+  image id) instead of `docker image inspect .Size` — the current filesystem
+  *view*, which charges a superseded byte once however many copies overlay
+  still holds in the interior layers. On server-b three live chains held ~65 GB
+  for ~23 GB of content while reporting 6.6/9.0/7.6 GB, so neither the 12 GiB
+  per-session budget nor the 200-layer depth ceiling could ever fire (zero
+  `flattened` events in 24 h), and the pool reclaimer logged
+  `reclaimed_bytes: 0` every tick against a budget it read as 28.6/60 GB used.
+  A flatten now also fires on `added_chain > 2 × added_view` — more than half of
+  what the session added on top of its base is dead history — which is the one
+  budget-less trigger short of the depth ceiling. That ratio is measured
+  base-relative, like the projected-unique figure beside it: a flatten can only
+  reclaim history THIS session added, never the shared base's own interior
+  chain, which stays resident (shared) whatever the session does. A session that writes
+  then deletes clamps its added view to zero, so the ratio's positivity guard is
+  on the added chain: a fully dead added chain is the strongest case to flatten,
+  not one exempt from the trigger. Measured over the whole
+  chain instead, any base with the ordinary
+  `apt-get install … && rm -rf /var/lib/apt/lists` shape would force a
+  reclaim-nothing flatten on every session's first snapshot, every idle. The
+  flatten headroom gate still sizes on the view, since the export writes
+  content, not history.
+
+- A failed `docker history` probe no longer mixes units. The backend now
+  reports an image's view and its chain separately, with `chain = None` when
+  history is unreadable, instead of passing the view off as the chain.
+  Base-relative accounting (snapshot commit/flatten, GC pointer-heal, pool
+  budget, per-account cap) subtracts the base only when BOTH chains were
+  measured. Otherwise it charges the image's full best-known cost, failing safe
+  for disk. Before, a child view minus a measured base chain clamped multi-GB
+  sessions to 0 bytes, which silenced pool reclaim and the `snapshot_bytes`
+  notice. The flatten trigger compares view against view when either chain is
+  unmeasurable, so it can no longer invent dead history and flatten a session
+  into a private copy of its base.
+
+- The dead-history flatten no longer fires on a guess, and its break-even is
+  the base's VIEW. A base that cannot be inspected (a transient daemon error or
+  "No such image") used to read as a 0-byte base, so the base's own dead
+  history was charged to the session and flattened it; now the trigger treats
+  every base-relative figure as unknown — dead-history cannot fire, the budget
+  sees only the writable layer, the depth ceiling still applies. A
+  `docker history` that exits 0 with an unparseable body (`N/A`, an unknown
+  unit, empty, fewer lines than layers) reports `chain = None` and is not
+  cached, instead of caching the view as the chain; IEC units (`MiB`) parse,
+  anything else fails closed. A flatten is `export | import` of the current
+  view: it copies the base's view, never its history, so it now fires when the
+  reclaimable session-added history exceeds the base view, not the base chain.
+
+- `sessions.snapshot_bytes` is now one quantity no matter which writer wrote it
+  last. The snapshot commit/flatten path recorded the `.Size` view while the GC
+  pointer-heal path recorded the on-disk chain cost, so the disk over-limit
+  notice — which gates on the commit-path figure — stayed unreachable for
+  exactly the superseded-history chains this work exists to catch. Both paths
+  are chain-denominated and base-relative now.
+
 - **Operator triggers show up in `list_account_triggers`; a non-finite
   `budget_usd` is a 422 (#2525).** The account-wide trigger read INNER JOINed
   `sessions`, so operator triggers (#2473, no owning session) never appeared
