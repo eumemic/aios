@@ -124,19 +124,11 @@ def test_downgrade_drops_the_constraint_under_a_bounded_lock_wait() -> None:
     ]
 
 
-def test_migration_declares_the_parent_present_on_this_branch() -> None:
-    """Pin the declared parent so a stale/forked edit is caught.
-
-    NOTE (#2513 fix round): at the time of writing, master has gained
-    ``0192_wf_runs_budget_run`` and ``0193_wf_runs_agent_principal`` since this
-    branch was cut, so parenting 0194 on ``0191`` forks the alembic history into
-    two heads (0193 and 0194) *at merge time*. Re-parenting to ``0193`` is only
-    correct once this branch is rebased so that 0192/0193 are physically present
-    here -- otherwise the branch-only history/count checks fail on a missing
-    parent. Repointing to ``0193`` WITHOUT that rebase trades a merge-time fork
-    for a red unit gate, so this fix round leaves the parent on the parent that
-    exists on this branch and flags the rebase as a separate, human/driver step.
-    """
+def test_migration_is_parented_on_masters_head() -> None:
+    """0194 sits on top of master's 0193 (``0192_wf_runs_budget_run`` ->
+    ``0193_wf_runs_agent_principal``), so the alembic history keeps a single head.
+    Parenting it on 0191 (where this branch was cut) would fork it into two heads,
+    0193 and 0194, at merge time (#2513)."""
     migration = _load()
     assert migration.revision == "0194"
-    assert migration.down_revision == "0191"
+    assert migration.down_revision == "0193"
