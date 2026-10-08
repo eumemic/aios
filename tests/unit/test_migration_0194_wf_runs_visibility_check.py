@@ -51,9 +51,8 @@ def _capture(operation: str) -> tuple[list[str], Mock]:
             statements.append(_ENTER)
             return self
 
-        def __exit__(self, *exc: object) -> bool:
+        def __exit__(self, *exc: object) -> None:
             statements.append(_EXIT)
-            return False
 
     context = Mock()
     context.autocommit_block.return_value = _Block()
