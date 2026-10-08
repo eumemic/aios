@@ -1098,7 +1098,29 @@ class DockerBackend:
         # never on the view: a write-then-delete session clamps its added view to
         # zero while its added chain grows, and that is 100% dead history — the
         # strongest case to flatten, not an exemption from the trigger.
-        dead_history = added_chain > 0 and added_chain > _CHAIN_DEAD_HISTORY_RATIO * added_view
+        #
+        # The ratio alone is SCALE-FREE — it asks only whether the added chain is
+        # PROPORTIONALLY dead, never whether the dead bytes are worth what the
+        # flatten costs. But a flatten produces a STANDALONE image (see
+        # ``_flatten`` and ``_unique_bytes``: a flattened image shares no layers
+        # with the base and is charged its FULL chain). So the flatten un-shares
+        # the base — it writes a private ``base_chain``-byte copy of the base's
+        # content while the shared base stays resident for every other session —
+        # and the only disk it can actually reclaim is the SESSION-ADDED dead
+        # history, ``added_chain - added_view``. Firing on the ratio alone lets a
+        # few MB (or 4 KB) of proportionally-dead history buy a multi-GB private
+        # base copy: net on-disk disk goes UP by ~one base per session (the #2349
+        # pathology with the sign flipped, company#383 F1's headline clause).
+        # The flatten is therefore worthwhile ONLY when the dead history it
+        # reclaims outweighs the base it duplicates; gate the ratio on that
+        # absolute-reclaim floor so the trigger fires only when a flatten reduces
+        # total on-disk bytes.
+        reclaimable = added_chain - added_view
+        dead_history = (
+            added_chain > 0
+            and added_chain > _CHAIN_DEAD_HISTORY_RATIO * added_view
+            and reclaimable > base_chain
+        )
         retry_attempt = self._snapshot_timeout_attempts.get(sandbox_id, 0)
         snapshot_timeout_s = _snapshot_timeout_s(
             size_rw, retry_attempt=retry_attempt, size_walk_seconds=size_walk_seconds

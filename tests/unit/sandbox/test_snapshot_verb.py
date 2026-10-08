@@ -943,6 +943,58 @@ class TestBaseRelativeChainTriggers:
             "— the .Size view (≈5 GB) leaves the over-limit notice unreachable"
         )
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("budget", [None, 4 * GIB], ids=["no_budget", "default_budget"])
+    async def test_small_reclaim_does_not_flatten_and_duplicate_the_base(
+        self, fake_docker: _FakeDocker, budget: int | None
+    ) -> None:
+        """BLOCKING (company#383 F1 headline clause): the dead-history ratio is
+        scale-free, so a few MB of session-added dead history over a 2 GB base
+        trips the ``added_chain > K * added_view`` ratio and flattens — but a
+        flatten writes a STANDALONE ~2 GB copy of the base to reclaim ~45 MB,
+        net disk +~1.955 GB per session. The trigger must fire only when the
+        flatten it causes actually reduces total on-disk bytes, i.e. when the
+        session-added dead history it can reclaim outweighs the base it would
+        un-share and duplicate.
+
+        Shared base view 2 GB / chain 2 GB; parent view 2 GB + 5 MB, chain
+        2 GB + 50 MB ⇒ added view 5 MB, added chain 50 MB, reclaimable 45 MB —
+        proportionally dead (50 > 2*5) but a tiny absolute reclaim against a
+        2 GB base. Must COMMIT under both ``None`` and the default 4 GiB budget
+        (``over_budget`` cannot mask it: projected unique ≈ 50 MB ≪ 4 GiB)."""
+        self._base(fake_docker, view=2 * GB, chain=2 * GB)
+        self._parent_on_base(fake_docker, view=2 * GB + 5 * 1000**2, chain=2 * GB + 50 * 1000**2)
+        fake_docker.size_rw = 1_000_000  # 1 MB
+
+        out = await DockerBackend().snapshot(
+            "cid", "tag:latest", empty_floor_bytes=8192, flatten_if_unique_bytes_over=budget
+        )
+
+        assert out.kind == "committed", (
+            "a flatten here writes a standalone ~2 GB base copy to reclaim ~45 MB — "
+            "net disk goes UP"
+        )
+        assert not fake_docker.pipelines, "no export|import pipeline may run"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("budget", [None, 4 * GIB], ids=["no_budget", "default_budget"])
+    async def test_four_kib_of_dead_history_never_buys_a_base_copy(
+        self, fake_docker: _FakeDocker, budget: int | None
+    ) -> None:
+        """Degenerate case: 4 KB of session-added chain, zero added view. The
+        ratio sees 100% dead history and (pre-fix) flattens — paying ~2 GB to
+        reclaim 4 KB. The absolute-reclaim floor must veto it."""
+        self._base(fake_docker, view=2 * GB, chain=2 * GB)
+        self._parent_on_base(fake_docker, view=2 * GB, chain=2 * GB + 4096)
+        fake_docker.size_rw = 1_000_000  # 1 MB
+
+        out = await DockerBackend().snapshot(
+            "cid", "tag:latest", empty_floor_bytes=8192, flatten_if_unique_bytes_over=budget
+        )
+
+        assert out.kind == "committed", "4 KB of dead history must never buy a multi-GB copy"
+        assert not fake_docker.pipelines
+
 
 class TestHistorySizeParsing:
     """``docker history --format '{{.Size}}'`` renders the FORMATTED field
