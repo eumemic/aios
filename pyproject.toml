@@ -21,7 +21,7 @@ dependencies = [
     # jsonschema's immutable registry disables remote $ref retrieval.
     "referencing==0.37.0",
     # Postgres + migrations + job queue
-    "asyncpg>=0.30",
+    "asyncpg>=0.32.0",
     "alembic>=1.13",
     "sqlalchemy>=2.0",          # required by alembic even when used without the ORM
     "procrastinate==3.8.1",     # exact pin so the task/connector API stays stable
