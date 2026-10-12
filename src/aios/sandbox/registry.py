@@ -2938,10 +2938,6 @@ class SandboxRegistry:
                     )
                 consecutive_failures = 0
                 health.record_success()
-                if pressure_callback is not None:
-                    callback_result = pressure_callback(pressure)
-                    if callback_result is not None:
-                        await callback_result
             except Exception as exc:
                 consecutive_failures += 1
                 health.record_failure(exc)
@@ -2980,6 +2976,22 @@ class SandboxRegistry:
                         error_class=type(exc).__name__,
                         error=str(exc),
                         next_attempt_seconds=_GC_INTERVAL_SECONDS,
+                    )
+                continue
+            # The GC tick itself succeeded. A failing pressure consumer is a
+            # separate fault: it must not be recorded as a GC failure (which
+            # would raise a false ``snapshot_gc_stalled`` while reclamation is
+            # running fine), so it is reported on its own.
+            if pressure_callback is not None:
+                try:
+                    callback_result = pressure_callback(pressure)
+                    if callback_result is not None:
+                        await callback_result
+                except Exception as exc:
+                    log.exception(
+                        "sandbox.gc_pressure_callback_failed",
+                        error_class=type(exc).__name__,
+                        error=str(exc),
                     )
 
     async def _gc_once(self, pool: asyncpg.Pool[Any]) -> GcPressureResult:

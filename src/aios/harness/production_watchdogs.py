@@ -314,10 +314,11 @@ async def run_production_watchdogs(
     max_specimens: int = 20,
     gc_health: SnapshotGcHealth | None = None,
 ) -> None:
-    """Run fail-open observers on a reconnecting, dedicated connection."""
-    inspector: Any = None
-    backoff = min(1.0, interval_seconds)
-    watchdog: HeldConnectionWatchdog | None = None
+    """Run fail-open observers.
+
+    The snapshot-GC stall check reads in-process state and runs in its own
+    loop; the DB-backed observers run on a reconnecting, dedicated connection.
+    """
     dead_man = ThroughputDeadMan(
         threshold_seconds=dead_man_threshold_seconds, rate_limit_seconds=rate_limit_seconds
     )
@@ -325,6 +326,58 @@ async def run_production_watchdogs(
         gc_health if gc_health is not None else SNAPSHOT_GC_HEALTH,
         rate_limit_seconds=rate_limit_seconds,
     )
+
+    async def gc_stall_loop() -> None:
+        # In-process state only, so it runs on its own cadence, fully
+        # independent of the DB path below: a PostgreSQL outage, a hung
+        # reconnect, or a slow DB observer must never mask a stalled disk
+        # reclaimer (aios#2343).
+        while True:
+            try:
+                gc_stall_watch.check()
+            except Exception:
+                log.exception("worker.gc_stall_check_failed")
+            await asyncio.sleep(interval_seconds)
+
+    gc_stall_task = asyncio.create_task(gc_stall_loop(), name="watchdog-gc-stall")
+    try:
+        await _run_db_watchdogs(
+            pool,
+            db_url,
+            held_threshold_seconds=held_threshold_seconds,
+            interval_seconds=interval_seconds,
+            rate_limit_seconds=rate_limit_seconds,
+            specimen_dir=specimen_dir,
+            journal_limit=journal_limit,
+            operation_timeout_seconds=operation_timeout_seconds,
+            activity_limit=activity_limit,
+            max_specimens=max_specimens,
+            dead_man=dead_man,
+        )
+    finally:
+        gc_stall_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await gc_stall_task
+
+
+async def _run_db_watchdogs(
+    pool: Any,
+    db_url: str,
+    *,
+    held_threshold_seconds: float,
+    interval_seconds: float,
+    rate_limit_seconds: float,
+    specimen_dir: Path,
+    journal_limit: int,
+    operation_timeout_seconds: float,
+    activity_limit: int,
+    max_specimens: int,
+    dead_man: ThroughputDeadMan,
+) -> None:
+    """DB-backed observers on a reconnecting, dedicated connection."""
+    inspector: Any = None
+    backoff = min(1.0, interval_seconds)
+    watchdog: HeldConnectionWatchdog | None = None
 
     while True:
         try:
@@ -382,9 +435,6 @@ async def run_production_watchdogs(
                 backoff = min(1.0, interval_seconds)
 
             await asyncio.sleep(interval_seconds)
-            # In-process state only: checked before the DB-backed observers so
-            # a DB outage cannot mask a stalled disk reclaimer.
-            gc_stall_watch.check()
             assert watchdog is not None
             await asyncio.wait_for(watchdog.check_once(), operation_timeout_seconds * 3)
             row = await inspector.fetchrow(

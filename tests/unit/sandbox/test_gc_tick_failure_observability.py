@@ -299,3 +299,44 @@ async def test_enumeration_timeout_fails_the_tick(monkeypatch: pytest.MonkeyPatc
     with pytest.raises(SandboxBackendError, match="timed out"):
         await registry._gc_once(cast(Any, object()))
     assert health.consecutive_failures == 0  # _gc_once alone does not publish
+
+
+async def test_pressure_callback_failure_is_not_a_gc_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failing pressure consumer must not mark a succeeding GC as stalled."""
+    registry = SandboxRegistry(backend=cast(Any, FakeBackend()))
+    health = _fresh_health(registry)
+    error = Mock()
+    exception = Mock()
+    monkeypatch.setattr("aios.sandbox.registry.log.error", error)
+    monkeypatch.setattr("aios.sandbox.registry.log.warning", Mock())
+    monkeypatch.setattr("aios.sandbox.registry.log.exception", exception)
+    monkeypatch.setattr("aios.sandbox.registry._GC_INTERVAL_SECONDS", 0)
+
+    async def ok(pool: Any) -> GcPressureResult:
+        return GcPressureResult()
+
+    calls = 0
+
+    def bad_callback(pressure: GcPressureResult) -> None:
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("consumer broke")
+
+    monkeypatch.setattr(registry, "_gc_once", ok)
+    task = asyncio.create_task(registry._gc_loop(cast(Any, object()), bad_callback))
+    for _ in range(20):
+        await asyncio.sleep(0)
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+    assert calls >= 3
+    assert health.consecutive_failures == 0
+    assert health.stalled is False
+    assert health.last_success_at is not None
+    assert _stalled_calls(error) == []
+    events = [c[0][0] for c in exception.call_args_list]
+    assert "sandbox.gc_pressure_callback_failed" in events
+    assert "sandbox.gc_tick_failed" not in events

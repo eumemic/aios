@@ -259,3 +259,85 @@ def test_snapshot_gc_stall_watch_alarms_only_while_stalled() -> None:
     health.record_success()
     assert watch.check(now=200) is False
     assert health.snapshot()["gc_consecutive_failures"] == 0
+
+
+@pytest.mark.asyncio
+async def test_gc_stall_alarm_fires_during_db_outage(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A PostgreSQL outage must never mask a stalled snapshot GC (aios#2343)."""
+    import aios.harness.production_watchdogs as module
+    from aios.harness.production_watchdogs import SnapshotGcHealth
+
+    health = SnapshotGcHealth()
+    health.record_failure(TimeoutError("x"))
+    health.record_failure(TimeoutError("x"))
+    assert health.stalled
+
+    connect = AsyncMock(side_effect=OSError("database unreachable"))
+    monkeypatch.setattr(asyncpg, "connect", connect)
+    alarms: list[str] = []
+    monkeypatch.setattr(module, "_emit_alarm", lambda kind, specimen: alarms.append(kind))
+
+    runner = asyncio.create_task(
+        module.run_production_watchdogs(
+            _Pool(_Holder(object())),
+            "postgresql://example/db",
+            held_threshold_seconds=999,
+            dead_man_threshold_seconds=999,
+            interval_seconds=0.01,
+            rate_limit_seconds=0,
+            specimen_dir=tmp_path,
+            journal_limit=10,
+            operation_timeout_seconds=0.1,
+            gc_health=health,
+        )
+    )
+    await asyncio.sleep(0.5)
+    assert not runner.done()
+    runner.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await runner
+    assert connect.await_count >= 1
+    assert "snapshot_gc_stalled" in alarms
+
+
+@pytest.mark.asyncio
+async def test_gc_stall_alarm_fires_while_reconnect_hangs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A connect that never returns must not suppress the GC stall check either."""
+    import aios.harness.production_watchdogs as module
+    from aios.harness.production_watchdogs import SnapshotGcHealth
+
+    health = SnapshotGcHealth()
+    health.record_failure(TimeoutError("x"))
+    health.record_failure(TimeoutError("x"))
+
+    async def hang(*args: object, **kwargs: object) -> object:
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    monkeypatch.setattr(asyncpg, "connect", hang)
+    alarms: list[str] = []
+    monkeypatch.setattr(module, "_emit_alarm", lambda kind, specimen: alarms.append(kind))
+
+    runner = asyncio.create_task(
+        module.run_production_watchdogs(
+            _Pool(_Holder(object())),
+            "postgresql://example/db",
+            held_threshold_seconds=999,
+            dead_man_threshold_seconds=999,
+            interval_seconds=0.01,
+            rate_limit_seconds=0,
+            specimen_dir=tmp_path,
+            journal_limit=10,
+            operation_timeout_seconds=10,
+            gc_health=health,
+        )
+    )
+    await asyncio.sleep(0.3)
+    runner.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await runner
+    assert "snapshot_gc_stalled" in alarms
