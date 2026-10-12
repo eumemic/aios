@@ -250,3 +250,22 @@ def test_migrate_does_not_retry_operational_error_wrapping_non_lock_error():
     sleep.assert_not_called()
     logger.return_value.warning.assert_not_called()
     procrastinate.assert_not_awaited()
+
+
+def test_migrate_passes_lock_retry_budget_to_trigger_step():
+    """The lock-release trigger DDL shares Alembic's bounded lock retry (#2539)."""
+    patches = _migrate_patches(Mock())
+    with (
+        patches[0],
+        patches[1],
+        patches[2],
+        patches[3],
+        patches[4] as procrastinate,
+        patches[5],
+        patches[6],
+    ):
+        assert _run_migrate() == 0
+
+    procrastinate.assert_awaited_once_with(
+        "postgresql://localhost/test", verbose=True, max_attempts=10, retry_sleep_seconds=1.0
+    )

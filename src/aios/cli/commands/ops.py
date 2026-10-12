@@ -215,7 +215,16 @@ def _run_migrate() -> int:
                     retry_in_seconds=_MIGRATE_RETRY_SLEEP_SECONDS,
                 )
                 time.sleep(_MIGRATE_RETRY_SLEEP_SECONDS)
-        asyncio.run(apply_procrastinate_schema(db_url, verbose=True))
+        # Same bounded lock-retry budget as Alembic: the lock-release trigger
+        # DDL needs AccessExclusive on procrastinate_jobs (#2539).
+        asyncio.run(
+            apply_procrastinate_schema(
+                db_url,
+                verbose=True,
+                max_attempts=_MIGRATE_MAX_ATTEMPTS,
+                retry_sleep_seconds=_MIGRATE_RETRY_SLEEP_SECONDS,
+            )
+        )
         return 0
 
 

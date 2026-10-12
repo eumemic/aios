@@ -125,3 +125,86 @@ def test_apply_procrastinate_schema_idempotent_with_suffixed_url(
             await conn.close()
 
     asyncio.run(verify())
+
+
+# --- #2539: the trigger DDL must never queue the job table behind a long lock --
+
+
+async def _hold_access_share(url: str) -> asyncpg.Connection[Any]:
+    """Open a transaction holding AccessShare on procrastinate_jobs (like pg_dump)."""
+    holder: asyncpg.Connection[Any] = await asyncpg.connect(url)
+    await holder.execute("BEGIN")
+    await holder.execute("LOCK TABLE procrastinate_jobs IN ACCESS SHARE MODE")
+    return holder
+
+
+@needs_docker
+@pytest.mark.integration
+def test_current_trigger_rerun_takes_no_lock(migrated_db_url: str) -> None:
+    """Re-running on an up-to-date DB completes while a reader holds AccessShare.
+
+    Pre-fix, the unconditional DDL queued an AccessExclusive request behind the
+    reader (prod: the nightly pg_dump) and stalled every worker defer/fetch.
+    """
+
+    async def run() -> None:
+        holder = await _hold_access_share(migrated_db_url)
+        try:
+            await asyncio.wait_for(
+                apply_procrastinate_schema(migrated_db_url, max_attempts=1, lock_timeout="100ms"),
+                timeout=10,
+            )
+        finally:
+            await holder.execute("ROLLBACK")
+            await holder.close()
+
+    asyncio.run(run())
+
+
+@needs_docker
+@pytest.mark.integration
+def test_drifted_trigger_fails_fast_behind_lock_then_repairs(migrated_db_url: str) -> None:
+    """A drifted trigger re-applies under a bounded lock_timeout.
+
+    Behind a held lock it raises after the retry budget instead of waiting;
+    once the lock clears it repairs the trigger.
+    """
+
+    async def run() -> None:
+        conn: asyncpg.Connection[Any] = await asyncpg.connect(migrated_db_url)
+        try:
+            await conn.execute(
+                "ALTER TABLE procrastinate_jobs DISABLE TRIGGER aios_jobs_notify_lock_released_v1"
+            )
+        finally:
+            await conn.close()
+
+        holder = await _hold_access_share(migrated_db_url)
+        try:
+            with pytest.raises(asyncpg.exceptions.LockNotAvailableError):
+                await asyncio.wait_for(
+                    apply_procrastinate_schema(
+                        migrated_db_url,
+                        max_attempts=2,
+                        retry_sleep_seconds=0,
+                        lock_timeout="100ms",
+                    ),
+                    timeout=10,
+                )
+        finally:
+            await holder.execute("ROLLBACK")
+            await holder.close()
+
+        await apply_procrastinate_schema(migrated_db_url, lock_timeout="1s")
+
+        conn = await asyncpg.connect(migrated_db_url)
+        try:
+            enabled = await conn.fetchval(
+                "SELECT tgenabled::text FROM pg_trigger "
+                "WHERE tgname = 'aios_jobs_notify_lock_released_v1'"
+            )
+            assert enabled == "O"
+        finally:
+            await conn.close()
+
+    asyncio.run(run())

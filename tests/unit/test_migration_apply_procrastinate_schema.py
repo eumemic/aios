@@ -39,9 +39,27 @@ def _fake_conn(*, present: object) -> MagicMock:
     """
     conn = MagicMock()
     conn.fetchval = AsyncMock(return_value=present)
+    # Catalog probe for the lock-release trigger: nothing installed → DDL runs.
+    conn.fetchrow = AsyncMock(
+        return_value={
+            "functiondef": None,
+            "triggerdef": None,
+            "function_schema": None,
+            "table_schema": None,
+        }
+    )
     conn.execute = AsyncMock()
     conn.close = AsyncMock()
+    conn.transaction = MagicMock(return_value=AsyncMock())
     return conn
+
+
+def _ddl_calls(conn: MagicMock) -> list[str]:
+    from aios.db.procrastinate_extensions import LOCK_RELEASE_TRIGGER_DDL
+
+    return [
+        c.args[0] for c in conn.execute.await_args_list if c.args[0] == LOCK_RELEASE_TRIGGER_DDL
+    ]
 
 
 _SUFFIXED_ASYNCPG = "postgresql+asyncpg://u:p@host:5432/db"
@@ -122,8 +140,8 @@ async def test_normalizes_conninfo_for_psycopg_connector_when_schema_missing() -
     tmp_app.open_async.assert_awaited_once()
     tmp_app.schema_manager.apply_schema_async.assert_awaited_once()
     tmp_app.close_async.assert_awaited_once()
-    # The lock-release trigger DDL always runs, schema or not.
-    conn.execute.assert_awaited_once()
+    # Fresh schema → the lock-release trigger is missing, so its DDL runs.
+    assert len(_ddl_calls(conn)) == 1
     conn.close.assert_awaited_once()
 
 
@@ -147,5 +165,126 @@ async def test_idempotent_path_skips_app_and_still_runs_trigger_ddl() -> None:
     mock_connect.assert_awaited_once_with(_BARE)
     mock_app.assert_not_called()
     mock_connector.assert_not_called()
-    conn.execute.assert_awaited_once()  # LOCK_RELEASE_TRIGGER_DDL
+    assert len(_ddl_calls(conn)) == 1  # trigger absent in the probe → DDL runs
     conn.close.assert_awaited_once()
+
+
+# --- #2539: never take AccessExclusive on procrastinate_jobs needlessly -------
+
+
+def _current_state(schema: str = "public") -> dict[str, str]:
+    from aios.db.procrastinate_extensions import expected_functiondef, expected_triggerdef
+
+    return {
+        "functiondef": expected_functiondef(schema),
+        "triggerdef": expected_triggerdef(schema),
+        "function_schema": schema,
+        "table_schema": schema,
+    }
+
+
+@pytest.mark.asyncio
+async def test_current_trigger_skips_ddl_entirely() -> None:
+    """An unchanged DB takes no lock: neither lock_timeout nor DDL is issued."""
+    conn = _fake_conn(present="procrastinate_jobs")
+    conn.fetchrow = AsyncMock(return_value=_current_state())
+    with patch("asyncpg.connect", new=AsyncMock(return_value=conn)):
+        await apply_procrastinate_schema(_BARE, verbose=True)
+
+    conn.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_drifted_trigger_runs_ddl_under_lock_timeout() -> None:
+    """A drifted function body re-applies the DDL, preceded by SET LOCAL lock_timeout."""
+    from aios.db.procrastinate_extensions import LOCK_RELEASE_TRIGGER_DDL
+
+    state = _current_state()
+    state["functiondef"] = state["functiondef"].replace("RETURN NEW", "RETURN NULL")
+    conn = _fake_conn(present="procrastinate_jobs")
+    conn.fetchrow = AsyncMock(return_value=state)
+    with patch("asyncpg.connect", new=AsyncMock(return_value=conn)):
+        await apply_procrastinate_schema(_BARE)
+
+    statements = [c.args[0] for c in conn.execute.await_args_list]
+    # set_config(..., is_local => true) is SET LOCAL: scoped to the DDL's transaction.
+    assert conn.execute.await_args_list[0].args == (
+        "SELECT set_config('lock_timeout', $1, true)",
+        "5s",
+    )
+    assert statements[1] == LOCK_RELEASE_TRIGGER_DDL
+
+
+@pytest.mark.asyncio
+async def test_lock_timeout_retries_then_succeeds() -> None:
+    import asyncpg
+
+    from aios.db.procrastinate_extensions import LOCK_RELEASE_TRIGGER_DDL
+
+    conn = _fake_conn(present="procrastinate_jobs")
+    failures = iter([asyncpg.exceptions.LockNotAvailableError("lock timeout")] * 2)
+
+    async def _execute(sql: str, *args: object) -> None:
+        if sql == LOCK_RELEASE_TRIGGER_DDL:
+            err = next(failures, None)
+            if err is not None:
+                raise err
+
+    conn.execute = AsyncMock(side_effect=_execute)
+    with (
+        patch("asyncpg.connect", new=AsyncMock(return_value=conn)),
+        patch("asyncio.sleep", new=AsyncMock()) as sleep,
+    ):
+        await apply_procrastinate_schema(_BARE, max_attempts=5, retry_sleep_seconds=0.25)
+
+    assert len(_ddl_calls(conn)) == 3
+    assert sleep.await_count == 2
+    sleep.assert_awaited_with(0.25)
+    conn.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_lock_timeout_exhaustion_fails_instead_of_waiting() -> None:
+    """Exhausted retries raise (failing ``aios migrate``) rather than stalling the queue."""
+    import asyncpg
+
+    from aios.db.procrastinate_extensions import LOCK_RELEASE_TRIGGER_DDL
+
+    conn = _fake_conn(present="procrastinate_jobs")
+
+    async def _execute(sql: str, *args: object) -> None:
+        if sql == LOCK_RELEASE_TRIGGER_DDL:
+            raise asyncpg.exceptions.LockNotAvailableError("lock timeout")
+
+    conn.execute = AsyncMock(side_effect=_execute)
+    with (
+        patch("asyncpg.connect", new=AsyncMock(return_value=conn)),
+        patch("asyncio.sleep", new=AsyncMock()) as sleep,
+        pytest.raises(asyncpg.exceptions.LockNotAvailableError),
+    ):
+        await apply_procrastinate_schema(_BARE, max_attempts=3, retry_sleep_seconds=0)
+
+    assert len(_ddl_calls(conn)) == 3
+    assert sleep.await_count == 2
+    conn.close.assert_awaited_once()
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["functiondef", "triggerdef", "function_schema", "table_schema"],
+)
+def test_is_current_false_when_any_piece_missing(field: str) -> None:
+    from aios.db.procrastinate_extensions import lock_release_trigger_is_current
+
+    state: dict[str, str | None] = dict(_current_state())
+    assert lock_release_trigger_is_current(**state)
+    state[field] = None
+    assert not lock_release_trigger_is_current(**state)
+
+
+def test_is_current_false_when_trigger_definition_differs() -> None:
+    from aios.db.procrastinate_extensions import lock_release_trigger_is_current
+
+    state: dict[str, str | None] = dict(_current_state())
+    state["triggerdef"] = str(state["triggerdef"]).replace("AFTER UPDATE", "BEFORE UPDATE")
+    assert not lock_release_trigger_is_current(**state)

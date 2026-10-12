@@ -9,15 +9,17 @@ upgrade.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING, TextIO
+from typing import TYPE_CHECKING, Any, TextIO
 from unittest import mock
 
 if TYPE_CHECKING:
+    import asyncpg
     from alembic.config import Config
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -117,12 +119,91 @@ def upgrade_to_head(db_url: str) -> None:
         command.upgrade(alembic_config(), "head")
 
 
-async def apply_procrastinate_schema(db_url: str, *, verbose: bool = False) -> None:
+_TRIGGER_LOCK_TIMEOUT = "5s"
+_TRIGGER_MAX_ATTEMPTS = 10
+_TRIGGER_RETRY_SLEEP_SECONDS = 1.0
+
+
+async def _ensure_lock_release_trigger(
+    conn: asyncpg.Connection[Any],
+    *,
+    verbose: bool,
+    max_attempts: int,
+    retry_sleep_seconds: float,
+    lock_timeout: str,
+) -> None:
+    """Install/refresh the aios lock-release trigger only when it has drifted.
+
+    The DDL takes an AccessExclusive lock on ``procrastinate_jobs``; while that
+    request waits (e.g. behind ``pg_dump``'s AccessShare) every worker
+    defer/fetch queues behind it and the job queue stalls (#2539).  So:
+
+    1. Compare the installed definitions (catalog read, no table lock) and skip
+       entirely when they already match.
+    2. Otherwise apply under ``SET LOCAL lock_timeout`` with the same bounded
+       retry ``aios migrate`` uses for Alembic; exhaustion re-raises so the
+       migrate fails rather than stalling the queue.
+    """
+    import asyncpg
+
+    from aios.db.procrastinate_extensions import (
+        LOCK_RELEASE_STATE_SQL,
+        LOCK_RELEASE_TRIGGER_DDL,
+        lock_release_trigger_is_current,
+    )
+    from aios.logging import get_logger
+
+    logger = get_logger("aios.migrate")
+    for attempt in range(1, max_attempts + 1):
+        try:
+            async with conn.transaction():
+                state = await conn.fetchrow(LOCK_RELEASE_STATE_SQL)
+                if state is not None and lock_release_trigger_is_current(
+                    functiondef=state["functiondef"],
+                    triggerdef=state["triggerdef"],
+                    function_schema=state["function_schema"],
+                    table_schema=state["table_schema"],
+                ):
+                    if verbose:
+                        print(
+                            "aios lock-release trigger already current, skipping", file=sys.stderr
+                        )
+                    return
+                await conn.execute("SELECT set_config('lock_timeout', $1, true)", lock_timeout)
+                await conn.execute(LOCK_RELEASE_TRIGGER_DDL)
+            if verbose:
+                print("aios lock-release trigger ensured", file=sys.stderr)
+            return
+        except asyncpg.exceptions.LockNotAvailableError:
+            if attempt == max_attempts:
+                raise
+            logger.warning(
+                "migration.lock_retry",
+                step="lock_release_trigger",
+                attempt=attempt,
+                max_attempts=max_attempts,
+                retry_in_seconds=retry_sleep_seconds,
+            )
+            await asyncio.sleep(retry_sleep_seconds)
+
+
+async def apply_procrastinate_schema(
+    db_url: str,
+    *,
+    verbose: bool = False,
+    max_attempts: int = _TRIGGER_MAX_ATTEMPTS,
+    retry_sleep_seconds: float = _TRIGGER_RETRY_SLEEP_SECONDS,
+    lock_timeout: str = _TRIGGER_LOCK_TIMEOUT,
+) -> None:
     """Apply procrastinate's schema (if missing) and the aios lock-release
-    trigger against ``db_url``. Idempotent — safe on an already-migrated DB.
+    trigger (if missing or drifted) against ``db_url``. Idempotent — and on an
+    already-current DB takes no lock on ``procrastinate_jobs`` at all.
 
     ``apply_schema_async`` isn't idempotent (no ``IF NOT EXISTS``), hence the
-    ``to_regclass`` guard; the trigger DDL is.
+    ``to_regclass`` guard.  The trigger DDL is gated on a catalog comparison
+    and bounded by ``lock_timeout`` + retry (see
+    :func:`_ensure_lock_release_trigger`); a lock it cannot get within
+    ``max_attempts`` raises ``asyncpg.exceptions.LockNotAvailableError``.
 
     Pass ``verbose=True`` from CLI contexts to surface user-facing status.
     """
@@ -130,7 +211,6 @@ async def apply_procrastinate_schema(db_url: str, *, verbose: bool = False) -> N
     from procrastinate import App, PsycopgConnector
 
     from aios.db.pool import normalize_dsn
-    from aios.db.procrastinate_extensions import LOCK_RELEASE_TRIGGER_DDL
 
     # ``db_url`` arrives verbatim from ``settings.db_url`` (``aios migrate``) and
     # from test fixtures. Strip any SQLAlchemy/alembic driver suffix so both
@@ -154,8 +234,12 @@ async def apply_procrastinate_schema(db_url: str, *, verbose: bool = False) -> N
                 print("procrastinate schema applied", file=sys.stderr)
         elif verbose:
             print("procrastinate schema already present, skipping", file=sys.stderr)
-        await conn.execute(LOCK_RELEASE_TRIGGER_DDL)
-        if verbose:
-            print("aios lock-release trigger ensured", file=sys.stderr)
+        await _ensure_lock_release_trigger(
+            conn,
+            verbose=verbose,
+            max_attempts=max_attempts,
+            retry_sleep_seconds=retry_sleep_seconds,
+            lock_timeout=lock_timeout,
+        )
     finally:
         await conn.close()
