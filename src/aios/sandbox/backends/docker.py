@@ -1127,7 +1127,7 @@ class DockerBackend:
         #   failing probe cannot let a chain grow without a byte bound.
         base_known = not base_ref or base_cost is not None
         if base_ref and base_known:
-            snapshot_telemetry.record_measured("base_unmeasurable")
+            snapshot_telemetry.record_measured(base_ref, "base_unmeasurable")
         if not base_known:
             log.warning(
                 "sandbox.snapshot_base_unmeasurable",
@@ -1136,7 +1136,10 @@ class DockerBackend:
                 base_absent=base_absent,
             )
             snapshot_telemetry.record_degraded(
-                "base_unmeasurable", container_id=sandbox_id[:12], base_ref=base_ref
+                "base_unmeasurable",
+                subject=base_ref or "",
+                container_id=sandbox_id[:12],
+                base_ref=base_ref,
             )
         # UNITS: the chain figures below are only meaningful when EVERY image
         # in the subtraction was measured as a chain. A failed ``docker
@@ -1968,7 +1971,9 @@ class DockerBackend:
         image_id, size, depth, _labels = fields
         cached = self._chain_bytes.get(image_id)
         if cached is not None:
-            snapshot_telemetry.record_measured("history_unavailable", "history_unparseable")
+            # A cache hit measures nothing new: it is not evidence that the
+            # history probe works today, so it is NOT reported to telemetry
+            # (#2545 F1 — cached base reads were resetting the alarm streak).
             return ImageDiskCost(view=size, chain=cached)
         rc, stdout_bytes, stderr_bytes = await run_docker_cli(
             ["docker", "history", "--no-trunc", "--format", "{{.Size}}", image_id]
@@ -1979,7 +1984,9 @@ class DockerBackend:
                 image_id=image_id[:19],
                 stderr=stderr_bytes.decode("utf-8", errors="replace").strip(),
             )
-            snapshot_telemetry.record_degraded("history_unavailable", image_id=image_id[:19])
+            snapshot_telemetry.record_degraded(
+                "history_unavailable", subject=image_id, image_id=image_id[:19]
+            )
             return ImageDiskCost(view=size, chain=None)
         total = _sum_history_sizes(
             stdout_bytes.decode("utf-8", errors="replace"), expected_layers=depth
@@ -1996,9 +2003,11 @@ class DockerBackend:
                 image_id=image_id[:19],
                 stdout=stdout_bytes[:200].decode("utf-8", errors="replace"),
             )
-            snapshot_telemetry.record_degraded("history_unparseable", image_id=image_id[:19])
+            snapshot_telemetry.record_degraded(
+                "history_unparseable", subject=image_id, image_id=image_id[:19]
+            )
             return ImageDiskCost(view=size, chain=None)
-        snapshot_telemetry.record_measured("history_unavailable", "history_unparseable")
+        snapshot_telemetry.record_measured(image_id, "history_unavailable", "history_unparseable")
         # The chain can never cost LESS than the view it presents; a fully
         # parsed sum below it (rounding in the 3-significant-figure rendering)
         # is not trusted downward.

@@ -1670,6 +1670,96 @@ class TestChainAccountingDegradationTelemetry:
             for e in logs
         )
 
+    @staticmethod
+    def _alarms(logs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [e for e in logs if e["event"] == "sandbox.chain_accounting_degraded_alarm"]
+
+    @staticmethod
+    def _base_and_parent(fake_docker: _FakeDocker) -> None:
+        fake_docker.images["base:latest"] = {
+            "id": "base_img",
+            "size": 2 * GB,
+            "chain": 6 * GB,
+            "depth": 3,
+            "labels": {},
+        }
+        fake_docker.parent_image = "img_S1"
+        fake_docker.images["img_S1"] = {
+            "id": "img_S1",
+            "size": 3 * GB,
+            "chain": 9 * GB,
+            "depth": 5,
+            "labels": {"aios.base_image": "base:latest"},
+        }
+        fake_docker.container_labels = {"aios.base_image": "base:latest"}
+
+    @pytest.mark.asyncio
+    async def test_one_images_persistent_failure_alarms_despite_sibling_successes(
+        self, fake_docker: _FakeDocker
+    ) -> None:
+        """#2545 F1 probe A: the base's history never parses while the parent's
+        does. A sibling image's success must not reset the base's streak."""
+        self._base_and_parent(fake_docker)
+        fake_docker.history_output["base_img"] = b"N/A\nN/A\nN/A\n"
+        backend = DockerBackend()
+        with capture_logs() as logs:
+            for i in range(20):
+                await backend.snapshot(
+                    "cid", f"tag:{i}", empty_floor_bytes=8192, flatten_if_unique_bytes_over=None
+                )
+        assert snapshot_telemetry.degraded_total("history_unparseable") >= 20
+        assert self._alarms(logs), "base unparseable on 20/20 snapshots yet no alarm"
+
+    @pytest.mark.asyncio
+    async def test_fleetwide_failure_alarms_with_a_warm_chain_cache(
+        self, fake_docker: _FakeDocker
+    ) -> None:
+        """#2545 F1 probe B: base chain cached before a renderer change; every new
+        image is unparseable. Cache hits are not measurements."""
+        self._base_and_parent(fake_docker)
+        backend = DockerBackend()
+        await backend.image_disk_cost("base:latest")  # warm cache pre-upgrade
+        fake_docker.history_output["img_S1"] = b"N/A\n" * 5
+        fake_docker.history_output["committed"] = b"N/A\n" * 5
+        with capture_logs() as logs:
+            for i in range(20):
+                await backend.snapshot(
+                    "cid", f"tag:{i}", empty_floor_bytes=8192, flatten_if_unique_bytes_over=None
+                )
+        assert snapshot_telemetry.degraded_total("history_unparseable") >= 20
+        assert self._alarms(logs), "every new image unparseable for 20 snapshots yet no alarm"
+
+    def test_cache_hit_does_not_reset_a_streak(self) -> None:
+        """Only a fresh success of the SAME subject resets its streak."""
+        for _ in range(snapshot_telemetry.ALERT_STREAK - 1):
+            snapshot_telemetry.record_degraded("history_unparseable", subject="a")
+        snapshot_telemetry.record_measured("b", "history_unparseable")
+        assert snapshot_telemetry.degraded_streak("history_unparseable", "a") == (
+            snapshot_telemetry.ALERT_STREAK - 1
+        )
+        snapshot_telemetry.record_measured("a", "history_unparseable")
+        assert snapshot_telemetry.degraded_streak("history_unparseable", "a") == 0
+
+    def test_window_alarms_when_each_image_fails_only_once(self) -> None:
+        """Every NEW image degrades once (no per-image streak), interleaved with
+        successes of other images: the degraded-share window must alarm, once."""
+        with capture_logs() as logs:
+            for i in range(snapshot_telemetry.WINDOW * 3):
+                snapshot_telemetry.record_degraded("history_unparseable", subject=f"new{i}")
+                snapshot_telemetry.record_measured("parent", "history_unparseable")
+        alarms = self._alarms(logs)
+        assert len(alarms) == 1
+        assert alarms[0]["trigger"] == "window"
+
+    def test_occasional_failure_among_successes_does_not_alarm(self) -> None:
+        with capture_logs() as logs:
+            for i in range(snapshot_telemetry.WINDOW * 5):
+                if i % 5 == 0:
+                    snapshot_telemetry.record_degraded("history_unparseable", subject=f"x{i}")
+                else:
+                    snapshot_telemetry.record_measured(f"y{i}", "history_unparseable")
+        assert not self._alarms(logs)
+
     def test_a_broken_metrics_sink_never_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         class _Boom:
             def labels(self, **_kw: Any) -> Any:
