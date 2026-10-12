@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 from collections import namedtuple
+from collections.abc import MutableMapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -1671,7 +1672,7 @@ class TestChainAccountingDegradationTelemetry:
         )
 
     @staticmethod
-    def _alarms(logs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _alarms(logs: Sequence[MutableMapping[str, Any]]) -> list[MutableMapping[str, Any]]:
         return [e for e in logs if e["event"] == "sandbox.chain_accounting_degraded_alarm"]
 
     @staticmethod
