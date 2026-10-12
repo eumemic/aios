@@ -43,6 +43,7 @@ def test_the_rule_is_inside_the_default_tail_and_outside_a_tail_of_three(turn: i
     assert rule_turn not in blind
     assert rule_turn not in control
     assert len(control) < len(default) < len(rest)
+    assert len(control) < len(blind) < len(rest)
 
 
 def test_the_sessions_are_drawn_deterministically_from_the_reasoning_suites() -> None:

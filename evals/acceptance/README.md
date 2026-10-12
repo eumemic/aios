@@ -14,7 +14,14 @@ cases where the right verdict is known in advance. They are what retired the ext
 
 Account `acc_9f36880d…` (Eumemic). Agent `eval-probe` (`agent_01M4Q2WZTZ0X9MG3SD5T0D2F3K`,
 `anthropic/claude-opus-5-5`). Judge `openrouter/openai/gpt-6-luna`. Seed 1. Budget $400
-each. Gate and eval workflows at version 1.
+each. Gate and eval workflows at version 1. Candidates `r0-opus-5-5`
+(`wf_01M4KQQ53J5NPGBJK07F62THSH@1`) and `r0-haiku-4-5` (`wf_01M4KQQ5DVHRAXDBZ69GNY9VTV@1`).
+Those version-1 scripts were registered by hand before `candidates.py` existed. They
+behave the same (`r0-opus-5-5@1` forwards the params unclamped), but their text
+differs, so running `candidates.py` registers a version 2 of each.
+
+The retired `wam_fusion` harness's earlier results (R0 ≈ native by TOST, 2026-06-30, and
+its fusion findings) are in its README at `11a9b862:evals/wam_fusion/README.md`.
 
 | case | run | verdict | n / clusters | W [lower, upper] | control W [upper] | cost ratio | p95 latency ratio |
 |---|---|---|---|---|---|---|---|
@@ -24,9 +31,10 @@ each. Gate and eval workflows at version 1.
 
 - **PASS.** No degenerate turns or invalid tool calls in any run (exact upper bound 1.4%).
   The control's tie rate was 9%.
-- **FAIL.** The weak arm answered every item. Its `max_tokens` is clamped, so it lost
-  on quality, not on errors. It is also a fifth of the cost: the gate fails it on the
-  win rate alone.
+- **FAIL.** The weak arm had no degenerate turns: it lost on quality, not on errors. It
+  is also a fifth of the cost, so the gate fails it on the win rate alone. (The
+  candidate clamps `max_tokens` to what Haiku can emit. That matters for an agent like
+  design-ground, at 128000; eval-probe's 4096 is under it.)
 - **INVALID.** The tail-3 judge doesn't see the rule. A reply that followed it looks
   inconsistent (its working gives one value, its ANSWER line another), so the judge
   favours the control: its win rate against the baseline is 0.915. The gate refuses to trust a judge that can't
@@ -54,9 +62,10 @@ what makes the three verdicts known in advance:
 - The tail-3 judge sees 3 messages, so it can't see the rule: the gate is INVALID.
 
 A control item needs the judge's tail to be strictly longer than the control's view and
-strictly shorter than the whole request. In a 6-turn session that holds only for later
-turns, so about a third of the items carry a control arm (76 and 135 here). That was
-enough, because the control loses nearly every one.
+strictly shorter than the whole request. With the default 8-message tail that holds only
+for the last turns of a 6-turn session, so about a third of the items carry a control
+arm (76 of 208); with a 3-message tail it holds from the third turn, about two-thirds
+(135 of 207). A third was enough, because the control loses nearly every one.
 
 ## Re-running
 
