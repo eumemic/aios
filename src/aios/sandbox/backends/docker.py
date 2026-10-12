@@ -32,6 +32,7 @@ from time import monotonic
 
 from aios.config import get_settings
 from aios.logging import get_logger
+from aios.sandbox import snapshot_telemetry
 from aios.sandbox._subprocess import (
     run_docker_cli,
     run_docker_pipeline,
@@ -104,6 +105,14 @@ _FLATTEN_DEPTH_CEILING = 200
 # chain, 9.0/25.5, 7.6/21.5 — three chains that could never trip a 12 GiB
 # view-based budget nor the depth ceiling, so none of them ever flattened.
 _CHAIN_DEAD_HISTORY_RATIO = 2.0
+
+# Byte backstop for an INDETERMINATE base (#2538 N1). While the shared base
+# cannot be inspected the budget sees only the writable layer, so flatten once
+# the parent's whole chain exceeds this multiple of the per-session budget: no
+# shared base plausibly accounts for that much (server-b bases are a few GB of
+# chain against a 4 GiB default budget), and the depth ceiling alone bounds
+# only the layer count — a 500 GB chain at depth 150 would otherwise commit.
+_UNKNOWN_BASE_BUDGET_MULTIPLE = 4
 
 # Chain costs are keyed by image id, which is content-addressed and therefore
 # immutable — a cached answer can never go stale, only irrelevant once the
@@ -1071,7 +1080,7 @@ class DockerBackend:
         #    commit-per-idle-exit chain can hold 20 GB of overlay layers while
         #    reporting 6.6 GB — under any budget an operator would set, forever,
         #    which is exactly why nothing on server-b ever flattened.
-        base_cost = await self._image_disk_cost_or_none(base_ref)
+        base_cost, base_absent = await self._base_disk_cost(base_ref)
         base_size = base_cost.view if base_cost is not None else 0
         parent_fields = await self._inspect_image_fields(parent_image)
         parent_size = parent_fields[1] if parent_fields else 0
@@ -1103,12 +1112,31 @@ class DockerBackend:
         # a failed probe is never cached, so the next snapshot re-measures,
         # while accounting (``base_relative_disk_bytes`` with no base) charges
         # the image its FULL chain meanwhile — over-count, never free.
+        #
+        # Two byte backstops keep the BUDGET meaningful meanwhile (#2538 N1) —
+        # the depth ceiling bounds layer COUNT, not disk:
+        #
+        # - a VERIFIED "No such image" base is not coming back, so nothing can
+        #   be subtracted from the parent: the budget is charged the parent's
+        #   full best-known cost (``parent.best``), the same figure accounting
+        #   charges. Over-count, as on master before #2388.
+        # - an INDETERMINATE base (transient daemon error) keeps the
+        #   rw-only projection, but flattens once the parent's full cost
+        #   exceeds ``_UNKNOWN_BASE_BUDGET_MULTIPLE`` x the budget — no
+        #   plausible shared base explains that much, so a persistently
+        #   failing probe cannot let a chain grow without a byte bound.
         base_known = not base_ref or base_cost is not None
+        if base_ref and base_known:
+            snapshot_telemetry.record_measured("base_unmeasurable")
         if not base_known:
             log.warning(
                 "sandbox.snapshot_base_unmeasurable",
                 container_id=sandbox_id[:12],
                 base_ref=base_ref,
+                base_absent=base_absent,
+            )
+            snapshot_telemetry.record_degraded(
+                "base_unmeasurable", container_id=sandbox_id[:12], base_ref=base_ref
             )
         # UNITS: the chain figures below are only meaningful when EVERY image
         # in the subtraction was measured as a chain. A failed ``docker
@@ -1140,10 +1168,19 @@ class DockerBackend:
         # resident (shared) whatever this session does (#2349, company#383 F1).
         added_chain = max(0, parent_chain - base_chain)
         added_view = max(0, parent_size - base_size)
-        projected_unique = (added_chain if base_known else 0) + rw
-        over_budget = (
-            flatten_if_unique_bytes_over is not None
-            and projected_unique > flatten_if_unique_bytes_over
+        parent_full = parent_cost.best if parent_cost is not None else 0
+        if base_known:
+            projected_unique = added_chain + rw
+        elif base_absent:
+            projected_unique = parent_full + rw
+        else:
+            projected_unique = rw
+        over_budget = flatten_if_unique_bytes_over is not None and (
+            projected_unique > flatten_if_unique_bytes_over
+            or (
+                not base_known
+                and parent_full > _UNKNOWN_BASE_BUDGET_MULTIPLE * flatten_if_unique_bytes_over
+            )
         )
         # Dead history: once the SESSION-ADDED chain costs more than K times the
         # SESSION-ADDED view it presents, over half of what this session added
@@ -1931,6 +1968,7 @@ class DockerBackend:
         image_id, size, depth, _labels = fields
         cached = self._chain_bytes.get(image_id)
         if cached is not None:
+            snapshot_telemetry.record_measured("history_unavailable", "history_unparseable")
             return ImageDiskCost(view=size, chain=cached)
         rc, stdout_bytes, stderr_bytes = await run_docker_cli(
             ["docker", "history", "--no-trunc", "--format", "{{.Size}}", image_id]
@@ -1941,6 +1979,7 @@ class DockerBackend:
                 image_id=image_id[:19],
                 stderr=stderr_bytes.decode("utf-8", errors="replace").strip(),
             )
+            snapshot_telemetry.record_degraded("history_unavailable", image_id=image_id[:19])
             return ImageDiskCost(view=size, chain=None)
         total = _sum_history_sizes(
             stdout_bytes.decode("utf-8", errors="replace"), expected_layers=depth
@@ -1957,7 +1996,9 @@ class DockerBackend:
                 image_id=image_id[:19],
                 stdout=stdout_bytes[:200].decode("utf-8", errors="replace"),
             )
+            snapshot_telemetry.record_degraded("history_unparseable", image_id=image_id[:19])
             return ImageDiskCost(view=size, chain=None)
+        snapshot_telemetry.record_measured("history_unavailable", "history_unparseable")
         # The chain can never cost LESS than the view it presents; a fully
         # parsed sum below it (rounding in the 3-significant-figure rendering)
         # is not trusted downward.
@@ -1966,6 +2007,25 @@ class DockerBackend:
             self._chain_bytes.clear()
         self._chain_bytes[image_id] = chain
         return ImageDiskCost(view=size, chain=chain)
+
+    async def _base_disk_cost(self, base_ref: str | None) -> tuple[ImageDiskCost | None, bool]:
+        """``(cost, verified_absent)`` for the shared base.
+
+        Unlike :meth:`_image_disk_cost_or_none`, distinguishes a VERIFIED
+        "No such image" (``(None, True)``) from an indeterminate probe
+        (``(None, False)``) — the snapshot trigger treats them differently
+        (#2538 N1). No ``base_ref`` is ``(None, False)``: there is no base.
+        """
+        if not base_ref:
+            return None, False
+        try:
+            if await self._inspect_image_fields(base_ref) is None:
+                return None, True
+            return await self.image_disk_cost(base_ref), False
+        except SandboxBackendError:
+            # A transient error, or the base vanished between the two probes:
+            # indeterminate either way — never read as verified absence.
+            return None, False
 
     async def _image_disk_cost_or_none(self, ref: str | None) -> ImageDiskCost | None:
         """Disk cost for accounting; ``None`` when the ref is unknown/absent."""
