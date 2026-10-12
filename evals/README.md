@@ -10,7 +10,9 @@ is computed by the eval workflows here and stored in their runs' outputs.
   the weekly monitor.
 - `monitor_check.py` checks a monitor from outside aios (its alarm and liveness).
 - `auto_review/` is the corpus for the MCP auto-review checker.
-- `wam_fusion/` is the external harness the gate replaces.
+- `acceptance/` holds the gate's acceptance record and what reproduces it (a probe
+  corpus, R0 candidates, a blind-judge bar).
+- `suites/` holds static task corpora.
 
 Run the scripts from the repo root, with an operator key for the account that holds
 the agent:

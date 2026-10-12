@@ -261,8 +261,8 @@ class TestDefaultMaxTokens:
         there is no defect to fix — and reserving the full output ceiling there
         is an active regression: OpenAI rejects a request whose prompt plus
         ``max_tokens`` exceeds the context window, and OpenRouter 402s when
-        ``max_tokens`` exceeds a key's remaining credit affordance (the failure
-        ``evals/wam_fusion/recipes.py`` already caps around).
+        ``max_tokens`` exceeds a key's remaining credit affordance (a failure the
+        retired ``wam_fusion`` eval recipes had to cap around).
         """
         captured = await _capture_kwargs(
             monkeypatch, model="openai/gpt-4o", params={"temperature": 0.5}

@@ -42,7 +42,7 @@ fail() { OVERALL=1; [[ $FAIL_FAST -eq 1 ]] && exit 1; }
 # src/), and the connector-http package (which lives at the package root, not
 # src/).
 LINT_TARGETS=(
-    src tests
+    src tests evals
     packages/aios-sdk/aios_sdk
     connectors/signal/src connectors/slack/src connectors/sms/src connectors/telegram/src connectors/whatsapp/src
     packages/aios-connector-http/aios_connector_http

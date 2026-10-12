@@ -106,8 +106,8 @@ breakage starts once history exceeds ~136k tokens.
 - `_SERVED_CEILINGS` already exists as the sanctioned override for exactly this
   ("Served ceilings can differ materially from public model-card context windows"), and
   `served_ceiling` correctly outranks `context_limit`. The escape hatch is in place.
-- Exposure in this repo is an eval baseline (`evals/wam_fusion/run_eval.py:68`) plus two unit
-  fixtures. Production agents use `claude-opus-4-6`, whose 1M figure is correct.
+- Exposure in this repo was an eval baseline in the since-retired `evals/wam_fusion` harness,
+  plus two unit fixtures. Production agents use `claude-opus-4-6`, whose 1M figure is correct.
 - Patching it would mean hardcoding model strings into `_SERVED_CEILINGS`, which is exact-string
   keyed and so cannot cover `claude-sonnet-4-5` / `anthropic/...` / `...-20250929` /
   `us.anthropic....` / `vertex_ai/...` without whack-a-mole — against CLAUDE.md's
