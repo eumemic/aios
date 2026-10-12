@@ -11,7 +11,9 @@ import pytest
 from aios.harness.production_watchdogs import (
     HeldConnectionWatchdog,
     ThroughputDeadMan,
+    WakeThroughputProbe,
 )
+from aios.harness.throughput import CompletionCounter
 
 
 class _Holder:
@@ -150,9 +152,9 @@ async def test_runner_reconnects_after_failed_capture_tick(
                 raise OSError("telemetry database disconnected")
             return []
 
-        async def fetchrow(self, query: str, *args: object, **kwargs: object) -> dict[str, int]:
+        async def fetchval(self, query: str, *args: object, **kwargs: object) -> int:
             self.dead_man_seen.set()
-            return {"claimed": 0, "completed": 0}
+            return 0
 
     first, second = Inspector(fail=True), Inspector(fail=False)
     connect = AsyncMock(side_effect=[first, second])
@@ -181,16 +183,20 @@ async def test_runner_reconnects_after_failed_capture_tick(
 
 
 @pytest.mark.asyncio
-async def test_runner_counts_session_and_workflow_wake_completions_symmetrically(
+async def test_runner_claims_both_wake_kinds_and_never_reads_succeeded_events(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Healthy workflow wakes count as throughput even when the run parks."""
+    """#2541: completion is NOT inferred from ``procrastinate_events``.
+
+    Under ``delete_jobs="successful"`` no ``succeeded`` event is ever written,
+    so any query reading it is structurally zero.
+    """
     import aios.harness.production_watchdogs as module
 
     class Inspector:
         def __init__(self) -> None:
             self.closed = False
-            self.queries: list[str] = []
+            self.queries: list[tuple[str, tuple[object, ...]]] = []
             self.observed = asyncio.Event()
 
         def is_closed(self) -> bool:
@@ -202,10 +208,10 @@ async def test_runner_counts_session_and_workflow_wake_completions_symmetrically
         async def fetch(self, query: str, *args: object, **kwargs: object) -> list[object]:
             return []
 
-        async def fetchrow(self, query: str, *args: object, **kwargs: object) -> dict[str, int]:
-            self.queries.append(query)
+        async def fetchval(self, query: str, *args: object, **kwargs: object) -> int:
+            self.queries.append((query, args))
             self.observed.set()
-            return {"claimed": 1, "completed": 1}
+            return 1
 
     inspector = Inspector()
     monkeypatch.setattr(asyncpg, "connect", AsyncMock(return_value=inspector))
@@ -223,11 +229,10 @@ async def test_runner_counts_session_and_workflow_wake_completions_symmetrically
         )
     )
     await asyncio.wait_for(inspector.observed.wait(), 1)
-    query = inspector.queries[-1]
-    assert "procrastinate_events" in query
-    assert "harness.wake_session" in query
-    assert "harness.wake_workflow" in query
-    assert "run_completed" not in query
+    query, args = inspector.queries[-1]
+    assert "procrastinate_events" not in query
+    assert "succeeded" not in query
+    assert list(args[0]) == ["harness.wake_session", "harness.wake_workflow"]  # type: ignore[call-overload]
     assert not runner.done()
     runner.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -341,3 +346,56 @@ async def test_gc_stall_alarm_fires_while_reconnect_hangs(
     with pytest.raises(asyncio.CancelledError):
         await runner
     assert "snapshot_gc_stalled" in alarms
+
+
+class _Conn:
+    def __init__(self, claimed: int) -> None:
+        self.claimed = claimed
+
+    async def fetchval(self, query: str, *args: object, **kwargs: object) -> int:
+        return self.claimed
+
+
+@pytest.mark.asyncio
+async def test_probe_reports_completions_since_previous_sample() -> None:
+    counter = CompletionCounter()
+    counter.record()  # before the probe exists: not attributed to any interval
+    probe = WakeThroughputProbe(counter)
+    conn = _Conn(claimed=2)
+
+    assert await probe.sample(conn) == (2, 0)
+    counter.record()
+    counter.record()
+    assert await probe.sample(conn) == (2, 2)
+    assert await probe.sample(conn) == (2, 0)
+
+
+def test_completion_counter_counts_returns_and_raises_but_not_cancellation() -> None:
+    counter = CompletionCounter()
+    with counter.track():
+        pass
+    with pytest.raises(RuntimeError), counter.track():
+        raise RuntimeError("step failed")
+    with pytest.raises(asyncio.CancelledError), counter.track():
+        raise asyncio.CancelledError
+    assert counter.total == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("task_name", "target", "kwargs"),
+    [
+        ("wake_session", "aios.harness.loop.run_session_step", {"session_id": "s"}),
+        ("wake_workflow", "aios.workflows.step.run_workflow_step", {"run_id": "r"}),
+    ],
+)
+async def test_wake_tasks_record_completion(
+    monkeypatch: pytest.MonkeyPatch, task_name: str, target: str, kwargs: dict[str, str]
+) -> None:
+    import aios.harness.tasks as tasks
+    from aios.harness.throughput import WAKE_COMPLETIONS
+
+    monkeypatch.setattr(target, AsyncMock())
+    before = WAKE_COMPLETIONS.total
+    await getattr(tasks, task_name)(**kwargs)
+    assert WAKE_COMPLETIONS.total == before + 1

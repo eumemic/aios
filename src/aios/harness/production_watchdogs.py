@@ -15,6 +15,7 @@ from typing import Any
 import asyncpg
 
 from aios.db.pool import LISTENER_TCP_KEEPALIVE_SETTINGS, normalize_dsn
+from aios.harness.throughput import WAKE_COMPLETIONS, CompletionCounter
 from aios.logging import get_logger
 
 log = get_logger("aios.worker.watchdogs")
@@ -299,6 +300,40 @@ class ThroughputDeadMan:
         return True
 
 
+WAKE_TASK_NAMES = ("harness.wake_session", "harness.wake_workflow")
+
+CLAIMED_WAKES_SQL = (
+    "SELECT count(*) FROM procrastinate_jobs WHERE status = 'doing' AND task_name = ANY($1::text[])"
+)
+
+
+class WakeThroughputProbe:
+    """Sample ``(claimed, completed)`` for :class:`ThroughputDeadMan`.
+
+    ``claimed`` is the live count of ``doing`` wake jobs. ``completed`` is the
+    number of wake jobs this worker finished since the previous sample, read
+    from the in-process :data:`~aios.harness.throughput.WAKE_COMPLETIONS`
+    counter. It is NOT read from ``procrastinate_events``: under
+    ``delete_jobs="successful"`` a successful job is deleted (events cascade)
+    and never writes a ``succeeded`` event, so that count is structurally zero
+    and cannot distinguish a stall from a busy worker (#2541).
+    """
+
+    def __init__(self, counter: CompletionCounter = WAKE_COMPLETIONS) -> None:
+        self._counter = counter
+        self._last_total = counter.total
+
+    async def sample(
+        self, conn: Any, *, query_timeout_seconds: float | None = None
+    ) -> tuple[int, int]:
+        claimed = await conn.fetchval(
+            CLAIMED_WAKES_SQL, list(WAKE_TASK_NAMES), timeout=query_timeout_seconds
+        )
+        total = self._counter.total
+        completed, self._last_total = total - self._last_total, total
+        return int(claimed or 0), completed
+
+
 async def run_production_watchdogs(
     pool: Any,
     db_url: str,
@@ -378,6 +413,7 @@ async def _run_db_watchdogs(
     inspector: Any = None
     backoff = min(1.0, interval_seconds)
     watchdog: HeldConnectionWatchdog | None = None
+    probe = WakeThroughputProbe()
 
     while True:
         try:
@@ -437,19 +473,10 @@ async def _run_db_watchdogs(
             await asyncio.sleep(interval_seconds)
             assert watchdog is not None
             await asyncio.wait_for(watchdog.check_once(), operation_timeout_seconds * 3)
-            row = await inspector.fetchrow(
-                "SELECT (SELECT count(*) FROM procrastinate_jobs "
-                "WHERE status = 'doing' AND task_name IN "
-                "('harness.wake_session', 'harness.wake_workflow')) AS claimed, "
-                "(SELECT count(*) FROM procrastinate_events e "
-                "JOIN procrastinate_jobs j ON j.id = e.job_id "
-                "WHERE e.type = 'succeeded' AND j.task_name IN "
-                "('harness.wake_session', 'harness.wake_workflow') "
-                "AND e.at >= now() - make_interval(secs => $1)) AS completed",
-                interval_seconds,
-                timeout=operation_timeout_seconds,
+            claimed, completed = await probe.sample(
+                inspector, query_timeout_seconds=operation_timeout_seconds
             )
-            dead_man.observe(claimed=int(row["claimed"]), completed=int(row["completed"]))
+            dead_man.observe(claimed=claimed, completed=completed)
         except asyncio.CancelledError:
             if inspector is not None:
                 with contextlib.suppress(Exception):

@@ -115,6 +115,15 @@ _HEARTBEAT_FILENAME = "aios-worker-alive"
 _CONTAINER_HEARTBEAT_FILE = Path("/var/run") / _HEARTBEAT_FILENAME
 _HEARTBEAT_INTERVAL_SECONDS = 15
 
+# procrastinate defaults to NEVER deleting finished jobs, so
+# ``procrastinate_jobs`` would grow one row per wake forever. Reap successful
+# jobs; keep failures around for triage. Consequence (#2541): a successful job
+# leaves NO ``succeeded`` event (the row and its events are deleted), so the
+# throughput dead-man counts completions in-process instead — see
+# :mod:`aios.harness.throughput`. Module-level so the discrimination test runs
+# a real worker with exactly this setting.
+WORKER_DELETE_JOBS = "successful"
+
 # How long the worker startup loops between boot-admission proof attempts while
 # the DB is behind / unreachable. Matches the api gate's cadence.
 _BOOT_GATE_RETRY_SECONDS = 2.0
@@ -755,10 +764,7 @@ async def worker_main() -> None:
                 concurrency=settings.worker_concurrency,
                 wait=True,
                 install_signal_handlers=True,
-                # procrastinate defaults to NEVER deleting finished jobs, so
-                # ``procrastinate_jobs`` would grow one row per wake forever.
-                # Reap successful jobs; keep failures around for triage.
-                delete_jobs="successful",
+                delete_jobs=WORKER_DELETE_JOBS,
             ),
             name="procrastinate-worker",
         )

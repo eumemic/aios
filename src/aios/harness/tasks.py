@@ -35,6 +35,7 @@
 
 from __future__ import annotations
 
+from aios.harness.throughput import WAKE_COMPLETIONS
 from aios.jobs.app import app
 
 
@@ -51,7 +52,10 @@ async def wake_session(
     """Run one inference step for the session."""
     from aios.harness.loop import run_session_step
 
-    await run_session_step(session_id, cause=cause)
+    # Throughput dead-man signal (#2541): under ``delete_jobs="successful"``
+    # procrastinate leaves no durable trace of a successful job.
+    with WAKE_COMPLETIONS.track():
+        await run_session_step(session_id, cause=cause)
 
 
 @app.task(
@@ -103,4 +107,5 @@ async def wake_workflow(run_id: str) -> None:
     """
     from aios.workflows.step import run_workflow_step
 
-    await run_workflow_step(run_id)
+    with WAKE_COMPLETIONS.track():  # throughput dead-man signal (#2541)
+        await run_workflow_step(run_id)
