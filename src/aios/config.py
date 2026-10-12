@@ -248,6 +248,15 @@ class Settings(BaseSettings):
         gt=0,
         description="Timeout for individual Docker CLI management calls.",
     )
+    sandbox_gc_enumeration_timeout_seconds: float = Field(
+        default=300.0,
+        gt=0,
+        description="Timeout for each Docker call in the snapshot GC's managed-image "
+        "enumeration (the label-filtered ``docker images`` listing and its 100-id "
+        "``docker image inspect`` batches). Their cost grows with the snapshot pool "
+        "(~35 s for ~760 images on the containerd snapshotter), so they get this "
+        "dedicated bound rather than ``sandbox_docker_cli_timeout_seconds`` (aios#2343).",
+    )
     sandbox_inspect_size_timeout_seconds: float = Field(
         default=300.0,
         gt=0,

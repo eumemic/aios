@@ -27,6 +27,107 @@ except Exception:  # pragma: no cover
     _ALARMS = None
 
 
+try:
+    from prometheus_client import Gauge
+
+    _GC_CONSECUTIVE_FAILURES = Gauge(
+        "aios_sandbox_gc_consecutive_failures",
+        "Consecutive aborted snapshot GC ticks (0 after a successful tick).",
+    )
+    _GC_LAST_SUCCESS = Gauge(
+        "aios_sandbox_gc_last_success_timestamp_seconds",
+        "Unix time of the last successful snapshot GC tick (0 = none yet).",
+    )
+except Exception:  # pragma: no cover
+    _GC_CONSECUTIVE_FAILURES = None
+    _GC_LAST_SUCCESS = None
+
+
+# Consecutive aborted GC ticks at which the snapshot GC counts as STALLED. One
+# aborted tick is a hiccup; two in a row (two hours at the hourly cadence) is a
+# disk reclaimer that is not running (aios#2343).
+GC_STALLED_AFTER_FAILURES = 2
+
+
+class SnapshotGcHealth:
+    """Worker-side liveness state of the snapshot GC reconciler (aios#2343).
+
+    The GC loop (``SandboxRegistry._gc_loop``) publishes here; the production
+    watchdog loop reads it and alarms while the GC is stalled. It is
+    deliberately in-process worker state: the API's ``/health`` runs in a
+    different process and cannot see it.
+    """
+
+    def __init__(self) -> None:
+        self.last_success_at: datetime | None = None
+        self.consecutive_failures = 0
+        self.last_error_class: str | None = None
+
+    def record_success(self, *, at: datetime | None = None) -> None:
+        self.last_success_at = at or datetime.now(UTC)
+        self.consecutive_failures = 0
+        self.last_error_class = None
+        self._export()
+
+    def record_failure(self, error: BaseException) -> int:
+        self.consecutive_failures += 1
+        self.last_error_class = type(error).__name__
+        self._export()
+        return self.consecutive_failures
+
+    @property
+    def stalled(self) -> bool:
+        return self.consecutive_failures >= GC_STALLED_AFTER_FAILURES
+
+    def snapshot(self) -> dict[str, Any]:
+        return {
+            "gc_last_success_at": (
+                self.last_success_at.isoformat() if self.last_success_at else None
+            ),
+            "gc_consecutive_failures": self.consecutive_failures,
+            "gc_last_error_class": self.last_error_class,
+        }
+
+    def _export(self) -> None:
+        # Pure telemetry: a metrics failure must never reach the GC loop.
+        with contextlib.suppress(Exception):
+            if _GC_CONSECUTIVE_FAILURES is not None:
+                _GC_CONSECUTIVE_FAILURES.set(self.consecutive_failures)
+            if _GC_LAST_SUCCESS is not None and self.last_success_at is not None:
+                _GC_LAST_SUCCESS.set(self.last_success_at.timestamp())
+
+
+# The single worker-process instance the GC loop publishes to.
+SNAPSHOT_GC_HEALTH = SnapshotGcHealth()
+
+
+class SnapshotGcStallWatch:
+    """Alarm (rate-limited) while the snapshot GC is stalled."""
+
+    def __init__(
+        self,
+        health: SnapshotGcHealth,
+        *,
+        rate_limit_seconds: float,
+        alarm: Callable[[str, dict[str, Any]], None] | None = None,
+    ) -> None:
+        self.health = health
+        self.rate_limit_seconds = rate_limit_seconds
+        self.alarm = alarm if alarm is not None else _emit_alarm
+        self._last_alarm = float("-inf")
+
+    def check(self, *, now: float | None = None) -> bool:
+        stamp = time.monotonic() if now is None else now
+        if not self.health.stalled:
+            self._last_alarm = float("-inf")
+            return False
+        if stamp - self._last_alarm < self.rate_limit_seconds:
+            return False
+        self.alarm("snapshot_gc_stalled", self.health.snapshot())
+        self._last_alarm = stamp
+        return True
+
+
 def _emit_alarm(kind: str, specimen: dict[str, Any]) -> None:
     if _ALARMS is not None:
         with contextlib.suppress(Exception):
@@ -211,6 +312,7 @@ async def run_production_watchdogs(
     operation_timeout_seconds: float = 5.0,
     activity_limit: int = 100,
     max_specimens: int = 20,
+    gc_health: SnapshotGcHealth | None = None,
 ) -> None:
     """Run fail-open observers on a reconnecting, dedicated connection."""
     inspector: Any = None
@@ -218,6 +320,10 @@ async def run_production_watchdogs(
     watchdog: HeldConnectionWatchdog | None = None
     dead_man = ThroughputDeadMan(
         threshold_seconds=dead_man_threshold_seconds, rate_limit_seconds=rate_limit_seconds
+    )
+    gc_stall_watch = SnapshotGcStallWatch(
+        gc_health if gc_health is not None else SNAPSHOT_GC_HEALTH,
+        rate_limit_seconds=rate_limit_seconds,
     )
 
     while True:
@@ -276,6 +382,9 @@ async def run_production_watchdogs(
                 backoff = min(1.0, interval_seconds)
 
             await asyncio.sleep(interval_seconds)
+            # In-process state only: checked before the DB-backed observers so
+            # a DB outage cannot mask a stalled disk reclaimer.
+            gc_stall_watch.check()
             assert watchdog is not None
             await asyncio.wait_for(watchdog.check_once(), operation_timeout_seconds * 3)
             row = await inspector.fetchrow(

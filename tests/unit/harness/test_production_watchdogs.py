@@ -232,3 +232,30 @@ async def test_runner_counts_session_and_workflow_wake_completions_symmetrically
     runner.cancel()
     with pytest.raises(asyncio.CancelledError):
         await runner
+
+
+def test_snapshot_gc_stall_watch_alarms_only_while_stalled() -> None:
+    from aios.harness.production_watchdogs import SnapshotGcHealth, SnapshotGcStallWatch
+
+    health = SnapshotGcHealth()
+    alarm = MagicMock()
+    watch = SnapshotGcStallWatch(health, rate_limit_seconds=60, alarm=alarm)
+
+    health.record_success()
+    assert watch.check(now=0) is False
+    health.record_failure(TimeoutError("x"))
+    assert watch.check(now=1) is False
+    health.record_failure(TimeoutError("x"))
+    assert watch.check(now=2) is True
+    kind, payload = alarm.call_args[0]
+    assert kind == "snapshot_gc_stalled"
+    assert payload["gc_consecutive_failures"] == 2
+    assert payload["gc_last_success_at"] is not None
+    assert payload["gc_last_error_class"] == "TimeoutError"
+    # Rate-limited while the stall persists.
+    assert watch.check(now=30) is False
+    assert watch.check(now=63) is True
+    # Recovery clears the stall.
+    health.record_success()
+    assert watch.check(now=200) is False
+    assert health.snapshot()["gc_consecutive_failures"] == 0

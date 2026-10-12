@@ -1427,7 +1427,12 @@ class DockerBackend:
             "--filter",
             f"label={INSTANCE_LABEL_KEY}={instance_id}",
         ]
-        rc, stdout_bytes, stderr_bytes = await run_docker_cli(ls_argv)
+        # The listing and the inspect batches below scale with the pool, so
+        # they run under the dedicated enumeration bound, NOT the general CLI
+        # timeout: a fixed 30 s bound on an O(images) call stopped the GC for
+        # 10+ hours exactly when the pool was largest (aios#2343).
+        enum_timeout_s = get_settings().sandbox_gc_enumeration_timeout_seconds
+        rc, stdout_bytes, stderr_bytes = await run_docker_cli(ls_argv, timeout_s=enum_timeout_s)
         if rc != 0:
             raise SandboxBackendError(
                 f"docker images failed (exit {rc}): "
@@ -1456,7 +1461,7 @@ class DockerBackend:
             # the first read is PROVED incomplete and must not drive a negative
             # reconciliation. A genuinely empty host re-reads empty and still
             # returns [], so the GC does not stall.
-            rc, stdout_bytes, stderr_bytes = await run_docker_cli(ls_argv)
+            rc, stdout_bytes, stderr_bytes = await run_docker_cli(ls_argv, timeout_s=enum_timeout_s)
             if rc != 0:
                 raise SandboxBackendError(
                     f"incomplete managed image enumeration: empty listing could not be "
@@ -1500,7 +1505,7 @@ class DockerBackend:
             batch = image_ids[offset : offset + _MANAGED_INSPECT_BATCH_SIZE]
             try:
                 rc, stdout_bytes, stderr_bytes = await run_docker_cli(
-                    ["docker", "image", "inspect", *batch]
+                    ["docker", "image", "inspect", *batch], timeout_s=enum_timeout_s
                 )
             except SandboxBackendError as err:
                 # Unreachable/timed-out daemon: nothing about this batch is

@@ -17,7 +17,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from typing import Any, cast
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -180,3 +180,122 @@ async def test_recovery_after_failures_is_announced(
     recovered = [c for c in info.call_args_list if c[0][0] == "sandbox.gc_tick_recovered"]
     assert recovered, "GC recovery was never reported"
     assert recovered[0][1]["failed_ticks"] == 2
+
+
+# ── aios#2343: a dead GC must be visible without reading container logs ────
+
+
+def _fresh_health(registry: SandboxRegistry) -> Any:
+    from aios.harness.production_watchdogs import SnapshotGcHealth
+
+    health = SnapshotGcHealth()
+    registry._gc_health = health
+    return health
+
+
+async def _drive(
+    registry: SandboxRegistry,
+    outcomes: list[bool],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Run exactly ``len(outcomes)`` ticks (True = success, False = failure)."""
+    monkeypatch.setattr("aios.sandbox.registry._GC_INTERVAL_SECONDS", 0)
+    remaining = list(outcomes)
+    done = asyncio.Event()
+
+    async def tick(pool: Any) -> GcPressureResult:
+        if not remaining:
+            done.set()
+            await asyncio.Event().wait()
+        ok = remaining.pop(0)
+        if not ok:
+            raise TimeoutError("docker cli timed out after 30.0s")
+        return GcPressureResult()
+
+    monkeypatch.setattr(registry, "_gc_once", tick)
+    task = asyncio.create_task(registry._gc_loop(cast(Any, object()), lambda p: None))
+    await asyncio.wait_for(done.wait(), 5)
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+
+def _stalled_calls(error: Mock) -> list[Any]:
+    return [c for c in error.call_args_list if c[0][0] == "sandbox.gc_stalled"]
+
+
+async def test_gc_stalled_not_emitted_on_first_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    registry = SandboxRegistry(backend=cast(Any, FakeBackend()))
+    health = _fresh_health(registry)
+    error = Mock()
+    monkeypatch.setattr("aios.sandbox.registry.log.error", error)
+    monkeypatch.setattr("aios.sandbox.registry.log.warning", Mock())
+
+    await _drive(registry, [True, False], monkeypatch)
+
+    assert _stalled_calls(error) == []
+    assert health.consecutive_failures == 1
+    assert health.stalled is False
+
+
+async def test_gc_stalled_emitted_on_second_consecutive_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = SandboxRegistry(backend=cast(Any, FakeBackend()))
+    health = _fresh_health(registry)
+    error = Mock()
+    monkeypatch.setattr("aios.sandbox.registry.log.error", error)
+    monkeypatch.setattr("aios.sandbox.registry.log.warning", Mock())
+
+    await _drive(registry, [True, False, False], monkeypatch)
+
+    stalled = _stalled_calls(error)
+    assert len(stalled) == 1
+    kwargs = stalled[0][1]
+    assert kwargs["consecutive_failures"] == 2
+    assert kwargs["error_class"] == "TimeoutError"
+    assert health.last_success_at is not None
+    assert kwargs["last_success_at"] == health.last_success_at.isoformat()
+    assert health.snapshot()["gc_consecutive_failures"] == 2
+    assert health.stalled is True
+
+
+async def test_recovery_clears_published_failure_counter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = SandboxRegistry(backend=cast(Any, FakeBackend()))
+    health = _fresh_health(registry)
+    monkeypatch.setattr("aios.sandbox.registry.log.error", Mock())
+    monkeypatch.setattr("aios.sandbox.registry.log.warning", Mock())
+
+    await _drive(registry, [False, False, True], monkeypatch)
+
+    assert health.consecutive_failures == 0
+    assert health.stalled is False
+    assert health.last_success_at is not None
+    assert health.snapshot()["gc_consecutive_failures"] == 0
+
+
+async def test_enumeration_timeout_fails_the_tick(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A timed-out managed-image enumeration aborts the tick and is counted."""
+    from aios.sandbox.backends.base import SandboxBackendError
+
+    backend = FakeBackend()
+    registry = SandboxRegistry(backend=cast(Any, backend))
+    health = _fresh_health(registry)
+    monkeypatch.setattr("aios.sandbox.registry.log.warning", Mock())
+
+    async def no_containers(**kwargs: Any) -> list[Any]:
+        return []
+
+    async def timed_out(**kwargs: Any) -> list[Any]:
+        raise SandboxBackendError("docker cli timed out after 1.0s: docker images")
+
+    monkeypatch.setattr(backend, "list_managed", no_containers, raising=False)
+    monkeypatch.setattr(backend, "list_managed_images", timed_out, raising=False)
+    monkeypatch.setattr(registry, "_load_gc_states", AsyncMock(return_value={}))
+    monkeypatch.setattr(registry, "_gc_corpse_pass", AsyncMock())
+
+    with pytest.raises(SandboxBackendError, match="timed out"):
+        await registry._gc_once(cast(Any, object()))
+    assert health.consecutive_failures == 0  # _gc_once alone does not publish

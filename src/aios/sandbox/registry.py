@@ -44,6 +44,11 @@ from aios import ids
 from aios.config import get_settings
 from aios.db import queries
 from aios.errors import NotFoundError
+from aios.harness.production_watchdogs import (
+    GC_STALLED_AFTER_FAILURES,
+    SNAPSHOT_GC_HEALTH,
+    SnapshotGcHealth,
+)
 from aios.ids import sandbox_owner_kind
 from aios.logging import get_logger
 from aios.sandbox.backends.base import (
@@ -356,6 +361,9 @@ class SandboxRegistry:
         self._egress_provision_results: dict[str, EgressProvisionResult] = {}
         self._egress_states: dict[str, EgressRefreshState] = {}
         self._provisioning_pressure = GcPressureResult()
+        # GC liveness published to the worker production-watchdog state
+        # (aios#2343) so a dead reclaimer alarms without reading logs.
+        self._gc_health: SnapshotGcHealth = SNAPSHOT_GC_HEALTH
         # Consecutive salvage failures keyed by full corpse id. The value is
         # ``(owning_session_id, failures, alarmed)`` — the owning session is
         # stored so a salvage pass for one session only reconciles/clears its
@@ -2916,6 +2924,7 @@ class SandboxRegistry:
         """
         first = True
         consecutive_failures = 0
+        health = self._gc_health
         while True:
             try:
                 if not first:
@@ -2928,12 +2937,14 @@ class SandboxRegistry:
                         failed_ticks=consecutive_failures,
                     )
                 consecutive_failures = 0
+                health.record_success()
                 if pressure_callback is not None:
                     callback_result = pressure_callback(pressure)
                     if callback_result is not None:
                         await callback_result
-            except Exception:
+            except Exception as exc:
                 consecutive_failures += 1
+                health.record_failure(exc)
                 carried = self._provisioning_pressure
                 # Escalate once the GC has been down long enough that the
                 # carried-forward figure is materially stale: one aborted tick
@@ -2956,6 +2967,20 @@ class SandboxRegistry:
                     provisioning_gate_closed=carried.pressured,
                     next_attempt_seconds=_GC_INTERVAL_SECONDS,
                 )
+                if consecutive_failures >= GC_STALLED_AFTER_FAILURES:
+                    # A distinct, greppable state: the disk reclaimer is not
+                    # running (aios#2343). The production watchdog also alarms
+                    # on it from the published health state.
+                    last_success_at = health.last_success_at
+                    log.error(
+                        "sandbox.gc_stalled",
+                        alarm_event=True,
+                        consecutive_failures=consecutive_failures,
+                        last_success_at=(last_success_at.isoformat() if last_success_at else None),
+                        error_class=type(exc).__name__,
+                        error=str(exc),
+                        next_attempt_seconds=_GC_INTERVAL_SECONDS,
+                    )
 
     async def _gc_once(self, pool: asyncpg.Pool[Any]) -> GcPressureResult:
         """One GC tick: corpse pass, image pass, pool-budget pass, pointer reconcile."""
