@@ -35,7 +35,12 @@ jobs:
           ref: master
           path: _base
 
+      # Pin the interpreter: uv 0.13 defaults to Python 3.15, for which locked
+      # deps (psycopg-binary) ship no wheels, so an unpinned `uv run` fails
+      # with exit 2 before the check script ever runs.
       - uses: astral-sh/setup-uv@v4
+        with:
+          python-version: '3.13'
 
       - name: Detect branched Alembic history against live master
         run: >-
