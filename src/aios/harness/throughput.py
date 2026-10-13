@@ -23,30 +23,48 @@ from contextlib import contextmanager
 
 
 class CompletionCounter:
-    """Monotonic count of finished wake jobs in this process."""
+    """Monotonic counts of finished wake jobs in this process.
+
+    ``total`` counts only wakes that *returned normally* — that is the progress
+    signal the throughput dead-man consumes. Wakes that raised are counted
+    separately in ``failed`` and are deliberately NOT progress: a stream of
+    failing wakes must not reset the stall timer while another claimed wake is
+    stuck (the replaced ``procrastinate_events`` signal counted only
+    ``succeeded``, too).
+    """
 
     def __init__(self) -> None:
         self._total = 0
+        self._failed = 0
 
     @property
     def total(self) -> int:
+        """Wakes that returned normally (the dead-man's progress signal)."""
         return self._total
+
+    @property
+    def failed(self) -> int:
+        """Wakes that raised an ``Exception`` — visible, but never progress."""
+        return self._failed
 
     def record(self) -> None:
         self._total += 1
 
+    def record_failure(self) -> None:
+        self._failed += 1
+
     @contextmanager
     def track(self) -> Iterator[None]:
-        """Count the wrapped job when it returns or raises.
+        """Count the wrapped job by outcome.
 
-        A step that raised still finished: the worker made progress and moved
-        on. Cancellation (``BaseException``) is not counted — that is shutdown
-        or abort, not throughput.
+        A normal return increments ``total``. An ``Exception`` increments
+        ``failed`` only — an error is not throughput. Cancellation
+        (``BaseException``) counts as neither: that is shutdown or abort.
         """
         try:
             yield
         except Exception:
-            self.record()
+            self.record_failure()
             raise
         self.record()
 

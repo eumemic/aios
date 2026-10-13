@@ -311,7 +311,7 @@ class WakeThroughputProbe:
     """Sample ``(claimed, completed)`` for :class:`ThroughputDeadMan`.
 
     ``claimed`` is the live count of ``doing`` wake jobs. ``completed`` is the
-    number of wake jobs this worker finished since the previous sample, read
+    number of wake jobs that returned normally since the previous sample, read
     from the in-process :data:`~aios.harness.throughput.WAKE_COMPLETIONS`
     counter. It is NOT read from ``procrastinate_events``: under
     ``delete_jobs="successful"`` a successful job is deleted (events cascade)

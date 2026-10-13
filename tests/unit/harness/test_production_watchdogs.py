@@ -370,7 +370,7 @@ async def test_probe_reports_completions_since_previous_sample() -> None:
     assert await probe.sample(conn) == (2, 0)
 
 
-def test_completion_counter_counts_returns_and_raises_but_not_cancellation() -> None:
+def test_completion_counter_counts_only_returns_as_progress() -> None:
     counter = CompletionCounter()
     with counter.track():
         pass
@@ -378,7 +378,8 @@ def test_completion_counter_counts_returns_and_raises_but_not_cancellation() -> 
         raise RuntimeError("step failed")
     with pytest.raises(asyncio.CancelledError), counter.track():
         raise asyncio.CancelledError
-    assert counter.total == 2
+    assert counter.total == 1  # only the normal return is throughput
+    assert counter.failed == 1  # the raise is visible, but not progress
 
 
 @pytest.mark.asyncio
