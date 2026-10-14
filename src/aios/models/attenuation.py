@@ -1,12 +1,13 @@
-"""The capability-attenuation operator — one lattice meet over a principal's surface.
+"""The capability-attenuation operator — a directed clamp over a principal's surface.
 
 A *surface* is the quadruple ``(tools, mcp_servers, http_servers, ssh_servers)``. Every principal
 in the system (agent, workflow, run, child session) carries one. The single law of
 the authority story is **materialize ⇒ clamp, frozen-once**: whenever a principal
 materializes its surface it is set to ``attenuate(its declared, its launcher's
-already-frozen effective)`` and never recomputed. Composition is free by
-associativity — each launcher was itself born clamped, so a single-step meet against
-the launcher's frozen effective equals the whole-chain fold; no ancestor walk.
+already-frozen effective)`` and never recomputed. Each launcher was itself born
+clamped, so its frozen effective surface carries its inherited scope. Composition
+follows that parent chain: clamp against the true launcher's already-frozen
+effective surface; no ancestor walk or general associativity is assumed.
 
 This module is the pure operator behind that law: spec-in, spec-out, principal-
 agnostic, no I/O. It lives at the bottom of the import graph (it imports only
