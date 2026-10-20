@@ -1460,3 +1460,69 @@ def test_module_exports() -> None:
         "PLACEHOLDER_SUBSTITUTION_FAILED_STATUS",
         "SecretEgressProxy",
     ]
+
+
+def _served_leaf(ctx: ssl.SSLContext, host: str) -> Any:
+    """The leaf certificate ``ctx`` actually presents in a TLS handshake
+    (in-memory BIOs, no sockets), parsed with ``cryptography``."""
+    from cryptography import x509
+
+    client_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    client_ctx.check_hostname = False
+    client_ctx.verify_mode = ssl.CERT_NONE
+    c_in, c_out, s_in, s_out = (ssl.MemoryBIO() for _ in range(4))
+    client = client_ctx.wrap_bio(c_in, c_out, server_hostname=host)
+    server = ctx.wrap_bio(s_in, s_out, server_side=True)
+    for _ in range(20):
+        done = True
+        for side, out_bio, peer_in in ((client, c_out, s_in), (server, s_out, c_in)):
+            try:
+                side.do_handshake()
+            except ssl.SSLWantReadError:
+                done = False
+            data = out_bio.read()
+            if data:
+                peer_in.write(data)
+        if done:
+            break
+    der = client.getpeercert(binary_form=True)
+    assert der is not None
+    return x509.load_der_x509_certificate(der)
+
+
+class TestLeafCacheExpiry:
+    """#2553: the per-host leaf cache must not outlive the leaf. A sandbox
+    running past ``LEAF_VALIDITY_DAYS`` used to keep serving the expired
+    cached leaf, failing every HTTPS call to its credential hosts."""
+
+    async def test_cached_leaf_remints_once_near_expiry(self, make_proxy: MakeProxy) -> None:
+        from datetime import timedelta
+
+        from aios.sandbox.egress_ca import LEAF_VALIDITY_DAYS
+
+        host = "api.allowed.test"
+        proxy, _ = await make_proxy([_cred("GH_TOKEN", "s", (host,), PH_GH)])
+        t0 = datetime.now(UTC)
+        first = proxy._leaf_context(host, now=t0)
+        # Within the validity window the cache is reused.
+        assert proxy._leaf_context(host, now=t0 + timedelta(days=1)) is first
+
+        later = t0 + timedelta(days=LEAF_VALIDITY_DAYS, hours=1)
+        refreshed = proxy._leaf_context(host, now=later)
+        assert refreshed is not first
+        assert _served_leaf(refreshed, host).not_valid_after_utc > later
+
+    async def test_remints_inside_refresh_margin(self, make_proxy: MakeProxy) -> None:
+        from datetime import timedelta
+
+        from aios.sandbox.egress_ca import LEAF_VALIDITY_DAYS
+
+        host = "api.allowed.test"
+        proxy, _ = await make_proxy([_cred("GH_TOKEN", "s", (host,), PH_GH)])
+        t0 = datetime.now(UTC)
+        first = proxy._leaf_context(host, now=t0)
+        # Not yet expired, but under the refresh margin: re-mint proactively.
+        almost = t0 + timedelta(days=LEAF_VALIDITY_DAYS) - timedelta(hours=1)
+        refreshed = proxy._leaf_context(host, now=almost)
+        assert refreshed is not first
+        assert _served_leaf(refreshed, host).not_valid_after_utc > almost + timedelta(days=1)
