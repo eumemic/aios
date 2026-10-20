@@ -167,7 +167,7 @@ def get_egress_ca() -> EgressCA:
 
 
 def mint_server_leaf(
-    ca: EgressCA, hostname: str
+    ca: EgressCA, hostname: str, *, now: datetime | None = None
 ) -> tuple[x509.Certificate, ec.EllipticCurvePrivateKey]:
     """A server leaf for ``hostname`` signed by ``ca`` — the leaf contract
     pinned in this module's docstring.
@@ -187,9 +187,13 @@ def mint_server_leaf(
     and render that allowed host permanently unreachable through the proxy.
     The DNS SAN has no such limit, and an empty subject is valid precisely
     when the SAN is critical (RFC 5280 §4.2.1.6).
+
+    ``now`` anchors the validity window (default: the current UTC time);
+    injectable so callers/tests can reason about expiry deterministically.
     """
     key = ec.generate_private_key(ec.SECP256R1())
-    now = datetime.now(UTC)
+    if now is None:
+        now = datetime.now(UTC)
     cert = (
         x509.CertificateBuilder()
         .subject_name(x509.Name([]))
