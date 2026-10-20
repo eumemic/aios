@@ -69,6 +69,7 @@ import ssl
 import tempfile
 import weakref
 from collections.abc import Iterable
+from datetime import UTC, datetime, timedelta
 from typing import Literal
 
 import h11
@@ -91,6 +92,10 @@ _UPSTREAM_PORT = 443
 # Generous upstream bound — a sandbox CLI may stream a large authenticated
 # upload or download. Matches git_proxy.
 _UPSTREAM_TIMEOUT_S = 300.0
+# Re-mint a cached per-host leaf once less than this much validity remains,
+# so a sandbox outliving LEAF_VALIDITY_DAYS never sees an expired leaf
+# (#2553), with slack for a sandbox clock running ahead of the worker's.
+_LEAF_REFRESH_MARGIN = timedelta(hours=24)
 _READ_CHUNK = 65536
 # Idle bound on a single inbound read: a client that stalls mid-request (or
 # never sends one) must not pin a handler indefinitely. Bounds idle time
@@ -503,7 +508,10 @@ class SecretEgressProxy:
         # once at construction so the hot read-loop touches a plain attribute.
         self._max_body_bytes: int = get_settings().sandbox_egress_max_request_bytes
         self._ca: EgressCA = get_egress_ca()
-        self._leaf_ctx: dict[str, ssl.SSLContext] = {}
+        # host -> (server context, that leaf's notAfter). The expiry is kept
+        # alongside the context so a long-lived proxy re-mints before the
+        # leaf dies instead of serving it forever (#2553).
+        self._leaf_ctx: dict[str, tuple[ssl.SSLContext, datetime]] = {}
         self._sni: weakref.WeakKeyDictionary[ssl.SSLObject, str] = weakref.WeakKeyDictionary()
         self._client = httpx.AsyncClient(
             timeout=_UPSTREAM_TIMEOUT_S,
@@ -844,18 +852,27 @@ class SecretEgressProxy:
             log.warning("secret_egress_proxy.sni_callback_error", server_name=server_name)
             return ssl.ALERT_DESCRIPTION_INTERNAL_ERROR
 
-    def _leaf_context(self, host: str) -> ssl.SSLContext:
-        """A TLS server context presenting a leaf for ``host``, minted once
-        per host and cached for the session.
+    def _leaf_context(self, host: str, *, now: datetime | None = None) -> ssl.SSLContext:
+        """A TLS server context presenting a leaf for ``host``, minted per
+        host and cached — but only while the cached leaf has more than
+        ``_LEAF_REFRESH_MARGIN`` of validity left. The proxy lives as long
+        as the sandbox, which can outlast ``LEAF_VALIDITY_DAYS``; past that
+        the cached leaf is re-minted (the SNI callback swaps
+        ``sslobj.context`` per handshake, so the next connection picks up
+        the fresh leaf) rather than serving an expired cert (#2553).
 
         ``load_cert_chain`` has no in-memory variant, so the leaf key is
         written to a 0600 temp file and unlinked immediately — always, even
         if the load raises. The key is an ephemeral per-host leaf (not the CA
         key, not the secret)."""
+        if now is None:
+            now = datetime.now(UTC)
         cached = self._leaf_ctx.get(host)
         if cached is not None:
-            return cached
-        cert, key = mint_server_leaf(self._ca, host)
+            cached_ctx, not_after = cached
+            if not_after - now > _LEAF_REFRESH_MARGIN:
+                return cached_ctx
+        cert, key = mint_server_leaf(self._ca, host, now=now)
         pem = cert.public_bytes(serialization.Encoding.PEM) + key.private_bytes(
             serialization.Encoding.PEM,
             serialization.PrivateFormat.PKCS8,
@@ -869,7 +886,7 @@ class SecretEgressProxy:
             ctx.load_cert_chain(tmp)
         finally:
             os.unlink(tmp)
-        self._leaf_ctx[host] = ctx
+        self._leaf_ctx[host] = (ctx, cert.not_valid_after_utc)
         return ctx
 
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
