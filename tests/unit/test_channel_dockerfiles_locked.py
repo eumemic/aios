@@ -66,8 +66,14 @@ def test_venv_is_on_path(channel: str) -> None:
 @pytest.mark.parametrize("channel", CHANNELS)
 def test_external_images_are_digest_pinned(channel: str) -> None:
     lines = _instructions(channel)
-    stages = {m.group(1) for line in lines if (m := re.search(r"^FROM \S+ AS (\S+)", line))}
-    from_images = [line.split()[1] for line in lines if line.startswith("FROM ")]
+    # ``FROM [--platform=...] <image> [AS <stage>]`` — skip flags to reach the image.
+    from_args = [
+        [arg for arg in line.split()[1:] if not arg.startswith("--")]
+        for line in lines
+        if line.startswith("FROM ")
+    ]
+    stages = {args[2] for args in from_args if len(args) == 3 and args[1].upper() == "AS"}
+    from_images = [args[0] for args in from_args]
     copy_from = [m.group(1) for line in lines if (m := re.search(r"^COPY .*--from=(\S+)", line))]
     external = [ref for ref in [*from_images, *copy_from] if ref not in stages]
     assert external
