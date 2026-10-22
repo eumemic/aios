@@ -82,6 +82,10 @@ def test_manifest_floors_declared() -> None:
     assert not litellm.specifier.contains("1.107.0", prereleases=True), (
         "litellm must exclude 1.107.0 (reported compromised: credential stealer/RAT)"
     )
+    for later in ("1.107.0rc1", "1.107.0.post1", "1.107.1", "1.108.0"):
+        assert not litellm.specifier.contains(later, prereleases=True), (
+            f"litellm must stay capped <1.107 until a verified-clean release (got {later})"
+        )
 
     h11 = reqs["h11"]
     assert not h11.specifier.contains("0.15", prereleases=True), (
