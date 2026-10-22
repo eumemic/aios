@@ -12,8 +12,9 @@ name: Build signal connector image
 # Triggers are paths-filtered to the inputs that actually change the image:
 # the Dockerfile, any ``.patch`` it applies, this workflow, and the inputs of
 # its frozen ``uv sync`` (the root lock + workspace manifest and the
-# manifests of the members it installs) — a lock/manifest change that breaks
-# the scoped sync fails here rather than at deploy time.
+# manifests of the members it installs, plus ``.dockerignore``, which decides
+# whether the member READMEs hatchling needs reach the context) — a change
+# that breaks the scoped sync fails here rather than at deploy time.
 #
 # Security note: this workflow does not interpolate any untrusted input
 # (issue titles, PR bodies, head_ref, etc.) into ``run:`` commands.
@@ -29,6 +30,7 @@ on:
       - packages/aios-connector-http/pyproject.toml
       - pyproject.toml
       - uv.lock
+      - .dockerignore
       - .github/workflows/build-signal-connector.yml
   pull_request:
     paths:
@@ -39,6 +41,7 @@ on:
       - packages/aios-connector-http/pyproject.toml
       - pyproject.toml
       - uv.lock
+      - .dockerignore
       - .github/workflows/build-signal-connector.yml
   workflow_dispatch:
 
