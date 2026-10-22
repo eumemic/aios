@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -10,6 +11,24 @@ _WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "gvisor-validation.yml"
 
 def _workflow_text() -> str:
     return _WORKFLOW.read_text()
+
+
+# The probe image is pinned by digest, not a floating tag: a re-pushed
+# ``alpine:latest`` must not silently change what this job runs.
+_PINNED_ALPINE_DEF = re.compile(r'ALPINE="alpine(?::[\w.-]+)?@sha256:[0-9a-f]{64}"')
+_ALPINE_REF = re.compile(r"\balpine\b(?::[\w.-]+)?(?:@sha256:[0-9a-f]{64})?")
+
+
+def _assert_alpine_pinned(workflow: str) -> None:
+    assert _PINNED_ALPINE_DEF.search(workflow), "ALPINE must be defined as alpine@sha256:<digest>"
+    code_lines = [line for line in workflow.splitlines() if not line.lstrip().startswith("#")]
+    unpinned = [
+        line.strip()
+        for line in code_lines
+        for ref in _ALPINE_REF.finditer(line)
+        if "@sha256:" not in ref.group()
+    ]
+    assert not unpinned, f"bare/unpinned alpine image reference(s): {unpinned}"
 
 
 def test_gvisor_validation_workflow_exists_with_informational_triggers() -> None:
@@ -69,7 +88,8 @@ def test_gvisor_workflow_installs_and_smokes_runsc_runtime() -> None:
         '"runtimeArgs":["--oci-seccomp","--overlay2=none"]}}' in workflow
     )
     assert "sudo systemctl restart docker" in workflow
-    assert "docker run --runtime=runsc --rm alpine echo ok" in workflow
+    assert 'docker run --runtime=runsc --rm "$ALPINE" echo ok' in workflow
+    _assert_alpine_pinned(workflow)
 
 
 def test_gvisor_workflow_mirrors_docker_e2e_setup_and_runs_runsc_shard() -> None:
@@ -122,7 +142,9 @@ def test_gvisor_workflow_proves_the_daemon_supports_the_operator_image_mount() -
     workflow = _workflow_text()
 
     assert '"containerd-snapshotter"' in workflow
-    assert '--mount "type=image,src=alpine,dst=/mnt/operator-root"' in workflow
+    assert '--mount "type=image,src=$ALPINE,dst=/mnt/operator-root"' in workflow
+    assert '"$ALPINE" test -x /mnt/operator-root/bin/busybox' in workflow
+    _assert_alpine_pinned(workflow)
 
 
 def test_gvisor_workflow_groups_junit_failures_by_risk_in_summary() -> None:

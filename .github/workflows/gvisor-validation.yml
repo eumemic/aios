@@ -90,15 +90,17 @@ jobs:
           # Expected runtime stanza: {"runtimes":{"runsc":{"path":"/usr/bin/runsc","runtimeArgs":["--oci-seccomp","--overlay2=none"]}}}
           PY
           sudo systemctl restart docker
-          docker run --runtime=runsc --rm alpine echo ok
+          # Pinned by digest (registry manifest HEAD), not the floating tag.
+          ALPINE="alpine:latest@sha256:71e9b7bae160ba167fa17414401b94cbcdaf3c32feeab9298bd794a2a0614c35"
+          docker run --runtime=runsc --rm "$ALPINE" echo ok
           # The runsc egress path installs netfilter from inside the target
           # Sentry using binaries from a read-only image mount, so prove the
           # daemon actually honours --mount type=image here.  Without this the
           # capability is only asserted by the daemon.json edit above, and a
           # runner whose Engine ignores it would fail every Limited
           # provisioning deep inside the suite with an unrelated-looking error.
-          docker run --rm --mount "type=image,src=alpine,dst=/mnt/operator-root" \
-            alpine test -x /mnt/operator-root/bin/busybox || {
+          docker run --rm --mount "type=image,src=$ALPINE,dst=/mnt/operator-root" \
+            "$ALPINE" test -x /mnt/operator-root/bin/busybox || {
             echo "::error::daemon does not support --mount type=image (needs Engine 28+ with the containerd image store); the runsc egress path cannot work"
             exit 1
           }

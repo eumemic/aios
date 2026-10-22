@@ -16,6 +16,8 @@ Covered items (see #1714):
 * **h11** ``>=0.16`` — CVE-2025-43859 (request-smuggling-vulnerable parser).
 * **mcp** ``>=1.20,<2`` — SDK v2 is a breaking rearchitecture; cap defends
   against an unattended major bump.
+* **litellm** ``!=1.107.0,<1.107`` — 1.107.0 was reported compromised
+  (credential stealer/RAT on install). Lift only after a verified-clean release.
 
 Pure file parsing (``tomllib`` + ``packaging``); no DB, no network.
 """
@@ -42,6 +44,9 @@ LOCKED_FLOORS = {
 
 # mcp must stay below the v2 breaking rearchitecture.
 MCP_MAX_EXCLUSIVE = Version("2")
+
+# litellm 1.107.0 was reported compromised (supply-chain RAT on install).
+LITELLM_MAX_EXCLUSIVE = Version("1.107")
 
 
 def _direct_requirements() -> dict[str, Requirement]:
@@ -74,6 +79,13 @@ def test_manifest_floors_declared() -> None:
         "litellm floor must include the capability-map refresh in 1.96.2"
     )
     assert litellm.specifier.contains("1.96.2", prereleases=True)
+    assert not litellm.specifier.contains("1.107.0", prereleases=True), (
+        "litellm must exclude 1.107.0 (reported compromised: credential stealer/RAT)"
+    )
+    for later in ("1.107.0rc1", "1.107.0.post1", "1.107.1", "1.108.0"):
+        assert not litellm.specifier.contains(later, prereleases=True), (
+            f"litellm must stay capped <1.107 until a verified-clean release (got {later})"
+        )
 
     h11 = reqs["h11"]
     assert not h11.specifier.contains("0.15", prereleases=True), (
@@ -99,6 +111,9 @@ def test_locked_versions_meet_floors() -> None:
     assert "mcp" in locked, "mcp missing from uv.lock"
     assert locked["mcp"] < MCP_MAX_EXCLUSIVE, (
         f"mcp locked at {locked['mcp']}, must be < {MCP_MAX_EXCLUSIVE}"
+    )
+    assert locked["litellm"] < LITELLM_MAX_EXCLUSIVE, (
+        f"litellm locked at {locked['litellm']}, must be < {LITELLM_MAX_EXCLUSIVE}"
     )
 
 
