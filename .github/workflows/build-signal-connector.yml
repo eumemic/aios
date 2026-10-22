@@ -10,7 +10,11 @@ name: Build signal connector image
 # instead of at deploy time.  This is a BUILD GATE only — no GHCR push.
 #
 # Triggers are paths-filtered to the inputs that actually change the image:
-# the Dockerfile, any ``.patch`` it applies, and this workflow.
+# the Dockerfile, any ``.patch`` it applies, this workflow, and the inputs of
+# its frozen ``uv sync`` (the root lock + workspace manifest and the
+# manifests of the members it installs, plus ``.dockerignore``, which decides
+# whether the member READMEs hatchling needs reach the context) — a change
+# that breaks the scoped sync fails here rather than at deploy time.
 #
 # Security note: this workflow does not interpolate any untrusted input
 # (issue titles, PR bodies, head_ref, etc.) into ``run:`` commands.
@@ -21,11 +25,23 @@ on:
     paths:
       - connectors/signal/Dockerfile
       - connectors/signal/*.patch
+      - connectors/signal/pyproject.toml
+      - packages/aios-sdk/pyproject.toml
+      - packages/aios-connector-http/pyproject.toml
+      - pyproject.toml
+      - uv.lock
+      - .dockerignore
       - .github/workflows/build-signal-connector.yml
   pull_request:
     paths:
       - connectors/signal/Dockerfile
       - connectors/signal/*.patch
+      - connectors/signal/pyproject.toml
+      - packages/aios-sdk/pyproject.toml
+      - packages/aios-connector-http/pyproject.toml
+      - pyproject.toml
+      - uv.lock
+      - .dockerignore
       - .github/workflows/build-signal-connector.yml
   workflow_dispatch:
 
@@ -65,3 +81,8 @@ jobs:
 
       - name: Smoke test — signal-cli runs and reports a version
         run: docker run --rm --entrypoint signal-cli aios-signal:ci --version | grep -q 'signal-cli'
+
+      # Bare ``python`` must resolve (via PATH) to the frozen /app/.venv —
+      # the interpreter entrypoint.sh and the HEALTHCHECK run.
+      - name: Smoke test — connector imports from the locked venv
+        run: docker run --rm --entrypoint python aios-signal:ci -c 'import sys, aios_signal, aios_connector_http.healthcheck; assert sys.prefix == "/app/.venv", sys.prefix'

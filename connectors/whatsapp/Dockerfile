@@ -13,7 +13,8 @@
 # ``<workspace_root>/<session_id>``.
 
 # ─── Go build stage ──────────────────────────────────────────────────────
-FROM golang:1.25-alpine AS daemon-build
+# golang:1.25-alpine (pinned 2026-10-22)
+FROM golang:1.25-alpine@sha256:1ae0735f00daffa3aaf1363a5184c0d2dc55c78e3db4ec70241cdac97bf84b59 AS daemon-build
 
 WORKDIR /src
 
@@ -37,7 +38,8 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build \
     ./cmd/whatsapp-daemon
 
 # ─── Python runtime stage ────────────────────────────────────────────────
-FROM python:3.13-slim-bookworm AS base
+# python:3.13-slim-bookworm (pinned 2026-10-22)
+FROM python:3.13-slim-bookworm@sha256:e32be0e55814a08977501ca863271d9bd02443710db8f2afaf8372e2c4508530 AS base
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -49,28 +51,42 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 
 # uv binary (pinned).  Faster + reproducible vs ``pip install uv``.
-COPY --from=ghcr.io/astral-sh/uv:0.5.18 /uv /usr/local/bin/uv
+# ghcr.io/astral-sh/uv:0.5.18 (pinned 2026-10-22)
+COPY --from=ghcr.io/astral-sh/uv:0.5.18@sha256:e2101b9e627153b8fe4e8a1249cc4194f1b38ece7f28a5a9b8f958e3b560e69c /uv /usr/local/bin/uv
 
 # Drop the daemon binary in PATH.
 COPY --from=daemon-build /out/whatsapp-daemon /usr/local/bin/whatsapp-daemon
 
 WORKDIR /app
 
-# SDK packages first so the layer cache stays warm across connector tweaks.
-# aios-connector-http depends on aios-sdk (the workspace-published typed SDK).
-COPY packages/aios-sdk /app/packages/aios-sdk
-COPY packages/aios-connector-http /app/packages/aios-connector-http
-COPY connectors/whatsapp/pyproject.toml /app/connectors/whatsapp/pyproject.toml
-COPY connectors/whatsapp/README.md /app/connectors/whatsapp/README.md
-COPY connectors/whatsapp/src /app/connectors/whatsapp/src
+# Lock-driven install, mirroring the api/worker image: ``--frozen`` means
+# uv.lock alone decides every version — the build resolves nothing from
+# PyPI.  ``--package aios-whatsapp`` scopes the sync to this member and its
+# workspace closure (aios-connector-http -> aios-sdk); the root ``aios``
+# project (litellm & co.) is never installed.  uv reads the workspace from
+# the root pyproject; members this image doesn't install are simply absent
+# from /app, which the workspace member list tolerates (nothing matches).
+#
+# Deps first, from manifests only, so the third-party layer is cached until
+# uv.lock moves; then the sources, installed ``--no-editable`` so the venv
+# holds real wheels rather than .pth pointers into /app.
+ENV UV_LINK_MODE=copy \
+    UV_NO_CACHE=1 \
+    UV_PROJECT_ENVIRONMENT=/app/.venv
+COPY pyproject.toml uv.lock ./
+COPY packages/aios-sdk/pyproject.toml ./packages/aios-sdk/
+COPY packages/aios-connector-http/pyproject.toml ./packages/aios-connector-http/
+COPY connectors/whatsapp/pyproject.toml ./connectors/whatsapp/
+RUN uv sync --frozen --no-dev --package aios-whatsapp --no-install-workspace
 
-# ``--no-sources`` ignores ``[tool.uv.sources]`` workspace-deps which
-# only resolve at the repo root; uv satisfies the inter-package deps
-# by name from the install set itself.
-RUN uv pip install --system --no-cache --no-sources \
-    /app/packages/aios-sdk \
-    /app/packages/aios-connector-http \
-    /app/connectors/whatsapp
+COPY packages/aios-sdk ./packages/aios-sdk
+COPY packages/aios-connector-http ./packages/aios-connector-http
+COPY connectors/whatsapp/README.md ./connectors/whatsapp/README.md
+COPY connectors/whatsapp/src ./connectors/whatsapp/src
+RUN uv sync --frozen --no-dev --package aios-whatsapp --no-editable
+
+# entrypoint / HEALTHCHECK / CMD invoke bare ``python`` — resolve it to the venv.
+ENV PATH="/app/.venv/bin:$PATH"
 
 # Entrypoint chowns the shared whatsapp-data dir so the api (uid 1000)
 # can read media bytes the daemon decrypts there.  The daemon itself
