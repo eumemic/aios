@@ -10,7 +10,10 @@ name: Build signal connector image
 # instead of at deploy time.  This is a BUILD GATE only — no GHCR push.
 #
 # Triggers are paths-filtered to the inputs that actually change the image:
-# the Dockerfile, any ``.patch`` it applies, and this workflow.
+# the Dockerfile, any ``.patch`` it applies, this workflow, and the inputs of
+# its frozen ``uv sync`` (the root lock + workspace manifest and the
+# manifests of the members it installs) — a lock/manifest change that breaks
+# the scoped sync fails here rather than at deploy time.
 #
 # Security note: this workflow does not interpolate any untrusted input
 # (issue titles, PR bodies, head_ref, etc.) into ``run:`` commands.
@@ -21,11 +24,21 @@ on:
     paths:
       - connectors/signal/Dockerfile
       - connectors/signal/*.patch
+      - connectors/signal/pyproject.toml
+      - packages/aios-sdk/pyproject.toml
+      - packages/aios-connector-http/pyproject.toml
+      - pyproject.toml
+      - uv.lock
       - .github/workflows/build-signal-connector.yml
   pull_request:
     paths:
       - connectors/signal/Dockerfile
       - connectors/signal/*.patch
+      - connectors/signal/pyproject.toml
+      - packages/aios-sdk/pyproject.toml
+      - packages/aios-connector-http/pyproject.toml
+      - pyproject.toml
+      - uv.lock
       - .github/workflows/build-signal-connector.yml
   workflow_dispatch:
 

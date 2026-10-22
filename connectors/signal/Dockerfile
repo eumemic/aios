@@ -45,7 +45,8 @@
 # JDK 25 (NOT 21): upstream build.gradle.kts pins JavaVersion.VERSION_25 at
 # the hotfix commit; compiling with JDK 21 fails outright.  The full JDK
 # image is required here (the ``-jre`` image cannot compile gradle sources).
-FROM azul/zulu-openjdk:25 AS signal-build
+# azul/zulu-openjdk:25 (pinned 2026-10-22)
+FROM azul/zulu-openjdk:25@sha256:c786fa46ef8fae89e191a2c783c0c8f49118ef16d6c0bbd2d6048bd53b7b0a27 AS signal-build
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends git ca-certificates \
@@ -83,7 +84,8 @@ RUN ./gradlew installDist -x test --no-daemon
 # This is now a JVM build (not a native ELF), so the runtime image needs a
 # JRE 25.  Copy the env-resolved JAVA_HOME to a fixed path so the runtime
 # COPY --from doesn't depend on the base image's internal layout.
-FROM azul/zulu-openjdk:25-jre-headless AS jre
+# azul/zulu-openjdk:25-jre-headless (pinned 2026-10-22)
+FROM azul/zulu-openjdk:25-jre-headless@sha256:7032b226a83871e8eff0cb0d2d3f561b5fe5f301dc1957c344fd45d1a4689457 AS jre
 # Copy CONTENTS (``/.``) into a pre-created /opt/jre with ``cp -a`` so the
 # result is /opt/jre/bin/java whether or not /opt/jre pre-exists, and so
 # the JRE's symlinks + perms are preserved (``cp -r`` would nest into an
@@ -93,7 +95,8 @@ RUN mkdir -p /opt/jre && cp -a "$JAVA_HOME/." /opt/jre/
 # ─── Python runtime stage ────────────────────────────────────────────────
 # glibc base (python:3.13-slim-bookworm) is mandatory: libsignal bundles
 # glibc/manylinux JNI ``.so`` files — alpine/musl would fail to load them.
-FROM python:3.13-slim-bookworm AS base
+# python:3.13-slim-bookworm (pinned 2026-10-22)
+FROM python:3.13-slim-bookworm@sha256:e32be0e55814a08977501ca863271d9bd02443710db8f2afaf8372e2c4508530 AS base
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
@@ -106,7 +109,8 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 
 # uv binary (pinned).  Faster + reproducible vs `pip install uv`.
-COPY --from=ghcr.io/astral-sh/uv:0.5.18 /uv /usr/local/bin/uv
+# ghcr.io/astral-sh/uv:0.5.18 (pinned 2026-10-22)
+COPY --from=ghcr.io/astral-sh/uv:0.5.18@sha256:e2101b9e627153b8fe4e8a1249cc4194f1b38ece7f28a5a9b8f958e3b560e69c /uv /usr/local/bin/uv
 
 # JRE 25 from the relocation stage — signal-cli's launcher runs ``java``.
 COPY --from=jre /opt/jre /opt/java
@@ -124,22 +128,33 @@ RUN ln -s /opt/signal-cli/bin/signal-cli /usr/local/bin/signal-cli \
 
 WORKDIR /app
 
-# SDK packages first so the layer cache stays warm across connector tweaks.
-# aios-connector-http depends on aios-sdk (the workspace-published typed SDK).
-COPY packages/aios-sdk /app/packages/aios-sdk
-COPY packages/aios-connector-http /app/packages/aios-connector-http
-COPY connectors/signal /app/connectors/signal
+# Lock-driven install, mirroring the api/worker image: ``--frozen`` means
+# uv.lock alone decides every version — the build resolves nothing from
+# PyPI.  ``--package aios-signal`` scopes the sync to this member and its
+# workspace closure (aios-connector-http -> aios-sdk); the root ``aios``
+# project (litellm & co.) is never installed.  uv reads the workspace from
+# the root pyproject; members this image doesn't install are simply absent
+# from /app, which the workspace member list tolerates (nothing matches).
+#
+# Deps first, from manifests only, so the third-party layer is cached until
+# uv.lock moves; then the sources, installed ``--no-editable`` so the venv
+# holds real wheels rather than .pth pointers into /app.
+ENV UV_LINK_MODE=copy \
+    UV_NO_CACHE=1 \
+    UV_PROJECT_ENVIRONMENT=/app/.venv
+COPY pyproject.toml uv.lock ./
+COPY packages/aios-sdk/pyproject.toml ./packages/aios-sdk/
+COPY packages/aios-connector-http/pyproject.toml ./packages/aios-connector-http/
+COPY connectors/signal/pyproject.toml ./connectors/signal/
+RUN uv sync --frozen --no-dev --package aios-signal --no-install-workspace
 
-# ``--no-sources`` tells uv to ignore each package's ``[tool.uv.sources]``
-# block — those declare workspace-relative deps (e.g.
-# ``aios-sdk = { workspace = true }``) that only resolve from the
-# repo root.  In this image we install the three packages by path in
-# one invocation; uv satisfies the inter-package deps by name from
-# the install set itself.
-RUN uv pip install --system --no-cache --no-sources \
-    /app/packages/aios-sdk \
-    /app/packages/aios-connector-http \
-    /app/connectors/signal
+COPY packages/aios-sdk ./packages/aios-sdk
+COPY packages/aios-connector-http ./packages/aios-connector-http
+COPY connectors/signal ./connectors/signal
+RUN uv sync --frozen --no-dev --package aios-signal --no-editable
+
+# entrypoint / HEALTHCHECK / CMD invoke bare ``python`` — resolve it to the venv.
+ENV PATH="/app/.venv/bin:$PATH"
 
 # Entrypoint chowns the shared state dir so the api (uid 1000) can read
 # signal-cli's attachment writes from the same host bind mount.  Worker
