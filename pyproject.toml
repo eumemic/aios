@@ -49,7 +49,10 @@ dependencies = [
     # LLM client
     # >=1.96.2 includes current provider/model capability data. AIOS still treats
     # that map as advisory and centrally passes supplied params to the provider.
-    "litellm>=1.96.2",
+    # <1.107 (and !=1.107.0 explicitly): litellm 1.107.0 was reported compromised
+    # (supply-chain: its wheels and Docker image ship a credential stealer/RAT that
+    # runs on install). Lift the cap only after a verified-clean release.
+    "litellm>=1.96.2,!=1.107.0,<1.107",
     # MCP client + server reflection.
     # Cap <2: SDK v2 is a breaking rearchitecture (maintainers advise pinning <2).
     "mcp>=1.20,<2",

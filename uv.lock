@@ -201,7 +201,7 @@ requires-dist = [
     { name = "h11", specifier = ">=0.16" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "jsonschema", specifier = "==4.23.0" },
-    { name = "litellm", specifier = ">=1.96.2" },
+    { name = "litellm", specifier = ">=1.96.2,!=1.107.0,<1.107" },
     { name = "mcp", specifier = ">=1.20,<2" },
     { name = "pillow", specifier = ">=10.0" },
     { name = "procrastinate", specifier = "==3.8.1" },
