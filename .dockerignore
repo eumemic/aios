@@ -1,5 +1,5 @@
-# Files excluded from the build context for every image (api, worker,
-# echo-http, telegram, signal — all use the repo root as context).
+# Files excluded from the build context for every image (api, worker, and
+# the connectors/*/ images — all use the repo root as context).
 #
 # Without this file, `docker compose build` ships hundreds of MB of
 # `.git`, `.venv`, caches, and runtime artifacts on every build.

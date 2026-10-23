@@ -59,11 +59,22 @@ def _ls_files(prefix: str, *pathspecs: str) -> list[str]:
     return files
 
 
-@pytest.mark.parametrize("path", ["Dockerfile", "compose.yml", "openapi.json", ".dockerignore"])
+@pytest.mark.parametrize(
+    "path",
+    [
+        "Dockerfile",
+        "compose.yml",
+        "openapi.json",
+        ".dockerignore",
+        "connectors/slack/Dockerfile",
+        "connectors/slack/pyproject.toml",
+    ],
+)
 def test_new_root_paths_match_detect_filter(path: str) -> None:
     """Root generated/config artifacts must not slip through the docs-only
     skip (``.dockerignore`` is a browser-image input — ``browser_changed`` is
-    dead unless ``run_checks`` also fires)."""
+    dead unless ``run_checks`` also fires; a connector's Dockerfile and
+    manifest are inputs of its image's frozen ``uv sync``)."""
     pattern = _filter_regex("run_checks")
     assert re.search(pattern, path), (
         f"{path!r} does not match the detect-filter regex in code-validation.yml;\n"

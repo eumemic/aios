@@ -1,4 +1,4 @@
-"""Supply-chain contract for the channel connector images (signal / whatsapp / telegram).
+"""Supply-chain contract for the connector images (every ``connectors/*/Dockerfile``).
 
 These images used to ``uv pip install --no-sources`` their packages, which
 resolved every dependency fresh from PyPI at build time — nothing tied the
@@ -19,7 +19,9 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).parents[2]
-CHANNELS = ("signal", "whatsapp", "telegram")
+# Discovered, not listed: a new connector image is held to the contract the
+# moment its Dockerfile lands.
+CHANNELS = tuple(sorted(p.parent.name for p in (REPO / "connectors").glob("*/Dockerfile")))
 DIGEST = re.compile(r"@sha256:[0-9a-f]{64}$")
 
 
