@@ -333,22 +333,24 @@ jobs:
             ./packages/aios-browser-driver
           /tmp/browser-driver-isolated/bin/python -c "import aios_browser_driver.daemon"
 
-      - name: Slack connector isolated-install smoke test
+      - name: Connector isolated-install smoke test
         # ``uv sync --dev`` above resolves the *unified workspace* env, where
         # aiohttp/websockets are present transitively (aiodocker/litellm root
         # deps).  That masks a missing dependency in a connector's own
         # closure — exactly the gap that shipped a Docker image which crashed
         # at ``import aios_slack`` with ``ModuleNotFoundError: aiohttp``.  This
-        # step installs ONLY the slack closure into a throwaway venv (the same
-        # ``--no-sources`` by-path install the Dockerfile does) and imports the
-        # connector, so a dropped runtime dep fails CI instead of production.
+        # step installs ONLY each connector's closure into a throwaway venv
+        # (the same frozen ``uv sync --package`` from uv.lock its Dockerfile
+        # does) and imports the connector, so a dropped runtime dep fails CI
+        # instead of production.
         run: |
-          uv venv /tmp/slack-isolated
-          uv pip install --python /tmp/slack-isolated/bin/python --no-sources \
-            ./packages/aios-sdk \
-            ./packages/aios-connector-http \
-            ./connectors/slack
-          /tmp/slack-isolated/bin/python -c "import aios_slack.connector"
+          for spec in slack:aios_slack.connector sms:aios_sms.connector \
+                      echo-http:aios_echo_http.connector matrix:aios_matrix.connector; do
+            connector="${spec%%:*}"
+            UV_PROJECT_ENVIRONMENT="/tmp/${connector}-isolated" \
+              uv sync --frozen --no-dev --package "aios-${connector}" --no-editable
+            "/tmp/${connector}-isolated/bin/python" -c "import ${spec#*:}"
+          done
 
   integration:
     timeout-minutes: 40

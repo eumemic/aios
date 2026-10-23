@@ -45,7 +45,7 @@ A Slack connector reuses all of this verbatim. It writes only: the `connector='s
 
 ### 3.1 Package structure (mirrors telegram)
 
-`connectors/slack/` src-layout package, `src/aios_slack/`, hatchling, `python>=3.13`. Dependencies: `aios-connector-http` + `structlog` + **`slack-sdk`** (not `slack-bolt` — we need only `AsyncWebClient` + `AsyncSocketModeClient`; Bolt's HTTP receiver/ack machinery is dead weight for socket-only). Ruff `line-length=100`, select `(E,W,F,I,B,UP,SIM,RUF,TID,ASYNC)`, mypy strict, pytest `asyncio_mode=auto`. Dockerfile is a near-copy of telegram's: `COPY` aios-sdk + aios-connector-http + slack, `uv pip install --system --no-sources` by path, `CMD python -m aios_slack`.
+`connectors/slack/` src-layout package, `src/aios_slack/`, hatchling, `python>=3.13`. Dependencies: `aios-connector-http` + `structlog` + **`slack-sdk`** (not `slack-bolt` — we need only `AsyncWebClient` + `AsyncSocketModeClient`; Bolt's HTTP receiver/ack machinery is dead weight for socket-only). Ruff `line-length=100`, select `(E,W,F,I,B,UP,SIM,RUF,TID,ASYNC)`, mypy strict, pytest `asyncio_mode=auto`. Dockerfile is a near-copy of telegram's: repo-root context, a frozen `uv sync --frozen --no-dev --package aios-slack` from `uv.lock` into `/app/.venv` (closure: aios-connector-http → aios-sdk; the root `aios` project is never installed), digest-pinned base + uv, `CMD python -m aios_slack`.
 
 Files:
 - `connector.py` — `SlackConnector(HttpConnector)` lifecycle + `@tool` methods.
