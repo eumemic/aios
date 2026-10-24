@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import random
+from collections.abc import AsyncIterator
 from typing import Any
 
 import asyncpg
@@ -124,9 +125,7 @@ async def _seed(conn: asyncpg.Connection[Any], rng: random.Random) -> None:
                         f"ev_{sid}_{seq}",
                         sid,
                         seq,
-                        json.dumps(
-                            {"role": "assistant", "content": "", "tool_calls": tool_calls}
-                        ),
+                        json.dumps({"role": "assistant", "content": "", "tool_calls": tool_calls}),
                         "assistant",
                         acct,
                         age_days,
@@ -174,7 +173,9 @@ async def _seed(conn: asyncpg.Connection[Any], rng: random.Random) -> None:
 
 
 @pytest.fixture
-async def seeded(migrated_db_url: str, _reset_db_state: None) -> asyncpg.Connection[Any]:
+async def seeded(
+    migrated_db_url: str, _reset_db_state: None
+) -> AsyncIterator[asyncpg.Connection[Any]]:
     conn = await asyncpg.connect(migrated_db_url)
     await _seed(conn, random.Random(2560))
     try:
