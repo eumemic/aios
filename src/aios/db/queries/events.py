@@ -2115,6 +2115,66 @@ async def list_pending_calls_for_session_and_connection(
     return out
 
 
+# The per-call result probe is a ``LEFT JOIN LATERAL (... LIMIT 1)``, NOT a
+# ``NOT EXISTS`` (#2560).  With ``NOT EXISTS`` the planner is free to flatten
+# the probe into a set-at-a-time anti join, and it does: the CUSTOM plan
+# (asyncpg's first five executions per connection) chose a Merge Anti Join
+# that seq-scanned and SORTED every tool-result row in the ACCOUNT (disk
+# spill), and the GENERIC plan a Hash Anti Join that hashed the same set — so
+# cost scaled with account tool-result volume rather than the page's open
+# calls (the same statement-timeout class as #2393).  The ``LIMIT 1`` inside
+# a LATERAL subquery is an optimization fence: the planner cannot pull it up
+# into a join, so it MUST run once per exploded tool_call as an index probe
+# on the UNIQUE ``events_tool_result_idx (session_id, data->>'tool_call_id')
+# WHERE kind='message' AND role='tool'`` (0097) — its predicate is matched
+# literally by the probe's ``kind`` / ``role`` conjuncts and its key by the
+# ``session_id`` + ``data->>'tool_call_id'`` equalities.  Pinned in both
+# ``plan_cache_mode`` settings by
+# ``tests/integration/test_unresolved_tool_calls_plan.py``.
+UNRESOLVED_TOOL_CALLS_SQL: Final[str] = """
+        SELECT oc.session_id,
+               oc.tool_call,
+               oc.created_at
+          FROM (
+                SELECT a.session_id,
+                       tc.item AS tool_call,
+                       a.created_at,
+                       a.seq,
+                       tc.ord
+                  FROM sessions s
+                  JOIN events a
+                    ON a.session_id = s.id
+                   AND a.account_id = $2
+                   AND a.kind = 'message'
+                   AND a.role = 'assistant'
+                   AND a.data ? 'tool_calls'
+                   AND a.seq >= s.open_tool_call_floor_seq
+                 CROSS JOIN LATERAL jsonb_array_elements(
+                       COALESCE(NULLIF(a.data->'tool_calls','null'::jsonb), '[]'::jsonb)
+                     ) WITH ORDINALITY AS tc(item, ord)
+                 WHERE s.id = ANY($1::text[])
+                   AND s.account_id = $2
+                   AND (
+                         $3::bigint IS NULL
+                         OR a.created_at >= now() - make_interval(secs => $3::bigint)
+                       )
+                   AND COALESCE(tc.item->>'id', '') <> ''
+               ) oc
+          LEFT JOIN LATERAL (
+                SELECT 1 AS resolved
+                  FROM events r
+                 WHERE r.session_id = oc.session_id
+                   AND r.account_id = $2
+                   AND r.kind = 'message'
+                   AND r.role = 'tool'
+                   AND r.data->>'tool_call_id' = oc.tool_call->>'id'
+                 LIMIT 1
+               ) res ON TRUE
+         WHERE res.resolved IS NULL
+         ORDER BY oc.session_id, oc.seq ASC, oc.ord ASC
+        """
+
+
 async def _unresolved_tool_calls(
     conn: asyncpg.Connection[Any],
     session_ids: list[str],
@@ -2172,9 +2232,10 @@ async def _unresolved_tool_calls(
     # instead — the counter can undercount (see 0136's migration body); the
     # floor-seq bound is the sanctioned form.
     #
-    # The result-pairing check is a per-element ``NOT EXISTS`` probe on the
-    # UNIQUE ``events_tool_result_idx (session_id, data->>'tool_call_id')``
-    # (0097) — O(1) per tool_call — replacing the former second whole-history
+    # The result-pairing check is a per-element LATERAL ``LIMIT 1`` probe on
+    # the UNIQUE ``events_tool_result_idx (session_id, data->>'tool_call_id')``
+    # (0097) — O(1) per tool_call, forced so in both custom and generic plans
+    # (#2560, see ``UNRESOLVED_TOOL_CALLS_SQL``) — replacing the former second whole-history
     # scan of every tool-role row plus an in-Python set diff.  Projecting the
     # exploded ``tool_calls`` element (never the full assistant ``data``
     # JSONB) keeps multi-KB turn payloads out of the wire/decode path.
@@ -2185,39 +2246,7 @@ async def _unresolved_tool_calls(
     # Written events-first, the planner scanned every assistant turn and
     # applied the floor as a post-join filter — the bound bought nothing.
     rows = await conn.fetch(
-        """
-        SELECT a.session_id,
-               tc.item AS tool_call,
-               a.created_at
-          FROM sessions s
-          JOIN events a
-            ON a.session_id = s.id
-           AND a.account_id = $2
-           AND a.kind = 'message'
-           AND a.role = 'assistant'
-           AND a.data ? 'tool_calls'
-           AND a.seq >= s.open_tool_call_floor_seq
-         CROSS JOIN LATERAL jsonb_array_elements(
-               COALESCE(NULLIF(a.data->'tool_calls','null'::jsonb), '[]'::jsonb)
-             ) WITH ORDINALITY AS tc(item, ord)
-         WHERE s.id = ANY($1::text[])
-           AND s.account_id = $2
-           AND (
-                 $3::bigint IS NULL
-                 OR a.created_at >= now() - make_interval(secs => $3::bigint)
-               )
-           AND COALESCE(tc.item->>'id', '') <> ''
-           AND NOT EXISTS (
-                 SELECT 1
-                   FROM events r
-                  WHERE r.session_id = a.session_id
-                    AND r.account_id = $2
-                    AND r.kind = 'message'
-                    AND r.role = 'tool'
-                    AND r.data->>'tool_call_id' = tc.item->>'id'
-               )
-         ORDER BY a.session_id, a.seq ASC, tc.ord ASC
-        """,
+        UNRESOLVED_TOOL_CALLS_SQL,
         session_ids,
         account_id,
         max_age_seconds,
