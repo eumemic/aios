@@ -23,6 +23,18 @@ ACCESS EXCLUSIVE lock on the live-written ``events`` table), and any invalid
 remnant from an interrupted build is dropped first.  This is the same pattern
 as 0181.
 
+Lock wait is bounded, as in 0194.  ``CREATE INDEX CONCURRENTLY`` waits for every
+transaction that holds a snapshot older than its phases, and it waits as a lock
+wait on each such transaction's virtualxid.  Without a bound, one long
+idle-in-transaction session would stall the deploy candidate indefinitely.  So
+``SET lock_timeout`` is armed at session scope inside the autocommit block (a
+``SET LOCAL`` would be discarded after each autocommit statement) and reset to
+``DEFAULT`` afterward.  A timed-out build fails the migration loudly and leaves
+an INVALID ``events_tool_marker_idx``; the ``DROP INDEX CONCURRENTLY IF EXISTS``
+at the top removes that remnant on the retry, so a re-run builds a valid index.
+No ``statement_timeout`` is set, which matches 0194: the build itself is allowed
+to take as long as the table needs.
+
 Revision ID: 0195
 Revises: 0194
 """
@@ -39,19 +51,33 @@ branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
 
+LOCK_TIMEOUT = "5s"
+
+
 def upgrade() -> None:
     with op.get_context().autocommit_block():
-        # An interrupted concurrent build can leave an invalid same-named index.
-        # Remove any remnant so retries always perform a usable rebuild.
-        op.execute("DROP INDEX CONCURRENTLY IF EXISTS events_tool_marker_idx")
-        op.execute(
-            "CREATE INDEX CONCURRENTLY events_tool_marker_idx "
-            "ON events (session_id, (data->>'tool_call_id')) "
-            "WHERE kind = 'lifecycle' "
-            "AND data->>'event' IN ('tool_confirmed', 'tool_requested')"
-        )
+        # Session scope, not LOCAL: each autocommit statement is its own
+        # transaction, so a LOCAL setting would be gone before the build ran.
+        op.execute(f"SET lock_timeout = '{LOCK_TIMEOUT}'")
+        try:
+            # An interrupted or timed-out concurrent build leaves an INVALID
+            # same-named index.  Remove any remnant so a retry always performs
+            # a usable rebuild.
+            op.execute("DROP INDEX CONCURRENTLY IF EXISTS events_tool_marker_idx")
+            op.execute(
+                "CREATE INDEX CONCURRENTLY events_tool_marker_idx "
+                "ON events (session_id, (data->>'tool_call_id')) "
+                "WHERE kind = 'lifecycle' "
+                "AND data->>'event' IN ('tool_confirmed', 'tool_requested')"
+            )
+        finally:
+            op.execute("SET lock_timeout = DEFAULT")
 
 
 def downgrade() -> None:
     with op.get_context().autocommit_block():
-        op.execute("DROP INDEX CONCURRENTLY IF EXISTS events_tool_marker_idx")
+        op.execute(f"SET lock_timeout = '{LOCK_TIMEOUT}'")
+        try:
+            op.execute("DROP INDEX CONCURRENTLY IF EXISTS events_tool_marker_idx")
+        finally:
+            op.execute("SET lock_timeout = DEFAULT")

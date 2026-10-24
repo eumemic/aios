@@ -2268,14 +2268,28 @@ async def list_unresolved_tool_calls_batch(
     # ``events_session_lifecycle_seq_idx`` and timed out on prod pages of 100).
     # The ``data->>'event' IN (...)`` conjunct is the index's partial
     # predicate, spelled out so a generic plan can always prove it.
+    #
+    # Only STRING ids are probed.  A model can emit a non-string JSON id
+    # (int/bool/float/object; litellm does not validate it), and binding that
+    # raw into ``$3::text[]`` raises asyncpg DataError, which fails the whole
+    # page.  Skipping is exact, not lossy: the flags below test the decoded id
+    # for membership in a set of marker TEXT ids, and a non-``str`` value is
+    # never equal to a ``str``, so master never set a flag for such a call
+    # whatever markers existed (for an object id master raised TypeError at
+    # the ``in`` test; the flags now read False).  Coercing instead (``str(...)`` or
+    # ``item->>'id'``) would fetch rows that check then discards, and
+    # ``str()`` does not even match ``->>`` (``True`` vs ``true``, dict repr
+    # vs jsonb text).
     pair_sids: list[str] = []
     pair_tcids: list[str] = []
     for sid, calls in raw.items():
         for tc in calls:
-            pair_sids.append(sid)
-            pair_tcids.append(tc["id"])
-    marker_rows = await conn.fetch(
-        """
+            if isinstance(tc["id"], str):
+                pair_sids.append(sid)
+                pair_tcids.append(tc["id"])
+    marker_rows = (
+        await conn.fetch(
+            """
         SELECT e.session_id, e.data->>'event' AS event, e.data->>'tool_call_id' AS tool_call_id
           FROM unnest($1::text[], $3::text[]) AS want(session_id, tool_call_id)
           JOIN events e
@@ -2289,9 +2303,12 @@ async def list_unresolved_tool_calls_batch(
                  OR e.data->>'event' = 'tool_requested'
                )
         """,
-        pair_sids,
-        account_id,
-        pair_tcids,
+            pair_sids,
+            account_id,
+            pair_tcids,
+        )
+        if pair_tcids
+        else []
     )
     allows_by_sid: dict[str, set[str]] = {}
     requested_by_sid: dict[str, set[str]] = {}
@@ -2317,8 +2334,12 @@ async def list_unresolved_tool_calls_batch(
                     "tool_call_id": tc["id"],
                     "name": name,
                     "arguments": fn.get("arguments", "{}"),
-                    "has_allow_lifecycle": tc["id"] in allows,
-                    "has_requested_lifecycle": tc["id"] in requested,
+                    # ``isinstance`` first: an object id is unhashable, and
+                    # ``dict in set`` raises TypeError (it did on master too).
+                    "has_allow_lifecycle": isinstance(tc["id"], str) and tc["id"] in allows,
+                    "has_requested_lifecycle": (
+                        isinstance(tc["id"], str) and tc["id"] in requested
+                    ),
                     "pending_since": tc["_pending_since"],
                 }
             )

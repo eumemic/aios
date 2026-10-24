@@ -37,19 +37,49 @@ def test_upgrade_replaces_remnant_then_builds_index_concurrently() -> None:
     statements, context = _capture("upgrade")
 
     assert statements == [
+        "SET lock_timeout = '5s'",
         "DROP INDEX CONCURRENTLY IF EXISTS events_tool_marker_idx",
         "CREATE INDEX CONCURRENTLY events_tool_marker_idx "
         "ON events (session_id, (data->>'tool_call_id')) "
         "WHERE kind = 'lifecycle' "
         "AND data->>'event' IN ('tool_confirmed', 'tool_requested')",
+        "SET lock_timeout = DEFAULT",
     ]
     context.autocommit_block.assert_called_once_with()
+
+
+def test_upgrade_resets_lock_timeout_when_the_build_fails() -> None:
+    """A timed-out build must not leave the session-scoped bound armed."""
+    migration = _load()
+    context = Mock()
+    context.autocommit_block.return_value = nullcontext()
+    migration.op.get_context = Mock(return_value=context)
+    statements: list[str] = []
+
+    def execute(sql: str) -> None:
+        statements.append(sql)
+        if sql.startswith("CREATE INDEX"):
+            raise RuntimeError("canceling statement due to lock timeout")
+
+    migration.op.execute = execute
+    try:
+        migration.upgrade()
+    except RuntimeError:
+        pass
+    else:  # pragma: no cover - the stub always raises
+        raise AssertionError("upgrade swallowed the build failure")
+    assert statements[0] == "SET lock_timeout = '5s'"
+    assert statements[-1] == "SET lock_timeout = DEFAULT"
 
 
 def test_downgrade_removes_index_concurrently() -> None:
     statements, context = _capture("downgrade")
 
-    assert statements == ["DROP INDEX CONCURRENTLY IF EXISTS events_tool_marker_idx"]
+    assert statements == [
+        "SET lock_timeout = '5s'",
+        "DROP INDEX CONCURRENTLY IF EXISTS events_tool_marker_idx",
+        "SET lock_timeout = DEFAULT",
+    ]
     context.autocommit_block.assert_called_once_with()
 
 
