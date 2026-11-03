@@ -125,6 +125,10 @@ jobs:
         # Pull by immutable sha tag (set by build job) to avoid a race
         # where a concurrent master push advances :latest before we smoke.
         run: docker pull "${{ needs.build.outputs.sha_tag }}"
+      - name: Load legacy netfilter modules
+        # The runc lockdown sidecar uses iptables-legacy against the HOST kernel;
+        # ubuntu-26.04 ships those modules unloaded. See the script.
+        run: ./scripts/ci-load-legacy-netfilter.sh
       - name: Run sandbox contract test
         run: uv run pytest tests/e2e/test_sandbox_image_contract.py -v
         env:

@@ -141,6 +141,11 @@ jobs:
             exit 1
           }
 
+      - name: Load legacy netfilter modules
+        # The runc lockdown sidecar uses iptables-legacy against the HOST kernel;
+        # ubuntu-26.04 ships those modules unloaded. See the script.
+        run: ./scripts/ci-load-legacy-netfilter.sh
+
       - name: E2E tests (docker shard under runsc)
         # ``-n 4 --dist=loadfile`` runs the docker shard in four parallel
         # xdist workers, one whole-file at a time.  ``loadfile`` is load-
