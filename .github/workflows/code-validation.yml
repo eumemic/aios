@@ -620,6 +620,12 @@ jobs:
             uv run pytest tests/e2e -q -m "not docker" -n 0 --durations=25
           fi
 
+      - name: Load legacy netfilter modules
+        # The runc lockdown sidecar uses iptables-legacy against the HOST kernel;
+        # ubuntu-26.04 ships those modules unloaded. See the script.
+        if: needs.detect.outputs.run_checks == 'true' && matrix.shard == 'docker'
+        run: ./scripts/ci-load-legacy-netfilter.sh
+
       - name: E2E tests (docker shard)
         # ``-n 2 --dist=loadfile`` bounds Docker-backed concurrency to two
         # workers. Four workers each owned a testcontainers Postgres while
