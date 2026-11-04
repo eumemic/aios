@@ -150,12 +150,18 @@ def test_pinned_chromium_meets_security_floor(pulled_image: str) -> None:
 
 def test_pinned_chromium_is_the_only_chromium(pulled_image: str) -> None:
     """No second (playwright-bundled, unpinned) Chromium ships in the image —
-    one the driver could ever fall back to, or a scanner would flag."""
-    r = _docker_run(
-        "bash",
-        "-c",
-        "find / -xdev \\( -name chrome -o -name chrome-headless-shell -o -name headless_shell \\)"
-        " -type f -perm -u+x 2>/dev/null; true",
+    one the driver could ever fall back to, or a scanner would flag.
+
+    Scans as ROOT: the image's default uid 1000 cannot read ``/root`` (0700),
+    which is exactly where a root build-step ``playwright install chromium``
+    lands now that the image sets no ``PLAYWRIGHT_BROWSERS_PATH`` — a uid-1000
+    scan would pass vacuously on that regression."""
+    r = run(
+        [
+            *("docker", "run", "--rm", "--user", "0", IMAGE, "bash", "-c"),
+            "find / -xdev \\( -name chrome -o -name chromium -o -name chrome-headless-shell"
+            " -o -name headless_shell \\) -type f -perm -u+x 2>/dev/null; true",
+        ],
         timeout=120,
     )
     assert r.stdout.split() == [PINNED_CHROMIUM], r.stdout
