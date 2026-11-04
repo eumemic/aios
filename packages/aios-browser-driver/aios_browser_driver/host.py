@@ -106,6 +106,9 @@ _LAUNCH_ARGS = [
     "--disable-dev-shm-usage",
 ]
 _MAX_PAGES_PER_SESSION = 4
+# Env var naming the Chromium binary to launch instead of playwright's bundled
+# one. Set by the browser image (``ENV`` in docker/Dockerfile.browser).
+CHROMIUM_EXECUTABLE_ENV = "AIOS_BROWSER_CHROMIUM_EXECUTABLE"
 
 # Chromium's process-singleton residue in a persistent profile. The registry
 # keys browser containers one-per-account, so this daemon's Chromium is the
@@ -255,6 +258,12 @@ class BrowserHost:
         context = await self._pw.chromium.launch_persistent_context(
             user_data_dir=str(self.workspace / _PROFILE_SUBDIR),
             channel="chromium",
+            # The browser image pins its own Chrome for Testing build (a
+            # security floor playwright's bundled Chromium can lag behind —
+            # see docker/Dockerfile.browser) and points this at it. Unset =
+            # playwright's bundled Chromium (the package's dev/browser lane).
+            # Playwright fails the launch if a set path doesn't exist.
+            executable_path=os.environ.get(CHROMIUM_EXECUTABLE_ENV),
             headless=True,
             # Playwright DEFAULTS the Chromium sandbox OFF (it injects
             # --no-sandbox); this opt-in is what actually keeps the primary

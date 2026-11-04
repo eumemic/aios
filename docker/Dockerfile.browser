@@ -38,6 +38,46 @@
 #   profile is exactly what exempts the container from the userns restriction —
 #   unconfined KILLS the sandbox rather than loosening anything.
 
+# -- Chromium: a pinned Chrome for Testing build ---------------------------------
+# Chromium is pinned HERE, not by playwright. Playwright's bundled Chromium
+# trails Chrome stable's security respins (playwright 1.64.x ships
+# 156.0.8078.4; the 2026-10-27 stable security floor is 156.0.8078.73), so the
+# image installs the Chrome for Testing build directly and the driver launches
+# it via ``executable_path`` (``AIOS_BROWSER_CHROMIUM_EXECUTABLE`` below).
+# Playwright's own "chromium" IS Chrome for Testing on linux x64/arm64 —
+# keep the pin on the SAME milestone as the playwright in requirements.lock
+# (1.64.x <-> 156) so the CDP surface stays the one playwright was built for.
+#
+# One stage per arch; ``FROM chrome-for-testing-${TARGETARCH}`` selects the
+# target's, and BuildKit skips the unused one. ``ADD --checksum`` fails the
+# build on any byte substitution (Google publishes no digests — these are the
+# sha256 of the zips as first downloaded).
+#
+# Pinned: 156.0.8078.80 — the newest 156 respin, above the .73 floor.
+# ``CHROMIUM_FLOOR`` in tests/e2e/test_browser_image_contract.py is the
+# security floor the BUILT image must meet (the contract e2e checks both the
+# installed binary and the browser the daemon actually launched); raise it
+# when a new advisory lands. To bump the pin: pick a version (both linux64
+# and linux-arm64) from
+#   https://googlechromelabs.github.io/chrome-for-testing/known-good-versions-with-downloads.json
+# and update both URLs + checksums below.
+
+# BuildKit sets TARGETARCH per platform leg; declared so it is usable in FROM.
+ARG TARGETARCH
+
+FROM scratch AS chrome-for-testing-amd64
+ADD --checksum=sha256:b711c720f774be355197f32edf37e0651418ba036d92446ee2da19ac017540a7 \
+    https://storage.googleapis.com/chrome-for-testing-public/156.0.8078.80/linux64/chrome-linux64.zip \
+    /chrome.zip
+
+FROM scratch AS chrome-for-testing-arm64
+ADD --checksum=sha256:1f496a826c9ba4d6a5f5bf2de686145fe718528c2cc3dbeb96b5893b89653724 \
+    https://storage.googleapis.com/chrome-for-testing-public/156.0.8078.80/linux-arm64/chrome-linux-arm64.zip \
+    /chrome.zip
+
+FROM chrome-for-testing-${TARGETARCH} AS chrome-for-testing
+
+# -- the image --------------------------------------------------------------------
 FROM python:3.13-slim-bookworm
 
 # uv binary (pinned) — same provenance as the worker image's install step.
@@ -48,12 +88,6 @@ COPY --from=ghcr.io/astral-sh/uv:0.5.18 /uv /usr/local/bin/uv
 # uid, and writes ~/.config / ~/.cache under it.
 RUN groupadd --gid 1000 aios \
  && useradd --uid 1000 --gid 1000 --create-home --home-dir /home/aios aios
-
-# Browsers land in a shared root-installed path, NOT root's ~/.cache — set
-# BEFORE ``playwright install`` and persisted to runtime so the uid-1000
-# daemon resolves the same path the root build step populated (a bare install
-# would land in /root/.cache, unreadable by uid 1000).
-ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
 
 # Layer order is cache-bust order: the driver package and the protocol module
 # are the frequently-changing inputs, so the expensive layers below key ONLY
@@ -66,18 +100,28 @@ COPY packages/aios-browser-driver/requirements.lock /tmp/driver-deps/requirement
 RUN uv pip install --system --no-cache --require-hashes -r /tmp/driver-deps/requirements.lock \
  && rm -rf /tmp/driver-deps
 
-# Chromium's OS dependencies (apt) — split from the browser download below so
-# a Chromium-only bump doesn't re-run the slow apt layer.
+# Chromium's OS dependencies (apt) — split from the browser unpack below so
+# a Chromium-only bump doesn't re-run the slow apt layer. playwright's deps
+# list for its (same-milestone, same Chrome for Testing) Chromium covers the
+# pinned build; ``unzip`` unpacks it (python's zipfile drops exec bits).
 RUN apt-get update \
  && playwright install-deps chromium \
+ && apt-get install -y --no-install-recommends unzip \
  && rm -rf /var/lib/apt/lists/*
 
-# Chromium itself, pinned by the playwright version installed above.
-# ``--no-shell`` skips the headless-shell build — the driver launches full
-# Chromium via ``channel="chromium"`` on every path. World-read the tree so
-# the uid-1000 daemon can execute what root installed.
-RUN playwright install --no-shell chromium \
- && chmod -R a+rX /opt/ms-playwright
+# Chromium itself — the pinned Chrome for Testing build from the stage above,
+# bind-mounted (never COPYed, so the ~200 MB zip adds no layer). The zip's
+# top dir is arch-named (chrome-linux64 / chrome-linux-arm64); it lands at one
+# arch-independent path. World-read the tree so the uid-1000 daemon can
+# execute what root installed. NO playwright-bundled Chromium is installed:
+# a second, older browser in the image would be dead weight and a scanner
+# finding, and the driver must never be able to fall back to it.
+RUN --mount=type=bind,from=chrome-for-testing,source=/chrome.zip,target=/tmp/chrome.zip \
+    unzip -q /tmp/chrome.zip -d /tmp/chrome-for-testing \
+ && mv /tmp/chrome-for-testing/chrome-linux* /opt/chrome-for-testing \
+ && rm -rf /tmp/chrome-for-testing \
+ && chmod -R a+rX /opt/chrome-for-testing
+ENV AIOS_BROWSER_CHROMIUM_EXECUTABLE=/opt/chrome-for-testing/chrome
 
 # The driver package itself — last, so the frequent case rebuilds only this
 # cheap wheel layer. ``--no-sources`` = the exact closure its own pyproject
