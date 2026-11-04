@@ -117,16 +117,69 @@ def test_image_cmd_is_absolute_daemon(pulled_image: str) -> None:
     assert r.returncode == 0, r.stderr
 
 
-def test_chromium_installed_world_readable(pulled_image: str) -> None:
-    """PLAYWRIGHT_BROWSERS_PATH persisted to runtime and pointing at a tree
-    the uid-1000 daemon can execute (root installed it at build time)."""
+# Chromium security floor the built image must meet: Chrome stable's
+# 2026-10-27 security release. The Dockerfile pins the actual Chrome for
+# Testing build (at or above this); raise this when a new advisory lands.
+CHROMIUM_FLOOR = (156, 0, 8078, 73)
+# Where the Dockerfile unpacks the pinned build, exported to the driver as
+# ``AIOS_BROWSER_CHROMIUM_EXECUTABLE`` (aios_browser_driver.host).
+PINNED_CHROMIUM = "/opt/chrome-for-testing/chrome"
+
+
+def test_pinned_chromium_meets_security_floor(pulled_image: str) -> None:
+    """The image's Chromium is the pinned Chrome for Testing build, executable
+    by the uid-1000 daemon (root installed it at build time), exported to the
+    driver via ``AIOS_BROWSER_CHROMIUM_EXECUTABLE``, and at or above
+    :data:`CHROMIUM_FLOOR`. Playwright's bundled Chromium can trail Chrome
+    stable's security respins, so the floor is asserted on the built
+    artifact, not inferred from a lockfile."""
     r = _docker_run(
         "bash",
         "-c",
-        'test "$PLAYWRIGHT_BROWSERS_PATH" = /opt/ms-playwright '
-        "&& ls /opt/ms-playwright/chromium-*/chrome-linux*/chrome",
+        f'test "$AIOS_BROWSER_CHROMIUM_EXECUTABLE" = {PINNED_CHROMIUM} '
+        '&& "$AIOS_BROWSER_CHROMIUM_EXECUTABLE" --version',
     )
-    assert r.returncode == 0, f"chromium binary not found/readable: {r.stderr or r.stdout}"
+    assert r.returncode == 0, f"pinned chromium missing/not executable: {r.stderr or r.stdout}"
+    # "Google Chrome for Testing 156.0.8078.80"
+    version = tuple(int(part) for part in r.stdout.split()[-1].split("."))
+    assert version >= CHROMIUM_FLOOR, (
+        f"image Chromium {r.stdout.strip()!r} is below the security floor "
+        f"{'.'.join(map(str, CHROMIUM_FLOOR))}"
+    )
+
+
+def test_pinned_chromium_is_the_only_chromium(pulled_image: str) -> None:
+    """No second (playwright-bundled, unpinned) Chromium ships in the image —
+    one the driver could ever fall back to, or a scanner would flag."""
+    r = _docker_run(
+        "bash",
+        "-c",
+        "find / -xdev \\( -name chrome -o -name chrome-headless-shell -o -name headless_shell \\)"
+        " -type f -perm -u+x 2>/dev/null; true",
+        timeout=120,
+    )
+    assert r.stdout.split() == [PINNED_CHROMIUM], r.stdout
+
+
+def test_daemon_launched_pinned_chromium(daemon: str) -> None:
+    """The browser the live daemon actually launched is the pinned binary:
+    argv[0] of every Chromium BROWSER process (a browser-named argv[0] with no
+    ``--type=`` — zygote/renderer/gpu children all carry one) is
+    :data:`PINNED_CHROMIUM` — the env var reached the driver and playwright
+    honored it."""
+    script = (
+        "for p in /proc/[0-9]*/cmdline; do "
+        "a=$(tr '\\0' '\\n' < \"$p\" 2>/dev/null) || continue; "
+        "a0=$(printf '%s\\n' \"$a\" | head -n1); "
+        'case "${a0##*/}" in chrome|chrome-headless-shell|headless_shell) ;; *) continue;; esac; '
+        "printf '%s\\n' \"$a\" | grep -q -- '^--type=' || printf '%s\\n' \"$a0\"; "
+        "done; true"
+    )
+    r = run(["docker", "exec", daemon, "bash", "-c", script], timeout=30)
+    assert r.returncode == 0, r.stderr
+    browsers = r.stdout.split()
+    assert browsers, "no Chromium browser process found in the live daemon's container"
+    assert set(browsers) == {PINNED_CHROMIUM}, browsers
 
 
 def test_protocol_bytes_match_checkout(pulled_image: str) -> None:

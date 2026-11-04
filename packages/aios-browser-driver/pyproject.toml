@@ -12,8 +12,13 @@ authors = [{ name = "aios contributors" }]
 # byte-identical copy (drift-guarded by tests/test_protocol_drift.py), not an
 # import of ``aios``. The image COPYs the src/ original over the copy at build
 # time so the runtime contract can never fork.
+#
+# playwright does NOT pin the image's Chromium (docker/Dockerfile.browser pins
+# a Chrome for Testing build to meet a security floor playwright's bundled
+# build can trail) — but keep this minor on the SAME Chromium milestone as
+# that pin (1.64.x <-> 156) so playwright drives the CDP surface it targets.
 dependencies = [
-    "playwright>=1.61,<1.62",
+    "playwright>=1.64.1,<1.65",
     "pydantic>=2.9",
     "python-ulid>=3.0",
 ]
