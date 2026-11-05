@@ -18,10 +18,26 @@ from .runner import (
     management_handler,
     tool,
 )
-from .sandbox import Attachment, AttachmentError, SandboxPath
+from .sandbox import (
+    FALLBACK_MARKER,
+    MAX_ATTACHMENT_BYTES,
+    Attachment,
+    AttachmentError,
+    SandboxPath,
+    append_markers,
+    coerce_size,
+    drop_attachment,
+    format_size,
+    is_failed_download,
+    is_over_cap,
+    rejection_marker,
+    safe_marker,
+)
 from .spool import SqliteAnsweredSpool
 
 __all__ = [
+    "FALLBACK_MARKER",
+    "MAX_ATTACHMENT_BYTES",
     "Attachment",
     "AttachmentError",
     "HttpConnector",
@@ -29,7 +45,15 @@ __all__ = [
     "SandboxPath",
     "SandboxPathError",
     "SqliteAnsweredSpool",
+    "append_markers",
+    "coerce_size",
+    "drop_attachment",
+    "format_size",
     "iso_from_ms",
+    "is_failed_download",
+    "is_over_cap",
     "management_handler",
+    "rejection_marker",
+    "safe_marker",
     "tool",
 ]

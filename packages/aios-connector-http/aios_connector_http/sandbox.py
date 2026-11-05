@@ -18,8 +18,12 @@ importing it: the SDK has zero aios-server dependency.
 
 from __future__ import annotations
 
+import logging
 import os
+import re
 import stat
+import unicodedata
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Any
@@ -115,7 +119,11 @@ def resolve_sandbox_path(
     return resolved
 
 
-_MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024
+MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024
+# Alias kept for existing internal / test references.  ``as_params`` and
+# the marker helpers read the public name at call time so a future cap
+# change (or a monkeypatched cap in a test) flows through everywhere.
+_MAX_ATTACHMENT_BYTES = MAX_ATTACHMENT_BYTES
 
 
 class AttachmentError(ValueError):
@@ -163,10 +171,10 @@ class Attachment:
             ) from err
         if not stat.S_ISREG(st.st_mode):
             raise AttachmentError(f"attachment host_path is not a regular file: {self.host_path!r}")
-        if st.st_size > _MAX_ATTACHMENT_BYTES:
+        if st.st_size > MAX_ATTACHMENT_BYTES:
             raise AttachmentError(
                 f"attachment {self.filename!r} is {st.st_size} bytes; "
-                f"SDK cap is {_MAX_ATTACHMENT_BYTES} bytes (5 MiB)."
+                f"SDK cap is {MAX_ATTACHMENT_BYTES} bytes (5 MiB)."
             )
         content_type = self.content_type
         if content_type.startswith("image/"):
@@ -180,3 +188,243 @@ class Attachment:
             "content_type": content_type,
             "size": st.st_size,
         }
+
+
+# ── undelivered-attachment markers (#2551) ─────────────────────────────
+#
+# When a connector cannot deliver an inbound attachment (over the cap,
+# signal-cli download failed, unreadable, ...), a one-line marker takes
+# its place in the inbound ``content`` so the agent learns a file was
+# dropped instead of reasoning from an empty event.  The marker is
+# advisory, untrusted text: a sender can type a lookalike into the body.
+# Sanitising only guarantees that sender-controlled metadata (filename,
+# MIME type) cannot break a *real* marker's single-line structure.
+
+FALLBACK_MARKER = "[attachment not delivered]"
+
+_SIZE_RE = re.compile(r"[0-9]+")
+_STRIPPED_CATEGORIES = frozenset({"Cc", "Cf", "Zl", "Zp"})
+_QUOTE_BRACKET_CHARS = frozenset(
+    "'\"[]\u2018\u2019\u201a\u201b\u201c\u201d\u2039\u203a\u3010\u3011\u300c\u300d"
+)
+_TYPE_RE = re.compile(r"[\w.+-]+/[\w.+-]+", re.ASCII)
+_NAME_MAX = 120
+_TYPE_MAX = 100
+
+
+def coerce_size(value: object) -> int | None:
+    """Coerce a platform-declared size to a non-negative ``int`` or ``None``.
+
+    ``bool`` and every ``float`` map to ``None``; ``str`` is accepted only
+    when it is ASCII digits.  Never raises.
+    """
+    try:
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, int):
+            return value if value >= 0 else None
+        if isinstance(value, str):
+            return int(value) if _SIZE_RE.fullmatch(value) else None
+        return None
+    except Exception:
+        return None
+
+
+def format_size(n: int) -> str:
+    """Human-readable binary size: ``1023 B``, ``1 KiB``, ``7.1 MiB``."""
+    if n < 1024:
+        return f"{n} B"
+    v = n / 1024
+    unit = "KiB"
+    if round(v, 1) >= 1024:
+        v = n / 2**20
+        unit = "MiB"
+        if round(v, 1) >= 1024:
+            v = n / 2**30
+            unit = "GiB"
+    text = f"{v:.1f}"
+    if text.endswith(".0"):
+        text = text[:-2]
+    return f"{text} {unit}"
+
+
+def is_failed_download(st_size: int | None, declared_size: int | None) -> bool:
+    """A 0-byte host file whose platform declared a size > 0 is a drop."""
+    try:
+        st = coerce_size(st_size)
+        declared = coerce_size(declared_size)
+        return st == 0 and declared is not None and declared > 0
+    except Exception:
+        return False
+
+
+def is_over_cap(size: int | None) -> bool:
+    """Single source of truth for "over the cap" (cap read at call time)."""
+    try:
+        coerced = coerce_size(size)
+        return coerced is not None and coerced > MAX_ATTACHMENT_BYTES
+    except Exception:
+        return False
+
+
+def _safe_name(name: object) -> str:
+    try:
+        s = str(name) if name is not None else ""
+    except Exception:
+        s = "unnamed"
+    s = unicodedata.normalize("NFKC", s)
+    s = "".join("_" if unicodedata.category(ch) in _STRIPPED_CATEGORIES else ch for ch in s)
+    s = "".join("_" if ch in _QUOTE_BRACKET_CHARS else ch for ch in s)
+    s = re.sub(r"\s+", " ", s).strip()
+    if len(s) > _NAME_MAX:
+        s = s[: _NAME_MAX - 1] + "\u2026"
+    return s or "unnamed"
+
+
+def _safe_type(content_type: object) -> str:
+    if not isinstance(content_type, str):
+        return "unknown type"
+    t = unicodedata.normalize("NFKC", content_type)
+    # Drop MIME parameters (``; charset=...``); only plain spaces are
+    # trimmed so a smuggled newline still fails the full match below.
+    t = t.split(";", 1)[0].strip(" ").lower()
+    if len(t) > _TYPE_MAX or not _TYPE_RE.fullmatch(t):
+        return "unknown type"
+    return t
+
+
+def safe_marker(name: object, content_type: object) -> tuple[str, str]:
+    """Sanitise sender-controlled ``(name, content_type)`` for a marker.
+
+    The results contain no line break, no Cc/Cf/Zl/Zp code point, and no
+    quote or bracket that could close the marker.  Never raises.
+    """
+    try:
+        safe_name = _safe_name(name)
+    except Exception:
+        safe_name = "unnamed"
+    try:
+        safe_type = _safe_type(content_type)
+    except Exception:
+        safe_type = "unknown type"
+    return safe_name, safe_type
+
+
+def _size_vs_limit(size: int, limit: int) -> tuple[str, str]:
+    rendered_size, rendered_limit = format_size(size), format_size(limit)
+    if rendered_size == rendered_limit:
+        # No-contradiction rule: "5 MiB > 5 MiB limit" reads as a bug.
+        return f"{size:,} bytes", f"{limit:,} bytes"
+    return rendered_size, rendered_limit
+
+
+def rejection_marker(
+    name: object,
+    content_type: object,
+    size: int | None,
+    *,
+    failed_download: bool = False,
+    over_cap: bool | None = None,
+) -> str:
+    """Build the one-line marker for an attachment that was not delivered."""
+    try:
+        safe_name, safe_type = safe_marker(name, content_type)
+        coerced = coerce_size(size)
+        over = is_over_cap(coerced) if over_cap is None else bool(over_cap)
+        if coerced is None:
+            over = False
+        head = f"[attachment not delivered: '{safe_name}', {safe_type}"
+        if over:
+            assert coerced is not None
+            rendered_size, rendered_limit = _size_vs_limit(coerced, MAX_ATTACHMENT_BYTES)
+            body = f"{head}, {rendered_size} > {rendered_limit} limit"
+            return f"{body}: download failed]" if failed_download else f"{body}]"
+        sized = head if coerced is None else f"{head}, {format_size(coerced)}"
+        reason = "download failed" if failed_download else "rejected"
+        return f"{sized}: {reason}]"
+    except Exception:
+        return FALLBACK_MARKER
+
+
+def append_markers(text: str | None, markers: list[str]) -> str:
+    """Append ``markers`` (one per line) after the original ``text``."""
+    if not markers:
+        return text or ""
+    return "\n".join([t for t in [text] if t] + list(markers))
+
+
+def _emit(logger: Any, event: str, **fields: Any) -> None:
+    """Log ``event`` with ``fields`` at warning level; never raises.
+
+    stdlib loggers get ``extra=`` (field names avoid reserved
+    ``LogRecord`` attributes such as ``name``); structlog-style loggers
+    get keyword arguments, falling back to a formatted message.
+    """
+    try:
+        if isinstance(logger, (logging.Logger, logging.LoggerAdapter)):
+            logger.warning(event, extra=fields)
+            return
+        try:
+            logger.warning(event, **fields)
+        except TypeError:
+            logger.warning("%s %s", event, fields)
+    except Exception:
+        try:
+            logging.getLogger("aios_connector_http").warning("%s %r", event, fields)
+        except Exception:
+            pass
+
+
+def drop_attachment(
+    markers: list[str],
+    logger: Any,
+    event_prefix: str,
+    *,
+    name: object,
+    content_type: object,
+    size: int | None,
+    reason: str,
+    failed_download: bool = False,
+    over_cap: bool | None = None,
+    builder: Callable[..., str] | None = None,
+    **fields: Any,
+) -> None:
+    """Record one undelivered attachment: append a marker and log it.
+
+    The only place connectors append markers.  Never raises: a builder
+    failure appends :data:`FALLBACK_MARKER` and logs
+    ``<prefix>.inbound.attachment_marker_failed``, so a drop can never
+    become silent.
+    """
+    build = builder or rejection_marker
+    try:
+        marker = build(
+            name, content_type, size, failed_download=failed_download, over_cap=over_cap
+        )
+        if not isinstance(marker, str) or not marker:
+            raise ValueError("empty marker")
+    except Exception as err:
+        marker = FALLBACK_MARKER
+        _emit(
+            logger,
+            f"{event_prefix}.inbound.attachment_marker_failed",
+            reason=reason,
+            error_type=type(err).__name__,
+        )
+    try:
+        markers.append(marker)
+    except Exception:
+        pass
+    try:
+        attachment_name = safe_marker(name, content_type)[0]
+    except Exception:
+        attachment_name = "unnamed"
+    _emit(
+        logger,
+        f"{event_prefix}.inbound.attachment_not_delivered",
+        reason=reason,
+        size=size,
+        attachment_name=attachment_name,
+        marker_emitted=True,
+        **fields,
+    )
