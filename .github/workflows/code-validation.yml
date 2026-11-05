@@ -569,6 +569,16 @@ jobs:
         # probing here turns a stale ``:smoked`` (protocol advanced on master
         # between this PR's base and the last publish) into a self-healing
         # rebuild instead of a red shard.
+        #
+        # The protocol bytes alone are not enough: ``:smoked`` can match
+        # HEAD's protocol while still shipping an older Chromium (the tag
+        # lags master's republish after a Chrome for Testing bump, #2569).
+        # So the image's ``$AIOS_BROWSER_CHROMIUM_EXECUTABLE --version`` must
+        # also EQUAL the pin in ``docker/Dockerfile.browser`` (parsed from
+        # its CfT download URLs by ``scripts/browser_chromium_pin.py`` — no
+        # second copy of the version here); any lag fails closed into the
+        # local rebuild below.  ``chromium_version=$(…)`` is a bare
+        # assignment so ``bash -e`` fails the step if ``docker run`` does.
         id: pull_browser
         if: needs.detect.outputs.run_checks == 'true' && matrix.shard == 'docker' && needs.detect.outputs.browser_changed == 'false'
         continue-on-error: true
@@ -583,15 +593,21 @@ jobs:
             echo "::error::installed browser_protocol.py differs from checkout — :smoked is stale relative to HEAD"
             exit 1
           }
+          chromium_version=$(docker run --rm aios-browser:ci bash -c '"$AIOS_BROWSER_CHROMIUM_EXECUTABLE" --version')
+          uv run python scripts/browser_chromium_pin.py check "$chromium_version" || {
+            echo "::error::pulled :smoked Chromium does not match the Dockerfile.browser pin — :smoked is stale relative to HEAD"
+            exit 1
+          }
 
       - name: Build browser image
         # Fires when the image inputs changed (the pull path was skipped) OR
         # the pull attempted and failed — GHCR outage, ``:smoked`` not yet
         # published (e.g. the first run after the browser lane merges, before
         # ``build-browser-image.yml``'s first master publish), or the
-        # stale-probe above tripped.  amd64-only and QEMU-free, unlike the
-        # publishing workflow — roughly a 10-minute cold build (apt
-        # install-deps + Chromium download dominate).
+        # stale-probe above tripped (protocol or Chromium-pin mismatch).
+        # amd64-only and QEMU-free, unlike the publishing workflow — roughly
+        # a 10-minute cold build (apt install-deps + Chromium download
+        # dominate).
         #
         # Deliberately no post-build protocol probe (the sandbox lane re-runs
         # ``which tool`` here): a from-checkout build is protocol-identical

@@ -54,13 +54,16 @@
 # sha256 of the zips as first downloaded).
 #
 # Pinned: 156.0.8078.80 — the newest 156 respin, above the .73 floor.
-# ``CHROMIUM_FLOOR`` in tests/e2e/test_browser_image_contract.py is the
-# security floor the BUILT image must meet (the contract e2e checks both the
-# installed binary and the browser the daemon actually launched); raise it
-# when a new advisory lands. To bump the pin: pick a version (both linux64
-# and linux-arm64) from
+# ``CHROMIUM_FLOOR`` in scripts/browser_chromium_pin.py is the security floor
+# this pin must meet (unit-tested) and the BUILT image must meet (the contract
+# e2e checks both the installed binary and the browser the daemon actually
+# launched); raise it when a new advisory lands. That script also reads THIS
+# pin out of the download URLs below — the single source of truth — and
+# code-validation's ``:smoked`` stale-probe fails closed into a local rebuild
+# unless the pulled image's Chromium equals it. To bump the pin: pick a
+# version (both linux64 and linux-arm64) from
 #   https://googlechromelabs.github.io/chrome-for-testing/known-good-versions-with-downloads.json
-# and update both URLs + checksums below.
+# and update both URLs (same version in each) + checksums below.
 
 # BuildKit sets TARGETARCH per platform leg; declared so it is usable in FROM.
 ARG TARGETARCH

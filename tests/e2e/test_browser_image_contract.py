@@ -25,6 +25,13 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from scripts.browser_chromium_pin import (
+    CHROMIUM_FLOOR,
+    DOCKERFILE,
+    check_image_version,
+    fmt,
+    reported_version,
+)
 
 from tests.conftest import needs_docker
 from tests.e2e.browser_image_common import (
@@ -117,10 +124,6 @@ def test_image_cmd_is_absolute_daemon(pulled_image: str) -> None:
     assert r.returncode == 0, r.stderr
 
 
-# Chromium security floor the built image must meet: Chrome stable's
-# 2026-10-27 security release. The Dockerfile pins the actual Chrome for
-# Testing build (at or above this); raise this when a new advisory lands.
-CHROMIUM_FLOOR = (156, 0, 8078, 73)
 # Where the Dockerfile unpacks the pinned build, exported to the driver as
 # ``AIOS_BROWSER_CHROMIUM_EXECUTABLE`` (aios_browser_driver.host).
 PINNED_CHROMIUM = "/opt/chrome-for-testing/chrome"
@@ -129,10 +132,11 @@ PINNED_CHROMIUM = "/opt/chrome-for-testing/chrome"
 def test_pinned_chromium_meets_security_floor(pulled_image: str) -> None:
     """The image's Chromium is the pinned Chrome for Testing build, executable
     by the uid-1000 daemon (root installed it at build time), exported to the
-    driver via ``AIOS_BROWSER_CHROMIUM_EXECUTABLE``, and at or above
-    :data:`CHROMIUM_FLOOR`. Playwright's bundled Chromium can trail Chrome
-    stable's security respins, so the floor is asserted on the built
-    artifact, not inferred from a lockfile."""
+    driver via ``AIOS_BROWSER_CHROMIUM_EXECUTABLE``, exactly the
+    ``docker/Dockerfile.browser`` pin, and at or above :data:`CHROMIUM_FLOOR`.
+    Playwright's bundled Chromium can trail Chrome stable's security respins,
+    so the floor is asserted on the built artifact, not inferred from a
+    lockfile."""
     r = _docker_run(
         "bash",
         "-c",
@@ -141,11 +145,11 @@ def test_pinned_chromium_meets_security_floor(pulled_image: str) -> None:
     )
     assert r.returncode == 0, f"pinned chromium missing/not executable: {r.stderr or r.stdout}"
     # "Google Chrome for Testing 156.0.8078.80"
-    version = tuple(int(part) for part in r.stdout.split()[-1].split("."))
+    version = reported_version(r.stdout)
     assert version >= CHROMIUM_FLOOR, (
-        f"image Chromium {r.stdout.strip()!r} is below the security floor "
-        f"{'.'.join(map(str, CHROMIUM_FLOOR))}"
+        f"image Chromium {r.stdout.strip()!r} is below the security floor {fmt(CHROMIUM_FLOOR)}"
     )
+    check_image_version(r.stdout, DOCKERFILE.read_text())
 
 
 def test_pinned_chromium_is_the_only_chromium(pulled_image: str) -> None:
