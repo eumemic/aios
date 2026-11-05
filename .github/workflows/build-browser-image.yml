@@ -42,6 +42,9 @@ on:
       - tests/e2e/test_browser_image_contract.py
       - tests/e2e/test_browser_driver_behavior.py
       - tests/e2e/browser_image_common.py
+      # The contract suite's pin/floor check (``CHROMIUM_FLOOR`` and the
+      # Dockerfile-pin equality) lives here.
+      - scripts/browser_chromium_pin.py
       - .github/workflows/build-browser-image.yml
   workflow_dispatch:
 

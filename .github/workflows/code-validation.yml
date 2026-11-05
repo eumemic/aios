@@ -604,9 +604,10 @@ jobs:
         # the pull attempted and failed — GHCR outage, ``:smoked`` not yet
         # published (e.g. the first run after the browser lane merges, before
         # ``build-browser-image.yml``'s first master publish), or the
-        # stale-probe above tripped (protocol or Chromium-pin mismatch).  amd64-only and QEMU-free, unlike the
-        # publishing workflow — roughly a 10-minute cold build (apt
-        # install-deps + Chromium download dominate).
+        # stale-probe above tripped (protocol or Chromium-pin mismatch).
+        # amd64-only and QEMU-free, unlike the publishing workflow — roughly
+        # a 10-minute cold build (apt install-deps + Chromium download
+        # dominate).
         #
         # Deliberately no post-build protocol probe (the sandbox lane re-runs
         # ``which tool`` here): a from-checkout build is protocol-identical
