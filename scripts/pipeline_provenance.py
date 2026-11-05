@@ -98,6 +98,8 @@ _OVERRIDE_LINE = re.compile(
     r"[ \t]+ruling:[ \t]*(Chief|Tom)\b"
 )
 
+_HTML_COMMENT = re.compile(r"<!--.*?(?:-->|\Z)", re.DOTALL)
+
 EXIT_PASS = 0
 EXIT_FAIL = 1
 EXIT_UNREADABLE = 2
@@ -607,8 +609,9 @@ def review_problem(labels: frozenset[str], head_sha: str, comments: list[Any]) -
 def override_problem(head_sha: str, comments: list[Any]) -> str | None:
     """None when a comment by ``OVERRIDE_AUTHOR_LOGIN`` cites a Chief/Tom ruling for THIS head.
 
-    Only visible lines count: fenced blocks are stripped and quoted/indented lines skipped, so
-    quoting someone else's override (or an older one) never grants one."""
+    Only visible lines count: fenced blocks and HTML comments (which GitHub renders as nothing;
+    an unterminated ``<!--`` hides the rest of the body) are stripped and quoted/indented lines
+    skipped, so quoting someone else's override (or an older one) or hiding one never grants one."""
     if not re.fullmatch(r"[0-9a-f]{40}", head_sha):
         return f"live head sha {head_sha!r} is not a full sha"
     cited: list[str] = []
@@ -622,7 +625,8 @@ def override_problem(head_sha: str, comments: list[Any]) -> str | None:
             continue
         if not isinstance(body, str):
             continue
-        for line in _strip_fenced_blocks(body).splitlines():
+        visible = _HTML_COMMENT.sub("", _strip_fenced_blocks(body))
+        for line in visible.splitlines():
             if re.match(r"^(?:\s*>| {4}|\t)", line):
                 continue
             match = _OVERRIDE_LINE.match(line.strip())

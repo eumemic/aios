@@ -243,6 +243,8 @@ def test_override_for_an_old_head_fails(sha: str) -> None:
         "    " + _override(HEAD),  # indented code
         "```\n" + _override(HEAD) + "\n```",  # fenced
         "per the " + _override(HEAD),  # not at line start
+        "<!--\n" + _override(HEAD) + "\n-->",  # inside an HTML comment: renders as nothing
+        "note <!-- hidden\n" + _override(HEAD),  # unterminated HTML comment hides the rest
     ],
 )
 def test_override_comment_shape_is_strict(body: str) -> None:
