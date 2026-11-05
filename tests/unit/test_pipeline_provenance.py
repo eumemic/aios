@@ -197,6 +197,20 @@ def test_cli_unreadable_input_fails_closed(tmp_path: Path) -> None:
     assert pp.main(["--pr", str(tmp_path / "missing"), "--comments", str(tmp_path)]) != 0
 
 
+@pytest.mark.parametrize(
+    "pr",
+    [
+        {"head": {"ref": "dev-pipeline/x", "sha": HEAD}, "labels": []},  # no base: NOT "ungated"
+        {"base": {"ref": "master"}, "head": {"sha": HEAD}, "labels": []},  # no head ref
+        {"base": {"ref": "master"}, "head": {"ref": "dev-pipeline/x", "sha": HEAD}},  # no labels
+        {"base": {"ref": "master"}, "head": {"ref": "x", "sha": HEAD}, "labels": [{"id": 1}]},
+    ],
+)
+def test_cli_truncated_pr_payload_fails_closed(tmp_path: Path, pr: dict[str, Any]) -> None:
+    """A payload missing the fields that decide gating must not read as "not a pipeline PR"."""
+    assert _run(tmp_path, pr, []) == pp.EXIT_UNREADABLE
+
+
 # ─── the workflow shape a REQUIRED check needs ───────────────────────────────
 
 

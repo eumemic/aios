@@ -22,6 +22,16 @@ name: pipeline-provenance
 #
 # No `if:`, no paths/branches filter: a required check must conclude on EVERY PR, never sit at
 # "skipped"/"expected".
+#
+# ROLLOUT ORDER (load-bearing): the dev-pipeline reconciler's CI read (eumemic-company
+# dev_pipeline_lib `_read_ci` -> `_check_runs_terminal`) counts EVERY check run on the head, and
+# this check is red on every pipeline PR until review stamps it. Until that read excludes
+# `pipeline-provenance`, landing this file routes every pipeline PR to the `ci` fix transition
+# instead of review (deadlock). Merge this only after the reconciler-side exclusion is live.
+#
+# ADMIN STEP: add `pipeline-provenance` to master's required checks PINNED to the GitHub Actions
+# app (`{"context": "pipeline-provenance", "app_id": 15368}`, like the existing checks). An
+# unpinned context can be satisfied by a commit status any write token can POST.
 
 on:
   pull_request_target:

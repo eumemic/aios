@@ -601,6 +601,22 @@ def _load(pr_path: Path, comments_path: Path) -> tuple[dict[str, Any], list[Any]
     pr = json.loads(pr_path.read_text())
     if not isinstance(pr, dict):
         raise ValueError("PR payload is not a JSON object")
+    # evaluate() reads a missing base as "not master -> not gated" and a missing head ref as "not
+    # dev-pipeline/*": a truncated payload must FAIL CLOSED here, never pass as ungated.
+    base, head, labels = pr.get("base"), pr.get("head"), pr.get("labels")
+    if not (isinstance(base, dict) and isinstance(base.get("ref"), str)):
+        raise ValueError("PR payload has no base.ref")
+    if not (
+        isinstance(head, dict)
+        and isinstance(head.get("ref"), str)
+        and isinstance(head.get("sha"), str)
+    ):
+        raise ValueError("PR payload has no head.ref/head.sha")
+    if not (
+        isinstance(labels, list)
+        and all(isinstance(lab, dict) and isinstance(lab.get("name"), str) for lab in labels)
+    ):
+        raise ValueError("PR payload labels are not a list of named labels")
     comments = [json.loads(line) for line in comments_path.read_text().splitlines() if line.strip()]
     return pr, comments
 
