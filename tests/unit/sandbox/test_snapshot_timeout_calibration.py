@@ -4,7 +4,9 @@
 
 * the snapshot verb (``docker commit`` / flatten) is budgeted from the
   preceding ``inspect --size`` stat walk (``size_walk_seconds``) — a measured
-  per-corpse budget that scales with the daemon/filesystem;
+  per-corpse budget that scales with the daemon/filesystem. A flatten also
+  gets at least the fixed-rate budget for the bytes its export moves, since
+  the walk covers only the writable layer (#2579);
 * ``docker image save`` / ``load`` are budgeted from a FIXED per-byte rate
   (``sandbox_snapshot_timeout_ns_per_byte``), clamped to a floor and scaled by
   a safety margin and a per-prior-timeout retry multiplier.

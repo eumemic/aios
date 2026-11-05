@@ -14,6 +14,7 @@ next exec with "No such container" (issue #691).
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import gc
 from collections.abc import Iterator
 from contextlib import ExitStack
@@ -39,7 +40,11 @@ from aios.sandbox.backends.base import (
     SandboxSpec,
 )
 from aios.sandbox.registry import SandboxRegistry
-from aios.sandbox.spec import BrowserRuntimeUnsupportedError, ProvisioningPlan
+from aios.sandbox.spec import (
+    BrowserRuntimeUnsupportedError,
+    ProvisioningPlan,
+    mount_snapshot_from_echoes,
+)
 from aios.services.vaults import ResolvedEnvVarCredential
 from tests.helpers.sandbox import FakeBackend, FakePool, make_handle
 
@@ -99,13 +104,49 @@ def _seed(
     return handle
 
 
+def _seed_listed(
+    registry: SandboxRegistry,
+    backend: FakeBackend,
+    session_id: str,
+    snapshot: frozenset[tuple[str, ...]] = frozenset(),
+) -> SandboxHandle:
+    """Seed a cached handle whose container the backend also lists, so the
+    salvage that follows an evict can find it."""
+    handle = _seed(registry, session_id, snapshot)
+    backend.managed.append(
+        ManagedSandboxRef(sandbox_id=handle.sandbox_id, session_id=session_id, running=True)
+    )
+    return handle
+
+
+def _removed(backend: FakeBackend) -> list[str]:
+    """Sandbox ids that a salvage removed."""
+    return [c[1]["sandbox_id"] for c in backend.calls if c[0] == "force_remove"]
+
+
+async def _drain_mount_salvages(registry: SandboxRegistry) -> None:
+    """Wait for the background work ``release_if_mounts_changed`` started: the
+    salvage tasks, and the proxy stops and egress tombstones ``evict`` spawns."""
+    await asyncio.gather(*registry._mount_salvage_tasks)
+    await asyncio.gather(*registry._evict_proxy_stop_tasks)
+
+
+class _RemovingBackend(FakeBackend):
+    """A backend whose ``force_remove`` drops the container from its listing,
+    so a later salvage does not find it again."""
+
+    async def force_remove(self, sandbox_id: str) -> None:
+        await super().force_remove(sandbox_id)
+        self.managed = [ref for ref in self.managed if ref.sandbox_id != sandbox_id]
+
+
 class TestReleaseIfMountsChanged:
     async def test_no_cached_handle_is_noop(self) -> None:
         backend = FakeBackend()
         registry = SandboxRegistry(backend=backend)
-        await registry.release_if_mounts_changed("sess_NONE", [_echo("memstore_a", "a")], [], [])
-        destroys = [c for c in backend.calls if c[0] == "destroy"]
-        assert destroys == []
+        registry.release_if_mounts_changed("sess_NONE", [_echo("memstore_a", "a")], [], [])
+        assert registry._mount_salvage_tasks == set()
+        assert backend.calls == []
 
     async def test_identical_snapshot_does_not_release(self) -> None:
         backend = FakeBackend()
@@ -113,10 +154,10 @@ class TestReleaseIfMountsChanged:
         snapshot = frozenset([("memstore", "memstore_a", "a", "read_write")])
         _seed(registry, "sess_X", snapshot)
 
-        await registry.release_if_mounts_changed("sess_X", [_echo("memstore_a", "a")], [], [])
+        registry.release_if_mounts_changed("sess_X", [_echo("memstore_a", "a")], [], [])
 
-        destroys = [c for c in backend.calls if c[0] == "destroy"]
-        assert destroys == []
+        # Every step runs the check, so the steady state spawns no task.
+        assert registry._mount_salvage_tasks == set()
         assert registry.peek("sess_X") is not None
 
     async def test_reorder_does_not_release(self) -> None:
@@ -128,17 +169,17 @@ class TestReleaseIfMountsChanged:
                 ("memstore", "memstore_b", "b", "read_only"),
             ]
         )
-        _seed(registry, "sess_X", snapshot)
+        _seed_listed(registry, backend, "sess_X", snapshot)
 
-        await registry.release_if_mounts_changed(
+        registry.release_if_mounts_changed(
             "sess_X",
             [_echo("memstore_b", "b", "read_only"), _echo("memstore_a", "a")],
             [],
             [],
         )
+        await _drain_mount_salvages(registry)
 
-        destroys = [c for c in backend.calls if c[0] == "destroy"]
-        assert destroys == []
+        assert _removed(backend) == []
         assert registry.peek("sess_X") is not None
 
     @pytest.mark.parametrize(
@@ -157,79 +198,207 @@ class TestReleaseIfMountsChanged:
         backend = FakeBackend()
         registry = SandboxRegistry(backend=backend)
         snapshot = frozenset([("memstore", "memstore_a", "a", "read_write")])
-        handle = _seed(registry, "sess_X", snapshot)
+        handle = _seed_listed(registry, backend, "sess_X", snapshot)
 
-        await registry.release_if_mounts_changed("sess_X", current_echoes, [], [])
+        registry.release_if_mounts_changed("sess_X", current_echoes, [], [])
 
-        destroys = [c for c in backend.calls if c[0] == "destroy"]
-        assert len(destroys) == 1
-        assert destroys[0][1]["sandbox_id"] == handle.sandbox_id
+        # Evicted before the check returns, so no tool task can get it.
         assert registry.peek("sess_X") is None
         assert "sess_X" not in registry._last_used
+        await _drain_mount_salvages(registry)
 
-    async def test_release_serialized_against_get_or_provision(self) -> None:
-        """The per-session lock must serialize release_if_mounts_changed against
-        a concurrent get_or_provision so the registry never returns a handle
-        that's about to be torn down."""
-        backend = FakeBackend()
+        assert _removed(backend) == [handle.sandbox_id]
+
+    async def test_detaches_a_drifted_sandbox_while_the_lock_is_held(self) -> None:
+        """Every step runs this check before its model call, and a corpse
+        salvage held Ultron's session lock for 11 minutes, so every step
+        waited it out (#2579). The GC also holds the lock while it salvages
+        an older corpse, and a live sandbox can stay cached meanwhile. The
+        check returns without waiting and with the drifted sandbox already
+        detached, so a tool task cannot get it or its credential proxy. The
+        tool waits on the lock and then provisions with the current mounts."""
+        backend = _RemovingBackend(next_handle_id="fresh_sandbox")
         registry = SandboxRegistry(backend=backend)
-        old_snapshot = frozenset([("memstore", "memstore_a", "a", "read_write")])
-        old_handle = _seed(registry, "sess_X", old_snapshot)
-        new_snapshot = frozenset([("memstore", "memstore_b", "b", "read_write")])
-
-        provision_started = asyncio.Event()
-        let_provision_continue = asyncio.Event()
-
-        async def slow_build_spec(_session_id: str) -> ProvisioningPlan:
-            provision_started.set()
-            await let_provision_continue.wait()
-            spec = SandboxSpec(
-                session_id="sess_X",
-                instance_id="inst_T",
-                workspace=Mount(host_path=old_handle.workspace_path, sandbox_path="/workspace"),
-                extra_mounts=(),
-                environment={},
-                labels={},
-                network_policy=UnrestrictedNetworking(),
-                host_gateway_alias=None,
-                image="aios-sandbox:test",
-                mount_snapshot=new_snapshot,
-            )
-            return ProvisioningPlan(
-                spec=spec,
-                env_config=None,
-                memory_echoes=[],
-                github_echoes=[],
-                git_proxy=None,
-                env_var_credentials=(),
-            )
-
-        # Force a cache miss so get_or_provision contends for the lock.
-        registry._handles.pop("sess_X")
+        snapshot = frozenset([("memstore", "memstore_a", "a", "read_write")])
+        stale = _seed_listed(registry, backend, "sess_X", snapshot)
+        proxy = FakeSecretProxy()
+        registry._secret_proxies["sess_X"] = cast(Any, proxy)
+        attached = [_echo("memstore_b", "b")]
+        current_mounts = mount_snapshot_from_echoes(attached, [], [])
 
         with (
-            patch("aios.sandbox.registry.build_spec_from_session", slow_build_spec),
+            patch(
+                "aios.sandbox.registry.build_spec_from_session",
+                AsyncMock(return_value=_provisioning_plan("sess_X", mount_snapshot=current_mounts)),
+            ),
             patch("aios.sandbox.registry.install_egress_ca", AsyncMock()),
             patch("aios.sandbox.registry.install_packages", AsyncMock()),
             patch("aios.sandbox.registry.apply_network_lockdown", AsyncMock()),
         ):
-            provision_task = asyncio.create_task(registry.get_or_provision("sess_X"))
+            async with registry._lock_for("sess_X"):
+                registry.release_if_mounts_changed("sess_X", attached, [], [])
+                assert registry.peek("sess_X") is None
+                assert "sess_X" not in registry._secret_proxies
+                tool = asyncio.create_task(registry.get_or_provision("sess_X"))
+                await asyncio.sleep(0)
+                assert not tool.done()
+            fresh = await tool
+            await _drain_mount_salvages(registry)
+
+        proxy.stop.assert_awaited_once()
+        assert _removed(backend) == [stale.sandbox_id]
+        assert fresh.sandbox_id == "fresh_sandbox"
+        assert fresh.mount_snapshot == current_mounts
+
+    async def test_keeps_the_memory_mounts_the_step_stored(self) -> None:
+        """The step stores its memory mounts just before this check, and its
+        memory tools read them. Clearing them on a recycle would leave that
+        step's memory-store writes unsynced."""
+        backend = FakeBackend()
+        registry = SandboxRegistry(backend=backend)
+        _seed_listed(
+            registry, backend, "sess_X", frozenset([("memstore", "memstore_a", "a", "read_write")])
+        )
+        attached = [_echo("memstore_b", "b")]
+        runtime.set_session_memory_mounts("sess_X", attached)
+        try:
+            registry.release_if_mounts_changed("sess_X", attached, [], [])
+            await _drain_mount_salvages(registry)
+
+            assert registry.peek("sess_X") is None
+            assert runtime.get_session_memory_mounts("sess_X") == attached
+        finally:
+            runtime.clear_session_memory_mounts("sess_X")
+
+    async def test_keeps_a_sandbox_a_provision_built_from_newer_mounts(self) -> None:
+        """A step that runs while a provision holds the lock finds no cached
+        sandbox and leaves the provision alone. The provision reads the mounts
+        after its salvage, which can be minutes after the step read them, so
+        it can hold the newer set. Recycling it against the step's read would
+        snapshot a correct sandbox while the step's tools wait."""
+        backend = FakeBackend()
+        registry = SandboxRegistry(backend=backend)
+        step_read = [_echo("memstore_a", "a")]
+        newer = mount_snapshot_from_echoes(
+            [_echo("memstore_a", "a"), _echo("memstore_b", "b")], [], []
+        )
+        provision_started = asyncio.Event()
+        let_provision_continue = asyncio.Event()
+
+        async def build_spec(_session_id: str) -> ProvisioningPlan:
+            provision_started.set()
+            await let_provision_continue.wait()
+            return _provisioning_plan("sess_X", mount_snapshot=newer)
+
+        with (
+            patch("aios.sandbox.registry.build_spec_from_session", build_spec),
+            patch("aios.sandbox.registry.install_egress_ca", AsyncMock()),
+            patch("aios.sandbox.registry.install_packages", AsyncMock()),
+            patch("aios.sandbox.registry.apply_network_lockdown", AsyncMock()),
+        ):
+            provision = asyncio.create_task(registry.get_or_provision("sess_X"))
             await provision_started.wait()
 
-            release_task = asyncio.create_task(
-                registry.release_if_mounts_changed("sess_X", [_echo("memstore_b", "b")], [], [])
-            )
-            # release_task is blocked on the lock provision_task is holding.
-            await asyncio.sleep(0)
-            assert not release_task.done()
+            registry.release_if_mounts_changed("sess_X", step_read, [], [])
+            assert registry._mount_salvage_tasks == set()
 
             let_provision_continue.set()
-            await provision_task
-            await release_task
+            handle = await provision
 
-        # New handle's snapshot matches current echoes → no release fired.
-        destroys = [c for c in backend.calls if c[0] == "destroy"]
-        assert destroys == []
+        assert registry.peek("sess_X") is handle
+        assert _removed(backend) == []
+
+    async def test_skips_the_salvage_once_a_provision_has_run(self) -> None:
+        """A tool task that takes the lock first provisions a new sandbox, and
+        its salvage preamble removes the evicted corpse. The background salvage
+        must then leave the session alone: a salvage lists every container of
+        the session and would remove the new, live one too."""
+        backend = FakeBackend()
+        registry = SandboxRegistry(backend=backend)
+        snapshot = frozenset([("memstore", "memstore_a", "a", "read_write")])
+        _seed_listed(registry, backend, "sess_X", snapshot)
+        registry.release_if_mounts_changed("sess_X", [_echo("memstore_b", "b")], [], [])
+        # A provision that ran before the background salvage got the lock.
+        fresh = make_handle(session_id="sess_X", sandbox_id="fresh_sandbox")
+        registry._handles["sess_X"] = fresh
+        backend.managed.append(
+            ManagedSandboxRef(sandbox_id="fresh_sandbox", session_id="sess_X", running=True)
+        )
+
+        await _drain_mount_salvages(registry)
+
+        assert _removed(backend) == []
+        assert registry.peek("sess_X") is fresh
+
+    async def test_salvages_with_the_evicted_sandboxs_budget(self) -> None:
+        """The evicted handle carries its environment's snapshot budget, which
+        the salvage of a crash corpse has no way to know."""
+        backend = FakeBackend()
+        registry = SandboxRegistry(backend=backend)
+        snapshot = frozenset([("memstore", "memstore_a", "a", "read_write")])
+        handle = _seed_listed(registry, backend, "sess_X", snapshot)
+        registry._handles["sess_X"] = dataclasses.replace(handle, disk_limit_bytes=123_456_789)
+
+        registry.release_if_mounts_changed("sess_X", [_echo("memstore_b", "b")], [], [])
+        await _drain_mount_salvages(registry)
+
+        (call,) = [c[1] for c in backend.calls if c[0] == "snapshot"]
+        assert call["flatten_if_unique_bytes_over"] == 123_456_789
+
+    async def test_stop_all_cancels_a_salvage_waiting_for_the_lock(self) -> None:
+        """Shutdown does not wait for the lock holder to finish. The evicted
+        container is left for the next worker's boot salvage, as any evicted
+        container is."""
+        backend = FakeBackend()
+        registry = SandboxRegistry(backend=backend)
+        snapshot = frozenset([("memstore", "memstore_a", "a", "read_write")])
+        _seed_listed(registry, backend, "sess_X", snapshot)
+        lock = registry._lock_for("sess_X")
+        await lock.acquire()
+        registry.release_if_mounts_changed("sess_X", [_echo("memstore_b", "b")], [], [])
+        (task,) = registry._mount_salvage_tasks
+        await asyncio.sleep(0)
+
+        await asyncio.wait_for(registry.stop_all(), timeout=1.0)
+
+        assert task.cancelled()
+        assert _removed(backend) == []
+        lock.release()
+
+    async def test_stop_all_cancels_a_salvage_before_it_sees_the_cleared_cache(self) -> None:
+        """stop_all clears the handle cache and then awaits the proxy stops. A
+        salvage that got the lock in that window would read the empty cache as
+        "no provision since the evict", and snapshot and remove the live
+        sandbox that a provision cached after the evict."""
+        backend = FakeBackend()
+        registry = SandboxRegistry(backend=backend)
+        snapshot = frozenset([("memstore", "memstore_a", "a", "read_write")])
+        _seed_listed(registry, backend, "sess_X", snapshot)
+        lock = registry._lock_for("sess_X")
+        await lock.acquire()
+        registry.release_if_mounts_changed("sess_X", [_echo("memstore_b", "b")], [], [])
+        await asyncio.sleep(0)
+        # The lock holder is a provision: its preamble removed the evicted
+        # corpse and it cached a new, live sandbox.
+        backend.managed.clear()
+        registry._handles["sess_X"] = make_handle(session_id="sess_X", sandbox_id="fresh_sandbox")
+        backend.managed.append(
+            ManagedSandboxRef(sandbox_id="fresh_sandbox", session_id="sess_X", running=True)
+        )
+
+        async def release_the_lock_during_shutdown() -> None:
+            lock.release()
+            for _ in range(10):
+                await asyncio.sleep(0)
+
+        proxy = FakeSecretProxy()
+        proxy.stop = AsyncMock(side_effect=release_the_lock_during_shutdown)
+        registry._secret_proxies["sess_X"] = cast(Any, proxy)
+
+        await asyncio.wait_for(registry.stop_all(), timeout=1.0)
+
+        proxy.stop.assert_awaited_once()
+        assert _removed(backend) == []
 
 
 class TestLocksDictCleanup:
@@ -386,7 +555,9 @@ class TestEvictReclamation:
         await asyncio.wait_for(proxy_stopped.wait(), timeout=1.0)
 
 
-def _provisioning_plan(session_id: str) -> ProvisioningPlan:
+def _provisioning_plan(
+    session_id: str, *, mount_snapshot: frozenset[tuple[str, ...]] = frozenset()
+) -> ProvisioningPlan:
     """Build a minimal :class:`ProvisioningPlan` for stale-handle tests.
 
     The plan is returned by a patched ``build_spec_from_session`` so the
@@ -404,6 +575,7 @@ def _provisioning_plan(session_id: str) -> ProvisioningPlan:
         network_policy=UnrestrictedNetworking(),
         host_gateway_alias=None,
         image="aios-sandbox:test",
+        mount_snapshot=mount_snapshot,
     )
     return ProvisioningPlan(
         spec=spec,
@@ -1186,7 +1358,7 @@ class TestSecretProxyLifecycle:
         assert "sess_X" not in registry._secret_proxies
 
     async def test_release_if_mounts_changed_stops_secret_proxy(self) -> None:
-        """A diverged echo set fires release(), which stops the secret proxy."""
+        """A diverged echo set detaches the secret proxy at once and stops it."""
         backend = FakeBackend()
         registry = SandboxRegistry(backend=backend)
         snapshot = frozenset([("memstore", "memstore_a", "a", "read_write")])
@@ -1194,11 +1366,12 @@ class TestSecretProxyLifecycle:
         proxy = FakeSecretProxy()
         registry._secret_proxies["sess_X"] = cast(Any, proxy)
 
-        # Detach all memory stores → snapshot diverges → release fires.
-        await registry.release_if_mounts_changed("sess_X", [], [], [])
+        # Detach all memory stores → snapshot diverges → recycle fires.
+        registry.release_if_mounts_changed("sess_X", [], [], [])
+        assert "sess_X" not in registry._secret_proxies
+        await _drain_mount_salvages(registry)
 
         proxy.stop.assert_awaited_once()
-        assert "sess_X" not in registry._secret_proxies
 
     async def test_evict_stops_secret_proxy(self) -> None:
         """``evict`` stops the secret proxy in the background (reusing the
@@ -1341,17 +1514,17 @@ class TestEnvVarCredentialDrift:
         backend = FakeBackend()
         registry = SandboxRegistry(backend=backend)
         snapshot = frozenset([(VAULT_CREDENTIAL, "vcr_01", self._TS_V1.isoformat())])
-        handle = _seed(registry, "sess_X", snapshot)
+        handle = _seed_listed(registry, backend, "sess_X", snapshot)
 
-        await registry.release_if_mounts_changed("sess_X", [], [], current_echoes)
+        registry.release_if_mounts_changed("sess_X", [], [], current_echoes)
+        await _drain_mount_salvages(registry)
 
-        destroys = [c for c in backend.calls if c[0] == "destroy"]
+        removed = _removed(backend)
         if expect_release:
-            assert len(destroys) == 1, f"{description!r} should recycle the sandbox"
-            assert destroys[0][1]["sandbox_id"] == handle.sandbox_id
+            assert removed == [handle.sandbox_id], f"{description!r} should recycle the sandbox"
             assert registry.peek("sess_X") is None
         else:
-            assert destroys == [], f"{description!r} must not recycle the sandbox"
+            assert removed == [], f"{description!r} must not recycle the sandbox"
             assert registry.peek("sess_X") is not None
 
 

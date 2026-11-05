@@ -388,6 +388,11 @@ class SandboxRegistry:
         # GC'd before stop() unwinds the proxy's uvicorn server, httpx
         # client and bound TCP port.
         self._evict_proxy_stop_tasks: set[asyncio.Task[None]] = set()
+        # Strong refs for release_if_mounts_changed's background salvages.
+        # Kept apart from the set above because stop_all cancels these
+        # instead of awaiting them: a salvage is a snapshot that can take
+        # minutes, and a cancelled one leaves the corpse to the next salvage.
+        self._mount_salvage_tasks: set[asyncio.Task[None]] = set()
 
     def set_provisioning_pressure(self, pressure: GcPressureResult) -> None:
         """Install the worker's latest GC-derived cold-provision admission state."""
@@ -1958,17 +1963,24 @@ class SandboxRegistry:
         )
         return True
 
-    async def _salvage_session_corpses(self, session_id: str) -> None:
+    async def _salvage_session_corpses(
+        self, session_id: str, *, disk_limit_bytes: int | None = None
+    ) -> None:
         """Provision preamble: snapshot + remove every corpse of ``session_id``.
 
         Container death no longer loses data — a crash/OOM/daemon-restart
         corpse is committed here before the session's next container starts.
         **Salvage failure fails the provision** (raw error, model-actionable):
         a retained corpse must never be silently bypassed into a stale-tag
-        resume. Per-corpse budget falls back to the global default (a crash
-        corpse has no spec/handle to carry a per-env override).
+        resume. ``disk_limit_bytes`` is the budget of a sandbox the caller
+        evicted, which carries its environment's override. Otherwise the
+        budget is the global default, since a crash corpse has no spec or
+        handle to carry one. A handle's budget is ``None`` only when the
+        global one is, so ``None`` means the global default either way.
         """
         settings = get_settings()
+        if disk_limit_bytes is None:
+            disk_limit_bytes = settings.sandbox_snapshot_budget_bytes
         refs = await self._backend.list_managed(
             instance_id=settings.instance_id, session_id=session_id
         )
@@ -2018,9 +2030,7 @@ class SandboxRegistry:
                         "refusing to provision over unrecovered state"
                     )
             removable = await self._snapshot_and_record(
-                session_id,
-                ref.sandbox_id,
-                disk_limit_bytes=settings.sandbox_snapshot_budget_bytes,
+                session_id, ref.sandbox_id, disk_limit_bytes=disk_limit_bytes
             )
             if not removable:
                 failures += 1
@@ -2542,9 +2552,8 @@ class SandboxRegistry:
         # reachable from every teardown. Tombstoned (not deleted) so the
         # generation counter stays monotonic.
         await self._invalidate_session_egress_by_id(session_id, reason="released")
-        # NOTE: do NOT pop self._locks[session_id] here.  The two
-        # release()-callers (``release_if_mounts_changed`` and the
-        # idle reaper) wrap this call in ``async with
+        # NOTE: do NOT pop self._locks[session_id] here.  The caller
+        # (the idle reaper) wraps this call in ``async with
         # self._lock_for(session_id)``; popping the entry mid-release
         # would leave the caller holding a lock that's no longer
         # findable in the dict, so a concurrent ``get_or_provision``
@@ -2575,55 +2584,72 @@ class SandboxRegistry:
         # already ran, so a retained corpse never leaves a stale proxy/secret.
         await self._snapshot_and_remove(session_id, handle)
 
-    async def release_if_mounts_changed(
+    def release_if_mounts_changed(
         self,
         session_id: str,
         memory_echoes: list[MemoryStoreResourceEcho],
         github_echoes: list[GithubRepositoryResourceEcho],
         env_var_credential_echoes: list[EnvVarCredentialEcho],
     ) -> None:
-        """Release the cached sandbox if its mount snapshot has drifted.
-
-        Acquires the per-session lock so a tool task from a prior step
-        can't race with the release via ``get_or_provision``.
+        """Recycle the cached sandbox if its mount snapshot has drifted.
 
         Drift includes: memory store attachments added/removed, github
         repos added/removed, github token rotated, and env-var credentials
         added/removed/rotated (the ``updated_at`` timestamp on the github
         echo and the env-var echo are part of the snapshot key, see
-        :func:`mount_snapshot_from_echoes`). The secret-egress proxy is
-        stopped via the delegated ``release()`` call.
+        :func:`mount_snapshot_from_echoes`).
+
+        Every step calls this before its model call, and the model needs no
+        sandbox, so the step never awaits sandbox work here (#2579). The
+        evict runs now, so no tool task can get the drifted handle, its
+        credential proxies or its broker secret, and the next provision
+        builds from the current mounts. The evict keeps the session caches,
+        since this step's memory tools read the mounts it just stored. The
+        container is left as a corpse, and a background task salvages it
+        under the lock, as the next provision's salvage preamble or the GC
+        tick would otherwise do later.
         """
-        async with self._lock_for(session_id):
-            handle = self._handles.get(session_id)
-            if handle is None:
-                return
-            if handle.mount_snapshot == mount_snapshot_from_echoes(
-                memory_echoes, github_echoes, env_var_credential_echoes
-            ):
-                return
-            log.info(
-                "sandbox.released_for_mount_change",
-                session_id=session_id,
-                container_id=handle.sandbox_id[:12],
-            )
-            # Delegate to release() so the runtime-cache cleanup and any
-            # future unload-event side effects stay in one place. Holding
-            # the per-session lock guards against a tool task from a prior
-            # step racing with the release via get_or_provision (which
-            # acquires the same lock).
-            await self.release(session_id)
+        handle = self._handles.get(session_id)
+        if handle is None or handle.mount_snapshot == mount_snapshot_from_echoes(
+            memory_echoes, github_echoes, env_var_credential_echoes
+        ):
+            return
+        log.info(
+            "sandbox.released_for_mount_change",
+            session_id=session_id,
+            container_id=handle.sandbox_id[:12],
+        )
+        self.evict(session_id, unload_session_caches=False)
+        task = asyncio.create_task(
+            self._salvage_evicted(session_id, handle.disk_limit_bytes),
+            name=f"sandbox-mount-salvage:{session_id}",
+        )
+        self._mount_salvage_tasks.add(task)
+        task.add_done_callback(self._mount_salvage_tasks.discard)
+
+    async def _salvage_evicted(self, session_id: str, disk_limit_bytes: int | None) -> None:
+        """The background half of :meth:`release_if_mounts_changed`."""
+        try:
+            async with self._lock_for(session_id):
+                # A provision since the evict has salvaged it already.
+                if session_id not in self._handles:
+                    await self._salvage_session_corpses(
+                        session_id, disk_limit_bytes=disk_limit_bytes
+                    )
+        except Exception:
+            log.exception("sandbox.mount_salvage_failed", session_id=session_id)
 
     def peek(self, session_id: str) -> SandboxHandle | None:
         """Return the cached handle without provisioning. ``None`` if not cached."""
         return self._handles.get(session_id)
 
     def evict(self, session_id: str, *, unload_session_caches: bool = True) -> None:
-        """Drop the cache entry without backend teardown (sandbox is dead).
+        """Drop the cache entry without backend teardown.
 
         Used by tool_dispatch when it detects a sandbox-side failure that
         suggests the sandbox itself is unhealthy; the next tool call will
-        cold-start a fresh one.
+        cold-start a fresh one. The drift recycles evict a live sandbox and
+        then snapshot and remove it.
 
         The per-session :class:`GitProxy` is stopped in the background:
         the caller is on a retry path and can't block on stop()'s up-to-5s
@@ -2647,8 +2673,8 @@ class SandboxRegistry:
 
         self._last_used.pop(session_id, None)
         self._egress_states.pop(session_id, None)
-        # The sandbox is dead (that is why we are evicting), so its persisted
-        # intercept set no longer describes anything live. ``evict`` is sync and
+        # The sandbox is dead or is being recycled, so its persisted intercept
+        # set no longer describes anything live. ``evict`` is sync and
         # on a retry path, so the tombstone is fire-and-forget like the proxy
         # stops below — it shares the same strong-ref set so the task is not
         # GC'd mid-flight.
@@ -2718,6 +2744,13 @@ class SandboxRegistry:
         self._locks.clear()
         self._git_proxies.clear()
         self._secret_proxies.clear()
+        # Cancel the mount-drift salvages before the next await. One that took
+        # the lock after the clear above would read the empty cache as "no
+        # provision since the evict", and snapshot and remove a live sandbox
+        # that this method is about to stop.
+        mount_salvage_tasks = list(self._mount_salvage_tasks)
+        for task in mount_salvage_tasks:
+            task.cancel()
 
         kinded_proxies: list[tuple[str, GitProxy | SecretEgressProxy]] = [
             *(("git_proxy", p) for p in proxies),
@@ -2742,6 +2775,8 @@ class SandboxRegistry:
         evict_tasks = list(self._evict_proxy_stop_tasks)
         if evict_tasks:
             await asyncio.gather(*evict_tasks, return_exceptions=True)
+        if mount_salvage_tasks:
+            await asyncio.gather(*mount_salvage_tasks, return_exceptions=True)
 
         if not handles:
             return

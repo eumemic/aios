@@ -468,7 +468,7 @@ async def refresh_session_mount_state(
         )
     runtime.set_session_memory_mounts(session_id, memory_echoes)
     if runtime.sandbox_registry is not None:
-        await runtime.sandbox_registry.release_if_mounts_changed(
+        runtime.sandbox_registry.release_if_mounts_changed(
             session_id, memory_echoes, github_echoes, env_var_echoes
         )
     return memory_echoes

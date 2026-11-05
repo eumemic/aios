@@ -10,10 +10,9 @@ step left an entry that persisted for the worker's process lifetime,
 so the dicts grew unboundedly across long-running workers handling many
 sessions.
 
-The natural unload event is ``SandboxRegistry.release()``: the idle
-reaper triggers it on per-session TTL, ``release_if_mounts_changed``
-triggers it on mount drift, and ``release_all`` triggers it at worker
-shutdown. After this PR, ``release()`` also clears the runtime caches
+The natural unload event is ``SandboxRegistry.release()``, which the
+idle reaper triggers on per-session TTL. After this PR, ``release()``
+also clears the runtime caches
 keyed on the released session — re-populated naturally by the next
 step if the session wakes back up.
 """

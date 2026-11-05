@@ -33,6 +33,7 @@ from aios.sandbox.backends.base import (
 )
 from aios.sandbox.backends.docker import (
     _FLATTEN_DEPTH_CEILING,
+    _SNAPSHOT_TIMEOUT_FLOOR_S,
     DockerBackend,
     _sum_history_sizes,
     writable_layer_delta,
@@ -1861,11 +1862,25 @@ class TestFlattenDiskGate:
         assert not fake_docker.pipelines, "a deferred flatten must never start the pipeline"
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("size_rw", [6_000_000_000, 200_000_000_000])
-    async def test_large_corpse_flatten_uses_measured_walk_deadline(
-        self, fake_docker: _FakeDocker, monkeypatch: pytest.MonkeyPatch, size_rw: int
+    @pytest.mark.parametrize(
+        ("size_rw", "budget"),
+        [
+            # 25 s of walk at the 10x safety factor beats the export's 240 s.
+            (6_000_000_000, 250.0),
+            # The export's 20 ns/B at the 2x margin beats the walk.
+            (200_000_000_000, 8000.0),
+        ],
+    )
+    async def test_large_corpse_flatten_gets_the_larger_of_walk_and_export_budgets(
+        self,
+        fake_docker: _FakeDocker,
+        monkeypatch: pytest.MonkeyPatch,
+        size_rw: int,
+        budget: float,
     ) -> None:
-        """Flatten receives the same measured-hardware budget as commit."""
+        """Flatten receives at least the commit's measured-hardware budget, and
+        at least the fixed-rate budget for the bytes its export moves (#2579).
+        There is no parent image here, so the export is the writable layer."""
         fake_docker.size_rw = size_rw
         ticks = iter((100.0, 125.0, 200.0, 300.0))
         monkeypatch.setattr("aios.sandbox.backends.docker.monotonic", lambda: next(ticks))
@@ -1880,11 +1895,63 @@ class TestFlattenDiskGate:
         assert fake_docker.pipelines, "a large corpse must flatten via the pipeline"
         settings = get_settings()
 
-        budget = 250.0  # 25s observed walk * 10x safety factor
-
         assert fake_docker.pipeline_timeouts == [
             (min(settings.sandbox_pipeline_stall_seconds, budget), budget)
         ]
+
+    @pytest.mark.asyncio
+    async def test_thin_layer_over_large_parent_budgets_the_whole_export(
+        self, fake_docker: _FakeDocker, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#2579 (Ultron, 2026-11-05): a 168 MB writable layer over a 9.5 GB
+        parent flattened at the depth ceiling. The walk covers only the writable
+        layer, so the budget fell to the 60 s floor for a 9.7 GB export, and
+        the salvage needed four escalating attempts. The budget must cover the
+        bytes the export moves: the parent's view plus the writable layer."""
+        parent_size = 9_500_000_000
+        fake_docker.size_rw = 168_000_000
+        fake_docker.images["img_S1"] = {
+            "id": "img_S1",
+            "size": parent_size,
+            "depth": _FLATTEN_DEPTH_CEILING - 1,  # +1 hits the ceiling
+            "labels": {},
+        }
+        ticks = iter((100.0, 100.5, 200.0, 300.0))  # a half-second walk
+        monkeypatch.setattr("aios.sandbox.backends.docker.monotonic", lambda: next(ticks))
+        out = await DockerBackend().snapshot(
+            "cid", "tag:latest", empty_floor_bytes=8192, flatten_if_unique_bytes_over=None
+        )
+        assert out.kind == "flattened"
+        (_stall, budget) = fake_docker.pipeline_timeouts[0]
+        # 9.668 GB at the default 20 ns/B, times the 2x margin.
+        assert budget == pytest.approx(386.72)
+        assert budget > _SNAPSHOT_TIMEOUT_FLOOR_S
+
+    @pytest.mark.asyncio
+    async def test_export_budget_counts_the_ephemeral_bytes_the_filter_drops(
+        self, fake_docker: _FakeDocker, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The tar filter drops ephemeral scratch after ``docker export`` has
+        read it, so the disk estimate subtracts those bytes but the time budget
+        must not."""
+        parent_size = 9_500_000_000
+        fake_docker.size_rw = 168_000_000
+        fake_docker.ephemeral_bytes = 4_000_000_000
+        fake_docker.images["img_S1"] = {
+            "id": "img_S1",
+            "size": parent_size,
+            "depth": _FLATTEN_DEPTH_CEILING - 1,
+            "labels": {},
+        }
+        ticks = iter((100.0, 100.5, 200.0, 300.0))
+        monkeypatch.setattr("aios.sandbox.backends.docker.monotonic", lambda: next(ticks))
+        out = await DockerBackend().snapshot(
+            "cid", "tag:latest", empty_floor_bytes=8192, flatten_if_unique_bytes_over=None
+        )
+        assert out.kind == "flattened"
+        (_stall, budget) = fake_docker.pipeline_timeouts[0]
+        # The same 9.668 GB as above: the 4 GB of ephemeral bytes still count.
+        assert budget == pytest.approx(386.72)
 
 
 # ── timeout retry-state lifecycle (#2009 review) ─────────────────────────────
