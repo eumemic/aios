@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import structlog
+from aios_connector_http import coerce_size
 
 from .addressing import ChatType
 
@@ -42,6 +43,10 @@ class Attachment:
     # included it).  By signal-cli convention the file lives at
     # ``<config_dir>/attachments/<id>``.
     id: str | None
+    # Envelope-declared byte size (signal-cli ``size``), coerced once at
+    # parse time; ``None`` when absent or malformed.  Used to detect a
+    # failed signal-cli download (0-byte file, declared size > 0, #2551).
+    size: int | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -223,6 +228,7 @@ def parse_envelope(
             filename=a.get("filename") if isinstance(a.get("filename"), str) else None,
             host_path=a.get("file") if isinstance(a.get("file"), str) else None,
             id=a.get("id") if isinstance(a.get("id"), str) else None,
+            size=coerce_size(a.get("size")),
         )
         for a in attachments_raw
         if isinstance(a, dict)

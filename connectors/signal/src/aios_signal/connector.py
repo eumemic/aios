@@ -49,6 +49,11 @@ from aios_connector_http import (
     AttachmentError,
     HttpConnector,
     SandboxPath,
+    append_markers,
+    coerce_size,
+    drop_attachment,
+    is_failed_download,
+    is_over_cap,
     tool,
 )
 
@@ -62,6 +67,14 @@ from .mentions import build_mention_strings, encode_mentions
 from .parse import InboundMessage, build_content_text, is_group_update_envelope, parse_envelope
 
 log = structlog.get_logger(__name__)
+
+# Extended failed-download detection: when True, a *partial* host file
+# (``0 < st_size < declared``) would also be treated as a failed
+# signal-cli download.  Stays False (#2551 seat directive): it is not
+# proven that signal-cli finishes writing before emitting the envelope,
+# and a false drop of a working delivery is worse than the known gap.
+# The exact-0-byte rule (R2) is NOT gated by this flag.
+SIGNAL_ZERO_BYTE_DETECTION: bool = False
 
 # How long ``signal_send`` waits for the self-echo of a group send
 # to arrive on the inbound stream before degrading to the
@@ -400,7 +413,7 @@ class SignalConnector(SignalManagementMixin, HttpConnector):
             "uuid": msg.sender_uuid,
             "display_name": msg.sender_name or msg.sender_uuid,
         }
-        attachments = await self._build_attachment_tuples(msg)
+        attachments, markers = await self._collect_attachments(msg)
         # Signal envelope timestamps are ms since epoch.  Render as
         # ISO-8601 UTC so operators reading event logs see absolute
         # times rather than connector-source unix-ms.
@@ -419,7 +432,9 @@ class SignalConnector(SignalManagementMixin, HttpConnector):
             event_id=f"signal-{msg.sender_uuid}-{msg.timestamp_ms}",
             chat_id=chat_id,
             sender=sender_payload,
-            content=build_content_text(msg),
+            # Undelivered attachments surface as marker lines after the
+            # message text (#2551) — never as a silently empty event.
+            content=append_markers(build_content_text(msg), markers),
             attachments=attachments,
             metadata=build_metadata(msg, chat_id, state.bot_uuid),
             timestamp=timestamp_iso,
@@ -767,7 +782,20 @@ class SignalConnector(SignalManagementMixin, HttpConnector):
     async def _build_attachment_tuples(
         self, msg: InboundMessage
     ) -> list[tuple[str, bytes, str]] | None:
+        """Runtime tuples only; see :meth:`_collect_attachments`."""
+        tuples, _ = await self._collect_attachments(msg)
+        return tuples
+
+    async def _collect_attachments(
+        self, msg: InboundMessage
+    ) -> tuple[list[tuple[str, bytes, str]] | None, list[str]]:
         """Read each attachment's bytes for multipart upload to aios.
+
+        Returns ``(tuples, markers)``: ``markers`` holds one
+        ``[attachment not delivered: ...]`` line per attachment that was
+        skipped, in attachment order (#2551), so the caller can surface
+        the drop in the inbound content instead of emitting an empty
+        event.
 
         signal-cli's JSON-RPC daemon mode (0.14.x) auto-downloads
         attachment bytes but omits the ``file`` field — we fall back to
@@ -777,9 +805,25 @@ class SignalConnector(SignalManagementMixin, HttpConnector):
         off the event loop (multi-MiB photo+video attachments would
         block the inbound dispatcher otherwise) for the runtime-multipart
         ``emit_inbound`` shape.
+
+        A 0-byte host file whose envelope declared ``size > 0`` is a
+        failed signal-cli download (``Response exceeds max size!``), not
+        a delivery: it is replaced by a ``download failed`` marker.  The
+        signal-cli-owned file is left in place, exactly as the over-cap
+        rejection path leaves it.
         """
-        validated: list[tuple[str, str, str]] = []
-        for att in msg.attachments:
+        # (attachment index, host_path, filename, content_type, declared size)
+        validated: list[tuple[int, str, str, str, int | None]] = []
+        markers_by_index: dict[int, str] = {}
+
+        def _drop(index: int, **kwargs: Any) -> None:
+            sink: list[str] = []
+            drop_attachment(sink, log, "signal", **kwargs)
+            markers_by_index[index] = sink[0] if sink else "[attachment not delivered]"
+
+        for index, att in enumerate(msg.attachments):
+            filename = att.filename or "unnamed"
+            declared = coerce_size(att.size)
             host_path = att.host_path
             if host_path is None and att.id is not None:
                 host_path = str(self._cfg.config_dir / "attachments" / att.id)
@@ -789,8 +833,36 @@ class SignalConnector(SignalManagementMixin, HttpConnector):
                     content_type=att.content_type,
                     filename=att.filename,
                 )
+                _drop(
+                    index,
+                    name=filename,
+                    content_type=att.content_type,
+                    size=declared,
+                    reason="rejected",
+                )
                 continue
-            filename = att.filename or "unnamed"
+            try:
+                st_size: int | None = coerce_size(Path(host_path).stat().st_size)
+            except OSError:
+                st_size = None  # as_params' existing handling decides
+            partial = (
+                SIGNAL_ZERO_BYTE_DETECTION
+                and st_size is not None
+                and declared is not None
+                and 0 < st_size < declared
+            )
+            if is_failed_download(st_size, declared) or partial:
+                _drop(
+                    index,
+                    name=filename,
+                    content_type=att.content_type,
+                    size=declared,
+                    failed_download=True,
+                    reason="download_failed",
+                    st_size=st_size,
+                    declared_size=declared,
+                )
+                continue
             try:
                 SDKAttachment(
                     host_path=host_path,
@@ -804,28 +876,48 @@ class SignalConnector(SignalManagementMixin, HttpConnector):
                     filename=filename,
                     error=str(err),
                 )
-                continue
-            validated.append((host_path, filename, att.content_type))
-
-        if not validated:
-            return None
-
-        blobs = await asyncio.gather(
-            *(asyncio.to_thread(Path(p).read_bytes) for p, _, _ in validated),
-            return_exceptions=True,
-        )
-        out: list[tuple[str, bytes, str]] = []
-        for (host_path, filename, content_type), blob in zip(validated, blobs, strict=True):
-            if isinstance(blob, BaseException):
-                log.warning(
-                    "signal.inbound.attachment_read_failed",
-                    host_path=host_path,
-                    filename=filename,
-                    error=str(blob),
+                size = st_size if st_size is not None else declared
+                over = is_over_cap(size)
+                _drop(
+                    index,
+                    name=filename,
+                    content_type=att.content_type,
+                    size=size,
+                    over_cap=over,
+                    reason="over_cap" if over else "rejected",
+                    st_size=st_size,
+                    declared_size=declared,
                 )
                 continue
-            out.append((filename, blob, content_type))
-        return out or None
+            validated.append((index, host_path, filename, att.content_type, declared))
+
+        out: list[tuple[str, bytes, str]] = []
+        if validated:
+            blobs = await asyncio.gather(
+                *(asyncio.to_thread(Path(p).read_bytes) for _, p, _, _, _ in validated),
+                return_exceptions=True,
+            )
+            for (index, host_path, filename, content_type, declared), blob in zip(
+                validated, blobs, strict=True
+            ):
+                if isinstance(blob, BaseException):
+                    log.warning(
+                        "signal.inbound.attachment_read_failed",
+                        host_path=host_path,
+                        filename=filename,
+                        error=str(blob),
+                    )
+                    _drop(
+                        index,
+                        name=filename,
+                        content_type=content_type,
+                        size=declared,
+                        reason="rejected",
+                    )
+                    continue
+                out.append((filename, blob, content_type))
+        markers = [markers_by_index[i] for i in sorted(markers_by_index)]
+        return (out or None), markers
 
 
 def _recipient_params(chat_id: str) -> dict[str, Any]:
