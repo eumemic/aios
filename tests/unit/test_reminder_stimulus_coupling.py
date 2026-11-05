@@ -114,7 +114,9 @@ class TestSqlForm:
         assert "e.seq = s.last_stimulus_seq" in events_mod._STIMULUS_ROW_SEEK_SQL
         # A tool-result stimulus anchors on its issuing assistant, found by
         # walking back from the tool row's own seq.
-        assert events_mod._TOOL_PARENT_ROW_SQL in events_mod._TOOL_ANCHOR_SEEK_SQL
+        assert (
+            events_mod._TOOL_PARENT_ROW_SQL.format(call_id="$2") in events_mod._TOOL_ANCHOR_SEEK_SQL
+        )
         assert "seq < $3" in events_mod._TOOL_ANCHOR_SEEK_SQL
         clamp_src = inspect.getsource(events_mod.read_windowed_events)
         assert "_stimulus_anchor_tokens(conn, session_id)" in clamp_src

@@ -80,8 +80,8 @@ def _row_to_event(row: asyncpg.Record) -> Event:
     )
 
 
-# The assistant row that issued tool call ``$2`` (every caller binds the
-# tool_call_id as ``$2``). The first three conjuncts are exactly the predicate of
+# The assistant row that issued the tool call whose id is bound at
+# ``{call_id}``. The first three conjuncts are exactly the predicate of
 # ``events_assistant_tool_calls_idx``, which has been on the ``role`` COLUMN
 # since migration 0023; a ``data->>'role'`` test cannot match that index. When
 # the predicate matches, the planner walks the partial index backward by ``seq``
@@ -90,16 +90,13 @@ def _row_to_event(row: asyncpg.Record) -> Event:
 # session size (#2575).
 _TOOL_PARENT_ROW_SQL = (
     "AND kind = 'message' AND role = 'assistant' AND data ? 'tool_calls' "
-    "AND data->'tool_calls' @> jsonb_build_array(jsonb_build_object('id', $2::text)) "
+    "AND data->'tool_calls' @> jsonb_build_array(jsonb_build_object('id', {call_id}::text)) "
 )
 
 # The newest stimulus row. ``append_event`` sets ``sessions.last_stimulus_seq``
 # on the row-locked UPDATE that allocates the seq, using the stimulus predicate
 # itself (``is_stimulus``: a non-assistant message that is not a reminder), so
-# this is two unique-key lookups. A log scan for the same row planned well as a
-# custom plan, but asyncpg's cached statement switches to the generic plan after
-# five executions, and that plan read every message row of the session through
-# ``events_session_cumtokens_idx`` (4.7 s on a 1.78M-event session, #2575).
+# this is two unique-key lookups instead of a scan of the log (#2575).
 _STIMULUS_ROW_SEEK_SQL = (
     "SELECT e.seq, e.cumulative_tokens, e.role, e.data->>'tool_call_id' AS tool_call_id "
     "FROM sessions s JOIN events e ON e.session_id = s.id AND e.seq = s.last_stimulus_seq "
@@ -113,20 +110,21 @@ _STIMULUS_ROW_SEEK_SQL = (
 # reads back as ``None``, which the caller already handles.
 _TOOL_ANCHOR_SEEK_SQL = (
     "SELECT cumulative_tokens FROM events "
-    f"WHERE session_id = $1 AND seq < $3 {_TOOL_PARENT_ROW_SQL}"
+    f"WHERE session_id = $1 AND seq < $3 {_TOOL_PARENT_ROW_SQL.format(call_id='$2')}"
+    "ORDER BY seq DESC LIMIT 1"
+)
+
+_LATEST_CUMULATIVE_TOKENS_SQL = (
+    "SELECT cumulative_tokens FROM events "
+    "WHERE session_id = $1 AND kind = 'message' "
+    "AND cumulative_tokens IS NOT NULL "
     "ORDER BY seq DESC LIMIT 1"
 )
 
 
 async def _latest_cumulative_tokens(conn: asyncpg.Connection[Any], session_id: str) -> int | None:
     """Fetch the cumulative_tokens value of the most recent message event."""
-    val: int | None = await conn.fetchval(
-        "SELECT cumulative_tokens FROM events "
-        "WHERE session_id = $1 AND kind = 'message' "
-        "AND cumulative_tokens IS NOT NULL "
-        "ORDER BY seq DESC LIMIT 1",
-        session_id,
-    )
+    val: int | None = await conn.fetchval(_LATEST_CUMULATIVE_TOKENS_SQL, session_id)
     return val
 
 
@@ -839,14 +837,6 @@ def _derive_is_error(kind: str, data: dict[str, Any]) -> bool | None:
     return bool(flag)
 
 
-# A backward walk of ``events_assistant_tool_calls_idx`` (see ``_TOOL_PARENT_ROW_SQL``).
-_TOOL_PARENT_CHANNEL_SQL = (
-    "SELECT focal_channel_at_arrival FROM events "
-    f"WHERE session_id = $1 AND account_id = $3 {_TOOL_PARENT_ROW_SQL}"
-    "ORDER BY seq DESC LIMIT 1"
-)
-
-
 async def _lookup_tool_parent_channel(
     conn: asyncpg.Connection[Any],
     session_id: str,
@@ -865,14 +855,15 @@ async def _lookup_tool_parent_channel(
 
     Pulled out of the old ``_derive_event_channel`` so ``append_event`` can
     run it BEFORE the row lock (issue #862), keeping the transaction free of
-    this JSONB ``@>`` scan.
+    this JSONB ``@>`` scan. The parent row is the one
+    :func:`lookup_tool_name_by_call_id` reads.
     """
     if not isinstance(tool_call_id, str) or not tool_call_id:
         return None
-    parent_focal: str | None = await conn.fetchval(
-        _TOOL_PARENT_CHANNEL_SQL, session_id, tool_call_id, account_id
+    _name, focal = await lookup_tool_name_by_call_id(
+        conn, session_id, tool_call_id, account_id=account_id
     )
-    return parent_focal
+    return focal
 
 
 def _resolve_event_channel(
@@ -1116,10 +1107,10 @@ async def find_latest_interrupt_seq(
     return seq
 
 
-# Same walk as ``_TOOL_PARENT_CHANNEL_SQL``, also projecting the parent's ``tool_calls``.
+# A backward walk of ``events_assistant_tool_calls_idx`` (see ``_TOOL_PARENT_ROW_SQL``).
 _TOOL_NAME_BY_CALL_ID_SQL = (
     "SELECT data->'tool_calls' AS tool_calls, focal_channel_at_arrival FROM events "
-    f"WHERE session_id = $1 AND account_id = $3 {_TOOL_PARENT_ROW_SQL}"
+    f"WHERE session_id = $1 AND account_id = $3 {_TOOL_PARENT_ROW_SQL.format(call_id='$2')}"
     "ORDER BY seq DESC LIMIT 1"
 )
 
@@ -2769,19 +2760,13 @@ def _normalize_overhead(overhead_local: int | OverheadLocalSplit) -> _Normalized
     )
 
 
-# The newest message row's per-class running sums. ``cumulative_tokens`` strictly
-# increases with ``seq`` within a session, so ordering by it selects the same row
-# as ``ORDER BY seq DESC``, and it is the key of ``events_session_cumtokens_idx``:
-# the seek is a backward walk of that index under every plan. Ordered by ``seq``,
-# the generic plan instead read the session's rows through that index and sorted
-# them (433 ms on a 1.78M-event session, #2575).
 _RETAINED_CLASS_MASS_SQL = (
     "SELECT cumulative_text_mass, cumulative_tool_result_mass, "
     "       cumulative_thinking_mass, cumulative_tool_use_mass, cumulative_image_mass "
     "FROM events "
     "WHERE session_id = $1 AND account_id = $2 "
     "AND kind = 'message' AND cumulative_tokens IS NOT NULL "
-    "ORDER BY cumulative_tokens DESC LIMIT 1"
+    "ORDER BY seq DESC LIMIT 1"
 )
 
 

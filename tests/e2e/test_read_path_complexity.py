@@ -76,17 +76,18 @@ import time
 import uuid
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
+from functools import partial
 from typing import Any, cast
 
 import asyncpg
 import pytest
 
 from aios.db.queries.events import (
+    _LATEST_CUMULATIVE_TOKENS_SQL,
     _RETAINED_CLASS_MASS_SQL,
     _STIMULUS_ROW_SEEK_SQL,
     _TOOL_ANCHOR_SEEK_SQL,
     _TOOL_NAME_BY_CALL_ID_SQL,
-    _TOOL_PARENT_CHANNEL_SQL,
 )
 from aios.harness.loop import _PREEMPT_STARVATION_COUNT_SQL
 from aios.harness.sweep import (
@@ -104,6 +105,7 @@ from tests.support import (
     find_predicate_mismatch_events_scan,
     find_unbounded_events_scan_over_seq,
     find_unbounded_sorted_events_seek,
+    plan_nodes,
 )
 
 pytestmark = pytest.mark.docker
@@ -447,6 +449,9 @@ class HotRead:
 
     ``invoke`` takes the pool and returns ``(sql, args)`` for EXPLAIN, plus runs
     the read for the rows-returned + advisory gates via :meth:`fetch`.
+
+    ``plan_check``, when set, names the one bounded plan the read must take:
+    it returns everything in the plan that departs from it (#2575).
     """
 
     name: str
@@ -454,6 +459,7 @@ class HotRead:
     sql: str
     args: Callable[[], tuple[Any, ...]]
     max_rows: int
+    plan_check: Callable[[dict[str, Any]], list[str]] | None = None
 
 
 # Row ceilings. O(1) seeks return a single row (LIMIT 1); we allow a tiny slack
@@ -479,13 +485,6 @@ def _after_seq() -> int:
 
 
 # The exact SQL each hot read issues (mirrors db/queries/events.py post-#1657).
-_SQL_LATEST_CUMULATIVE = (
-    "SELECT cumulative_tokens FROM events "
-    "WHERE session_id = $1 AND kind = 'message' "
-    "AND cumulative_tokens IS NOT NULL "
-    "ORDER BY seq DESC LIMIT 1"
-)
-
 _SQL_RETAINED_WINDOW = (
     "SELECT id, session_id, seq, kind, data, created_at, role "
     "FROM events "
@@ -569,11 +568,55 @@ _SQL_CONFIRMED_ROWS_FLOORED = CONFIRMED_ROWS_FLOORED_SQL
 _SQL_PREEMPT_STARVATION_COUNT = _PREEMPT_STARVATION_COUNT_SQL
 
 
+# Exact plan shapes for the #2575 reads. Anything that departs from the one
+# bounded plan is an offender; a Sort means the session's rows were gathered
+# before the newest one was picked.
+
+
+def _scan_shape_offenders(
+    plan: dict[str, Any], *, accept: Callable[[dict[str, Any]], bool]
+) -> list[str]:
+    offenders: list[str] = []
+    for node in plan_nodes(plan):
+        if node.get("Node Type") == "Sort":
+            offenders.append("Sort node")
+        elif node.get("Relation Name") == "events" and not accept(node):
+            offenders.append(
+                f"{node.get('Node Type')} on events via {node.get('Index Name')!r}, "
+                f"Index Cond {node.get('Index Cond')!r}"
+            )
+    return offenders
+
+
+def _walks_tool_calls_index(node: dict[str, Any]) -> bool:
+    return (
+        node.get("Node Type") == "Index Scan"
+        and node.get("Index Name") == "events_assistant_tool_calls_idx"
+        and node.get("Scan Direction") == "Backward"
+    )
+
+
+# A tool-parent lookup walks the tool-calls index backward; the stimulus anchor
+# walk also starts at the tool row's own seq.
+_TOOL_PARENT_SHAPE = partial(_scan_shape_offenders, accept=_walks_tool_calls_index)
+_TOOL_ANCHOR_SHAPE = partial(
+    _scan_shape_offenders,
+    accept=lambda n: _walks_tool_calls_index(n) and "seq <" in str(n.get("Index Cond", "")),
+)
+# The stimulus seek is a unique-key lookup: an equality on ``seq``.
+_STIMULUS_SEEK_SHAPE = partial(
+    _scan_shape_offenders,
+    accept=lambda n: (
+        n.get("Node Type") == "Index Scan" and "seq = " in str(n.get("Index Cond", ""))
+    ),
+)
+
+
 HOT_PATH_READS: list[HotRead] = [
     HotRead(
         name="_latest_cumulative_tokens",
         declared_complexity="O(1)",
-        sql=_SQL_LATEST_CUMULATIVE,
+        sql=_LATEST_CUMULATIVE_TOKENS_SQL,
         args=lambda: (_SESSION_ID,),
         max_rows=_O1_ROW_CEIL,
     ),
@@ -586,6 +629,7 @@ HOT_PATH_READS: list[HotRead] = [
         sql=_STIMULUS_ROW_SEEK_SQL,
         args=lambda: (_SESSION_ID,),
         max_rows=_O1_ROW_CEIL,
+        plan_check=_STIMULUS_SEEK_SHAPE,
     ),
     HotRead(
         name="tool_anchor_seek",
@@ -593,6 +637,7 @@ HOT_PATH_READS: list[HotRead] = [
         sql=_TOOL_ANCHOR_SEEK_SQL,
         args=lambda: (_SESSION_ID, "tc_no_such_call", _N_LARGE),
         max_rows=_O1_ROW_CEIL,
+        plan_check=_TOOL_ANCHOR_SHAPE,
     ),
     HotRead(
         name="_retained_class_mass",
@@ -630,20 +675,15 @@ HOT_PATH_READS: list[HotRead] = [
         args=lambda: (_SESSION_ID, _ACCOUNT_ID, "tc_no_such_call"),
         max_rows=_O1_ROW_CEIL,
     ),
-    # The parent-assistant lookups every tool-result append runs (#2575 siblings).
+    # The parent-assistant lookup every tool-result append runs (a #2575
+    # sibling; ``_lookup_tool_parent_channel`` reads the same row through it).
     HotRead(
         name="lookup_tool_name_by_call_id",
         declared_complexity="O(tool calls after the parent)",
         sql=_TOOL_NAME_BY_CALL_ID_SQL,
         args=lambda: (_SESSION_ID, "tc_no_such_call", _ACCOUNT_ID),
         max_rows=_O1_ROW_CEIL,
-    ),
-    HotRead(
-        name="_lookup_tool_parent_channel",
-        declared_complexity="O(tool calls after the parent)",
-        sql=_TOOL_PARENT_CHANNEL_SQL,
-        args=lambda: (_SESSION_ID, "tc_no_such_call", _ACCOUNT_ID),
-        max_rows=_O1_ROW_CEIL,
+        plan_check=_TOOL_PARENT_SHAPE,
     ),
     HotRead(
         name="ghost_asst_scan",
@@ -705,41 +745,14 @@ HOT_PATH_READS: list[HotRead] = [
 ]
 
 
-async def _explain(pool: asyncpg.Pool[Any], sql: str, *args: Any) -> dict[str, Any]:
-    """``EXPLAIN (FORMAT JSON)`` — NO ANALYZE — return the root Plan node."""
-    async with pool.acquire() as conn:
-        result = await conn.fetchval(f"EXPLAIN (FORMAT JSON) {sql}", *args)
-    if isinstance(result, str):
-        result = json.loads(result)
-    return cast(dict[str, Any], result[0]["Plan"])
-
-
-def _sql_literal(value: Any) -> str:
-    if isinstance(value, int):
-        return str(value)
-    if isinstance(value, list):
-        return "ARRAY[" + ", ".join(_sql_literal(v) for v in value) + "]"
-    return "'" + str(value).replace("'", "''") + "'"
-
-
-async def _explain_generic(
-    pool: asyncpg.Pool[Any], sql: str, *args: Any, options: str = "FORMAT JSON"
+async def _explain(
+    pool: asyncpg.Pool[Any], sql: str, *args: Any, analyze: bool = False
 ) -> dict[str, Any]:
-    """``EXPLAIN`` of the GENERIC plan: the plan asyncpg's cached prepared
-    statement runs once ``plan_cache_mode=auto`` stops re-planning (after five
-    executions, whenever the generic estimate is no worse than the custom
-    ones). ``PREPARE`` infers the parameter types; ``EXECUTE`` takes no bind
-    parameters, so the (test-constant) args are inlined as literals (#2575)."""
-    name = f"hot_read_{uuid.uuid4().hex[:12]}"
-    literals = ", ".join(_sql_literal(a) for a in args)
+    """``EXPLAIN (FORMAT JSON)`` — ``ANALYZE`` only when asked — return the
+    root Plan node."""
+    options = "ANALYZE, FORMAT JSON" if analyze else "FORMAT JSON"
     async with pool.acquire() as conn:
-        await conn.execute(f"PREPARE {name} AS {sql}")
-        try:
-            await conn.execute("SET plan_cache_mode = force_generic_plan")
-            result = await conn.fetchval(f"EXPLAIN ({options}) EXECUTE {name} ({literals})")
-        finally:
-            await conn.execute("RESET plan_cache_mode")
-            await conn.execute(f"DEALLOCATE {name}")
+        result = await conn.fetchval(f"EXPLAIN ({options}) {sql}", *args)
     if isinstance(result, str):
         result = json.loads(result)
     return cast(dict[str, Any], result[0]["Plan"])
@@ -750,25 +763,21 @@ async def _explain_generic(
 
 @needs_docker
 class TestPrimaryPlanShapeGate:
-    """For every hot read, ``EXPLAIN (FORMAT JSON)`` (no ANALYZE) the SQL under
-    both the custom and the generic plan and assert: NO aggregate over
-    ``events`` is unbounded by a ``cumulative_tokens``/``seq`` lower bound
-    (#1611/#1657); no ``events`` Seq Scan carries the JSONB-over-column
-    index-predicate-mismatch smell (#1750); and no newest-row seek sorts the
-    whole session's rows (#2575). Production runs the generic plan once a
-    connection's cached statement stops re-planning, which is how #2575's
-    stimulus seek hid behind a fast custom plan. Deterministic shape verdict —
-    RED on each removed form, GREEN on the fixed ones."""
+    """For every hot read, ``EXPLAIN (FORMAT JSON)`` (no ANALYZE) the SQL and
+    assert: NO aggregate over ``events`` is unbounded by a
+    ``cumulative_tokens``/``seq`` lower bound (#1611/#1657); no ``events`` Seq
+    Scan carries the JSONB-over-column index-predicate-mismatch smell (#1750);
+    no newest-row seek sorts the whole session's rows (#2575); and a read with
+    a ``plan_check`` takes its one bounded plan. The custom plan is the one
+    production runs: the pool sets ``plan_cache_mode=force_custom_plan``.
+    Deterministic shape verdict — RED on each removed form, GREEN on the fixed
+    ones."""
 
-    @pytest.mark.parametrize("mode", ["custom", "generic"])
     @pytest.mark.parametrize("read", HOT_PATH_READS, ids=lambda r: r.name)
     async def test_no_unbounded_plan_shape(
-        self, seeded_pool: asyncpg.Pool[Any], read: HotRead, mode: str
+        self, seeded_pool: asyncpg.Pool[Any], read: HotRead
     ) -> None:
-        if mode == "custom":
-            plan = await _explain(seeded_pool, read.sql, *read.args())
-        else:
-            plan = await _explain_generic(seeded_pool, read.sql, *read.args())
+        plan = await _explain(seeded_pool, read.sql, *read.args())
         offenders = {
             "unbounded aggregate over events keyed on session_id alone (#1661/#1657)": (
                 find_unbounded_events_scan_over_seq(plan)
@@ -780,11 +789,14 @@ class TestPrimaryPlanShapeGate:
             "newest-row seek that sorts the whole session's rows (#2575)": (
                 find_unbounded_sorted_events_seek(plan)
             ),
+            "departs from the read's one bounded plan (#2575)": (
+                read.plan_check(plan) if read.plan_check else []
+            ),
         }
         fired = {shape: nodes for shape, nodes in offenders.items() if nodes}
         assert not fired, (
             f"read-path complexity regression in {read.name!r} "
-            f"(declared {read.declared_complexity}, {mode} plan): {fired}"
+            f"(declared {read.declared_complexity}): {fired}"
         )
 
 
@@ -1005,13 +1017,7 @@ class TestLifecycleArmPlanShapeGate:
             result = json.loads(result)
         plan = cast(dict[str, Any], result[0]["Plan"])
 
-        def _collect(node: dict[str, Any]) -> list[dict[str, Any]]:
-            out = [node]
-            for child in node.get("Plans", []):
-                out.extend(_collect(child))
-            return out
-
-        nodes = _collect(plan)
+        nodes = plan_nodes(plan)
         events_scans = [n for n in nodes if n.get("Relation Name") == "events"]
         assert events_scans, f"no scan node over events in plan: {plan}"
 
@@ -1067,13 +1073,7 @@ class TestLifecycleArmPlanShapeGate:
             f"lifecycle rows/index: {offenders}"
         )
 
-        def _collect(node: dict[str, Any]) -> list[dict[str, Any]]:
-            out = [node]
-            for child in node.get("Plans", []):
-                out.extend(_collect(child))
-            return out
-
-        nodes = _collect(plan)
+        nodes = plan_nodes(plan)
         events_scans = [n for n in nodes if n.get("Relation Name") == "events"]
         assert events_scans, f"no scan node over events in plan: {plan}"
         for scan in events_scans:
@@ -1083,19 +1083,15 @@ class TestLifecycleArmPlanShapeGate:
             )
 
 
-# ─── GATE 1d: the stimulus clamp + tool-parent lookups (#2575, GATING) ───────
+# ─── GATE 1d: the stimulus clamp's reads, not-vacuous (#2575, GATING) ────────
 #
 # #2391's retain-the-newest-stimulus clamp added two reads that no gate above
 # EXPLAINed: the registry keys on callable names, and both lived inside the
 # already-registered ``_latest_cumulative_tokens``. On a 1.78M-event session
-# both read every message row through ``events_session_cumtokens_idx``. The
-# tool-result anchor did so under every plan (~5 s per tool hop). The stimulus
-# seek did so under the GENERIC plan, which asyncpg's cached prepared statement
-# switches to after five executions (4.7 s); ``_retained_class_mass`` had the
-# same generic shape (433 ms). GATE 1 now covers that class for every
-# registered read under both plan modes. The gates here pin the clamp's reads
-# and the tool-parent lookups to their exact fixed shapes, and the not-vacuous
-# probes run the pre-#2575 SQL through the same checks.
+# both read every message row through ``events_session_cumtokens_idx``, a Limit
+# over a Sort over an index scan that trips neither the aggregate nor the Seq
+# Scan oracle. GATE 1 checks the fixed reads against their bounded plans and
+# the sorted-seek oracle; this gate runs the removed SQL through the same checks.
 
 _SQL_TOOL_ANCHOR_PRE_2575 = (
     "SELECT cumulative_tokens FROM events "
@@ -1116,142 +1112,21 @@ _SQL_STIMULUS_SEEK_PRE_2575 = (
     "ORDER BY seq DESC LIMIT 1"
 )
 
-_SQL_RETAINED_CLASS_MASS_PRE_2575 = (
-    "SELECT cumulative_text_mass, cumulative_tool_result_mass, "
-    "       cumulative_thinking_mass, cumulative_tool_use_mass, cumulative_image_mass "
-    "FROM events "
-    "WHERE session_id = $1 AND account_id = $2 "
-    "AND kind = 'message' AND cumulative_tokens IS NOT NULL "
-    "ORDER BY seq DESC LIMIT 1"
-)
-
-# (name, sql, args). ``tc_no_such_call`` is the worst case: no parent
-# anywhere, so the walk runs to the start of the session.
-_TOOL_PARENT_LOOKUPS: tuple[tuple[str, str, Callable[[], tuple[Any, ...]]], ...] = (
-    ("tool_anchor_seek", _TOOL_ANCHOR_SEEK_SQL, lambda: (_SESSION_ID, "tc_no_such_call", _N_LARGE)),
-    (
-        "lookup_tool_name_by_call_id",
-        _TOOL_NAME_BY_CALL_ID_SQL,
-        lambda: (_SESSION_ID, "tc_no_such_call", _ACCOUNT_ID),
-    ),
-    (
-        "_lookup_tool_parent_channel",
-        _TOOL_PARENT_CHANNEL_SQL,
-        lambda: (_SESSION_ID, "tc_no_such_call", _ACCOUNT_ID),
-    ),
-)
-
-
-def _plan_nodes(plan: dict[str, Any]) -> list[dict[str, Any]]:
-    nodes = [plan]
-    for child in plan.get("Plans", []):
-        nodes.extend(_plan_nodes(child))
-    return nodes
-
-
-def _backward_walk_offenders(plan: dict[str, Any], index_name: str) -> list[str]:
-    """Everything in the plan that is not a backward walk of ``index_name``: a
-    Sort or bitmap scan means the session's rows are gathered before the newest
-    one is picked."""
-    offenders: list[str] = []
-    for node in _plan_nodes(plan):
-        kind = node.get("Node Type")
-        if kind in ("Sort", "Bitmap Heap Scan"):
-            offenders.append(f"{kind} node")
-        if node.get("Relation Name") == "events" and (
-            kind != "Index Scan"
-            or node.get("Index Name") != index_name
-            or node.get("Scan Direction") != "Backward"
-        ):
-            offenders.append(f"{kind} on events via {node.get('Index Name')!r}")
-    return offenders
-
-
-def _stimulus_seek_offenders(plan: dict[str, Any]) -> list[str]:
-    """Everything in the plan that is not a unique-key seek: every ``events``
-    scan must be an Index Scan with an equality on ``seq``, and nothing sorts."""
-    offenders: list[str] = []
-    for node in _plan_nodes(plan):
-        kind = node.get("Node Type")
-        if kind == "Sort":
-            offenders.append("Sort node")
-        if node.get("Relation Name") == "events" and (
-            kind != "Index Scan" or "seq = " not in str(node.get("Index Cond", ""))
-        ):
-            offenders.append(f"{kind} on events, Index Cond {node.get('Index Cond')!r}")
-    return offenders
-
-
-async def _explain_both(
-    pool: asyncpg.Pool[Any], sql: str, *args: Any
-) -> list[tuple[str, dict[str, Any]]]:
-    return [
-        ("custom", await _explain(pool, sql, *args)),
-        ("generic", await _explain_generic(pool, sql, *args)),
-    ]
-
 
 @needs_docker
-class TestStimulusClampPlanShapeGate:
-    @pytest.mark.parametrize(("name", "sql", "args"), _TOOL_PARENT_LOOKUPS, ids=lambda v: v)
-    async def test_tool_parent_lookup_walks_the_tool_calls_index(
-        self,
-        seeded_pool: asyncpg.Pool[Any],
-        name: str,
-        sql: str,
-        args: Callable[[], tuple[Any, ...]],
-    ) -> None:
-        for mode, plan in await _explain_both(seeded_pool, sql, *args()):
-            assert not _backward_walk_offenders(plan, "events_assistant_tool_calls_idx"), (
-                name,
-                mode,
-                plan,
-            )
-            if name == "tool_anchor_seek":
-                # Bounded above by the tool row's own seq: the walk starts there.
-                scans = [n for n in _plan_nodes(plan) if n.get("Relation Name") == "events"]
-                assert all("seq <" in str(n.get("Index Cond", "")) for n in scans), (mode, plan)
-
-    async def test_stimulus_seek_is_a_unique_key_lookup(
-        self, seeded_pool: asyncpg.Pool[Any]
-    ) -> None:
-        for mode, plan in await _explain_both(seeded_pool, _STIMULUS_ROW_SEEK_SQL, _SESSION_ID):
-            assert not _stimulus_seek_offenders(plan), (mode, plan)
-
-    async def test_retained_class_mass_walks_the_cumtokens_index(
-        self, seeded_pool: asyncpg.Pool[Any]
-    ) -> None:
-        for mode, plan in await _explain_both(
-            seeded_pool, _RETAINED_CLASS_MASS_SQL, _SESSION_ID, _ACCOUNT_ID
-        ):
-            assert not _backward_walk_offenders(plan, "events_session_cumtokens_idx"), (mode, plan)
-
+class TestStimulusClampGateIsNotVacuous:
     async def test_pre_2575_forms_are_red(self, seeded_pool: asyncpg.Pool[Any]) -> None:
-        """Not-vacuous: the removed SQL fails the same checks on the same slate.
-        None of these depends on statistics: ``data->>'role'`` cannot match the
-        tool-calls index, the log-scan seek has no equality on ``seq``, and an
-        ``ORDER BY seq`` cannot be a sort-free walk of the cumtokens index."""
-        anchor_args = (_SESSION_ID, "tc_no_such_call")
-        for mode, plan in await _explain_both(seeded_pool, _SQL_TOOL_ANCHOR_PRE_2575, *anchor_args):
-            assert _backward_walk_offenders(plan, "events_assistant_tool_calls_idx"), (mode, plan)
-        for mode, plan in await _explain_both(
-            seeded_pool, _SQL_STIMULUS_SEEK_PRE_2575, _SESSION_ID
-        ):
-            assert _stimulus_seek_offenders(plan), (mode, plan)
-        for mode, plan in await _explain_both(
-            seeded_pool, _SQL_RETAINED_CLASS_MASS_PRE_2575, _SESSION_ID, _ACCOUNT_ID
-        ):
-            assert _backward_walk_offenders(plan, "events_session_cumtokens_idx"), (mode, plan)
-
-    async def test_gate_1_catches_the_pre_2575_anchor(self, seeded_pool: asyncpg.Pool[Any]) -> None:
-        """Not-vacuous for GATE 1's sorted-seek oracle: on this slate the removed
-        anchor seek plans as a sort of the session's rows (as on prod). The
-        removed generic-plan shapes depend on production statistics a
-        one-session slate does not reproduce; the checks above cover them."""
-        plan = await _explain(
+        """The removed SQL fails the same checks on the same slate. The shape
+        checks do not depend on statistics: ``data->>'role'`` cannot match the
+        tool-calls index, and the log scan has no equality on ``seq``. The
+        removed anchor also plans as a sort of the session's rows, as on prod."""
+        anchor = await _explain(
             seeded_pool, _SQL_TOOL_ANCHOR_PRE_2575, _SESSION_ID, "tc_no_such_call"
         )
-        assert find_unbounded_sorted_events_seek(plan), plan
+        stimulus = await _explain(seeded_pool, _SQL_STIMULUS_SEEK_PRE_2575, _SESSION_ID)
+        assert _TOOL_PARENT_SHAPE(anchor), anchor
+        assert find_unbounded_sorted_events_seek(anchor), anchor
+        assert _STIMULUS_SEEK_SHAPE(stimulus), stimulus
 
 
 # The whole windowed read, end to end, on the shape that regressed: a large
@@ -1282,10 +1157,7 @@ async def tool_stimulus_pool(
     from aios.db.pool import create_pool
     from aios.db.queries import append_event
     from aios.harness.reminders import reminder_event_data
-
-    def assistant(call_id: str) -> dict[str, Any]:
-        call = {"id": call_id, "type": "function", "function": {"name": "bash", "arguments": "{}"}}
-        return {"role": "assistant", "content": None, "tool_calls": [call]}
+    from tests.e2e.harness import assistant, tool_call
 
     pool = await create_pool(aios_env["AIOS_DB_URL"], min_size=1, max_size=4)
     await seed_large_session(
@@ -1295,12 +1167,15 @@ async def tool_stimulus_pool(
         window_tokens=_N_TOOL_STIMULUS * _DELTA // 2,
         session_id=_SESSION_ID_TOOL_STIMULUS,
     )
-    tail = [assistant("tc_2575_parent")]
+    tail = [assistant(tool_calls=[tool_call("bash", call_id="tc_2575_parent")])]
     tail += [
         {"role": "user" if i % 2 == 0 else "assistant", "content": f"plain {i}"}
         for i in range(_PLAIN_MESSAGES_BETWEEN)
     ]
-    tail += [assistant(f"tc_2575_between_{i}") for i in range(_TOOL_CALLS_BETWEEN)]
+    tail += [
+        assistant(tool_calls=[tool_call("bash", call_id=f"tc_2575_between_{i}")])
+        for i in range(_TOOL_CALLS_BETWEEN)
+    ]
     tail.append({"role": "tool", "tool_call_id": "tc_2575_parent", "content": "the output"})
     tail.append(reminder_event_data("concise", "a reminder written before a failed attempt"))
     async with pool.acquire() as conn:
@@ -1316,7 +1191,6 @@ async def tool_stimulus_pool(
             ).seq
             for data in tail
         ]
-        await conn.execute("ANALYZE events")
     try:
         yield pool, seqs[0], seqs[-2]
     finally:
@@ -1327,22 +1201,15 @@ def _events_rows_touched(plan: dict[str, Any]) -> int:
     """Rows the plan's ``events`` scans examined: emitted plus discarded by a
     filter or a lossy-bitmap recheck, over every loop."""
     touched = 0.0
-    for node in _plan_nodes(plan):
+    for node in plan_nodes(plan):
         if node.get("Relation Name") == "events":
             per_loop = (
                 node.get("Actual Rows", 0)
                 + node.get("Rows Removed by Filter", 0)
                 + node.get("Rows Removed by Index Recheck", 0)
             )
-            touched += per_loop * max(node.get("Actual Loops", 1), 1)
+            touched += per_loop * node.get("Actual Loops", 1)
     return int(touched)
-
-
-async def _explain_analyze(conn: asyncpg.Connection[Any], sql: str, *args: Any) -> dict[str, Any]:
-    result = await conn.fetchval(f"EXPLAIN (ANALYZE, FORMAT JSON) {sql}", *args)
-    if isinstance(result, str):
-        result = json.loads(result)
-    return cast(dict[str, Any], result[0]["Plan"])
 
 
 class _RecordingConn:
@@ -1387,10 +1254,10 @@ class TestStimulusClampReadsStayBounded:
                 model=f"fake/readpath-2575-{uuid.uuid4().hex[:8]}",
                 overhead_local=0,
             )
-            touched = {
-                sql: _events_rows_touched(await _explain_analyze(conn, sql, *args))
-                for sql, args in rec.reads
-            }
+        touched = {
+            sql: _events_rows_touched(await _explain(pool, sql, *args, analyze=True))
+            for sql, args in rec.reads
+        }
         # The clamp ran, and kept #2391's anchor: the window starts at the
         # issuing assistant, so the tool result renders.
         assert {_STIMULUS_ROW_SEEK_SQL, _TOOL_ANCHOR_SEEK_SQL} <= touched.keys()
@@ -1401,20 +1268,16 @@ class TestStimulusClampReadsStayBounded:
         # The anchor walk passed only the tool-calling assistants after the
         # parent, never the plain messages between them.
         assert touched[_TOOL_ANCHOR_SEEK_SQL] <= _TOOL_CALLS_BETWEEN + 1, touched
-
-    async def test_pre_2575_reads_exceed_the_budget(
-        self, tool_stimulus_pool: tuple[asyncpg.Pool[Any], int, int]
-    ) -> None:
-        """Not-vacuous: on the same slate the removed anchor seek examines
-        every message row. (The removed stimulus seek's O(session) generic plan
-        depends on production statistics this slate does not reproduce; the
-        statistics-independent shape probe above covers it.)"""
-        pool, _parent_seq, _tool_seq = tool_stimulus_pool
-        async with pool.acquire() as conn:
-            anchor = await _explain_analyze(
-                conn, _SQL_TOOL_ANCHOR_PRE_2575, _SESSION_ID_TOOL_STIMULUS, "tc_2575_parent"
-            )
-        assert _events_rows_touched(anchor) > _ROWS_TOUCHED_BUDGET, anchor
+        # Not-vacuous: on the same slate the removed anchor seek examines
+        # every message row.
+        removed = await _explain(
+            pool,
+            _SQL_TOOL_ANCHOR_PRE_2575,
+            _SESSION_ID_TOOL_STIMULUS,
+            "tc_2575_parent",
+            analyze=True,
+        )
+        assert _events_rows_touched(removed) > _ROWS_TOUCHED_BUDGET, removed
 
 
 # ─── GATE 3: REGISTRY-COMPLETENESS (deterministic, GATING) ───────────────────
@@ -1736,10 +1599,10 @@ class TestAdvisoryScalingBackstop:
         self, two_scale_pool: asyncpg.Pool[Any]
     ) -> None:
         t1 = await _time_read(
-            two_scale_pool, _SQL_LATEST_CUMULATIVE, (_SESSION_ID_SMALL,), repeats=_M_REPEATS
+            two_scale_pool, _LATEST_CUMULATIVE_TOKENS_SQL, (_SESSION_ID_SMALL,), repeats=_M_REPEATS
         )
         t2 = await _time_read(
-            two_scale_pool, _SQL_LATEST_CUMULATIVE, (_SESSION_ID,), repeats=_M_REPEATS
+            two_scale_pool, _LATEST_CUMULATIVE_TOKENS_SQL, (_SESSION_ID,), repeats=_M_REPEATS
         )
         ratio = t2 / t1 if t1 > 0 else float("inf")
         assert ratio < 2.5, (

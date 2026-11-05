@@ -92,6 +92,14 @@ def _scan_has_events_lower_bound(node: dict[str, Any]) -> bool:
     return False
 
 
+def plan_nodes(plan_node: dict[str, Any]) -> list[dict[str, Any]]:
+    """Every node of an EXPLAIN (FORMAT JSON) plan tree, root first."""
+    nodes = [plan_node]
+    for child in plan_node.get("Plans", []):
+        nodes.extend(plan_nodes(child))
+    return nodes
+
+
 def _collect_scan_relations(node: dict[str, Any]) -> list[dict[str, Any]]:
     """All scan nodes at/under ``node`` that name a ``Relation Name``."""
     out: list[dict[str, Any]] = []

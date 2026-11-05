@@ -46,7 +46,7 @@ from typing import Any, cast
 import asyncpg
 import pytest
 
-from aios.db.queries.events import _RETAINED_CLASS_MASS_SQL
+from aios.db.queries.events import _LATEST_CUMULATIVE_TOKENS_SQL, _RETAINED_CLASS_MASS_SQL
 from tests.conftest import needs_docker
 from tests.support import find_unbounded_events_aggregates
 
@@ -222,23 +222,15 @@ FROM deltas
 GROUP BY cls
 """
 
-# The O(1) post-fix reads the per-turn path now runs (the production SQL of
-# ``_retained_class_mass`` and the omission boundary seek in ``events.py``).
-_FIXED_RETAINED_MASS_SQL = _RETAINED_CLASS_MASS_SQL
-
+# The O(1) post-fix reads the per-turn path now runs: ``_retained_class_mass``
+# and ``_latest_cumulative_tokens`` are imported from ``events.py``; this is a
+# copy of the omission boundary seek inlined in ``read_windowed_events``.
 _FIXED_OMISSION_BOUNDARY_SQL = (
     "SELECT seq, cumulative_messages "
     "FROM events "
     "WHERE session_id = $1 AND account_id = $2 AND kind = 'message' "
     "AND cumulative_tokens <= $3 "
     "ORDER BY cumulative_tokens DESC LIMIT 1"
-)
-
-_LATEST_CUMULATIVE_SQL = (
-    "SELECT cumulative_tokens FROM events "
-    "WHERE session_id = $1 AND kind = 'message' "
-    "AND cumulative_tokens IS NOT NULL "
-    "ORDER BY seq DESC LIMIT 1"
 )
 
 
@@ -252,7 +244,7 @@ class TestNoUnboundedEventsAggregateOnRead:
         """PRIMARY term. ``_retained_class_mass`` now reads the latest message
         row's four per-class cumulative masses (one index seek), so its plan
         must carry NO unbounded WindowAgg/Aggregate over ``events``."""
-        plan = await _explain(seeded_pool, _FIXED_RETAINED_MASS_SQL, _SESSION_ID, _ACCOUNT_ID)
+        plan = await _explain(seeded_pool, _RETAINED_CLASS_MASS_SQL, _SESSION_ID, _ACCOUNT_ID)
         found = find_unbounded_events_aggregates(plan)
         assert not found, (
             f"read-tax regression in _retained_class_mass: {len(found)} unbounded "
@@ -277,7 +269,7 @@ class TestNoUnboundedEventsAggregateOnRead:
     async def test_latest_cumulative_seek_is_o1(self, seeded_pool: asyncpg.Pool[Any]) -> None:
         """The ``total`` seek (``_latest_cumulative_tokens``) was already O(1);
         pin it here so the whole per-turn read is covered by one guard."""
-        plan = await _explain(seeded_pool, _LATEST_CUMULATIVE_SQL, _SESSION_ID)
+        plan = await _explain(seeded_pool, _LATEST_CUMULATIVE_TOKENS_SQL, _SESSION_ID)
         found = find_unbounded_events_aggregates(plan)
         assert not found, (
             f"unexpected unbounded aggregate over events in the latest-cumulative "
