@@ -120,6 +120,15 @@ async def create_pool(db_url: str, *, min_size: int = 1, max_size: int = 8) -> a
             # their recursive-CTE cost estimates clear jit_above_cost while the
             # actual row counts stay small.
             "jit": "off",
+            # asyncpg caches a prepared statement per connection, and under the
+            # default ``auto`` mode Postgres switches it to a generic plan after
+            # five executions. A generic plan is costed for an average session,
+            # and sessions here are heavily skewed (one has 1.78M events, most
+            # have hundreds), so on the large ones it chose plans that sort every
+            # row of the session: 4.7 s for the windower's stimulus seek (#2575).
+            # Planning every execution with its real parameters cost 0.3-1 ms
+            # per statement on prod.
+            "plan_cache_mode": "force_custom_plan",
             **_POOL_TCP_KEEPALIVE_SETTINGS,
         },
     )

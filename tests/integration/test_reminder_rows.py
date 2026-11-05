@@ -307,6 +307,40 @@ class TestWindowerAnchorsAToolResultOnItsAssistant:
         rendered = [(m.get("role"), str(m.get("content"))[:60]) for m in ctx.messages]
         assert any(role == "tool" for role, _ in rendered), rendered
 
+    async def test_a_later_reuse_of_the_call_id_does_not_move_the_anchor(
+        self, pool_session: tuple[asyncpg.Pool[Any], str]
+    ) -> None:
+        """The anchor is found walking back from the tool row itself, the same
+        "preceding assistant" rule ``_prune_orphans`` applies. A later assistant
+        that reuses the call id (its own result is refused by the unique
+        tool-result index) must not move the anchor past the result: anchored
+        there, the clamp would evict the result it exists to keep."""
+        pool, sid = pool_session
+        big = "lorem ipsum dolor sit amet " * 400
+        await sessions_service.append_user_message(pool, sid, big, account_id=_ACCOUNT)
+        call = {"id": "t1", "type": "function", "function": {"name": "bash", "arguments": "{}"}}
+        async with pool.acquire() as conn:
+            for data in (
+                {"role": "assistant", "content": "", "reacting_to": 1, "tool_calls": [call]},
+                {"role": "tool", "tool_call_id": "t1", "content": "the output"},
+                {"role": "assistant", "content": "", "reacting_to": 3, "tool_calls": [call]},
+                _reminder_data(),
+            ):
+                await queries.append_event(
+                    conn, account_id=_ACCOUNT, session_id=sid, kind="message", data=data
+                )
+            windowed = await events_q.read_windowed_events(
+                conn,
+                sid,
+                account_id=_ACCOUNT,
+                window_min=0,
+                window_max=40,
+                model=f"fake/anchor-{uuid.uuid4().hex[:8]}",
+                overhead_local=0,
+            )
+        seqs = [e.seq for e in windowed.events]
+        assert seqs == [2, 3, 4, 5], f"the window must start at the issuing assistant; got {seqs}"
+
 
 class TestReminderRowsArePricedBare:
     async def test_cumulative_tokens_is_bare_render_plus_separator(

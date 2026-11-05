@@ -116,9 +116,10 @@ def is_errored_lifecycle_event(kind: str, data: dict[str, Any]) -> bool:
 # never advances a build's ``reacting_to``. Every reader that must tell
 # reminders apart from real user rows routes through the constants below —
 # the SQL readers through :data:`REMINDER_EXCLUDE_SQL` (the sweep's
-# unreacted-rows gate, the inbound budget, the windower's
-# retain-the-stimulus clamp), the Python readers through
-# :func:`is_reminder_event` — and both are THE SAME predicate: a message
+# unreacted-rows gate, the inbound budget), the Python readers through
+# :func:`is_reminder_event` (including ``append_event``'s stimulus test, which
+# maintains the ``last_stimulus_seq`` the windower's retain-the-stimulus clamp
+# reads) — and both are THE SAME predicate: a message
 # event whose ``metadata`` is an object carrying the key (no role term on
 # either side; the SQL's object test mirrors the Python ``isinstance`` so a
 # scalar or array ``metadata`` that happens to contain the string is a

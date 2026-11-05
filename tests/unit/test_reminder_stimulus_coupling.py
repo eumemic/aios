@@ -5,12 +5,14 @@ A reminder is a ``role='user'`` message row tagged
 non-stimulus (no ``last_stimulus_seq`` / ``last_user_seq`` / ``updated_at``
 bump). Every LOG-DERIVED reader of user rows must agree, or a reminder past
 the reaction watermark would (a) defeat the sweep's incomplete-batch filter,
-(b) consume the inbound budget, (c) be retained by the windower's tail clamp
-in place of the real stimulus. These tests pin that every such reader routes
-through the single-source constants in ``aios.models.events`` — and that the
-SQL form is NULL-safe, since ``data->'metadata'`` is NULL on every row without
-a metadata key (tool results, plain user posts) and ``NOT (NULL ? k)`` would
-exclude those rows entirely.
+(b) consume the inbound budget. The windower's tail clamp (c) reads
+``last_stimulus_seq`` itself, so it agrees by construction: a reminder is
+never retained in place of the real stimulus. These tests pin that every
+such reader routes through the single-source constants in
+``aios.models.events`` — and that the SQL form is NULL-safe, since
+``data->'metadata'`` is NULL on every row without a metadata key (tool
+results, plain user posts) and ``NOT (NULL ? k)`` would exclude those rows
+entirely.
 """
 
 from __future__ import annotations
@@ -107,15 +109,17 @@ class TestSqlForm:
         assert "jsonb_typeof(data->'metadata') = 'object'" in sql
 
     def test_windower_tail_clamp_keys_on_the_newest_stimulus(self) -> None:
-        assert REMINDER_EXCLUDE_SQL.format(col="data") in events_mod._STIMULUS_ROW_SQL
-        assert "role <> 'assistant'" in events_mod._STIMULUS_ROW_SQL
-        seek_src = inspect.getsource(events_mod._latest_cumulative_tokens)
-        assert "stimulus_only" in seek_src
-        assert "_STIMULUS_ROW_SQL" in seek_src
-        # A tool-result stimulus anchors on its issuing assistant.
-        assert "jsonb_build_object('id', $2::text)" in seek_src
+        # The newest stimulus comes from the scalar ``append_event`` maintains
+        # with the stimulus predicate (pinned by TestAppendEventReadsThePredicate).
+        assert "e.seq = s.last_stimulus_seq" in events_mod._STIMULUS_ROW_SEEK_SQL
+        # A tool-result stimulus anchors on its issuing assistant, found by
+        # walking back from the tool row's own seq.
+        assert (
+            events_mod._TOOL_PARENT_ROW_SQL.format(call_id="$2") in events_mod._TOOL_ANCHOR_SEEK_SQL
+        )
+        assert "seq < $3" in events_mod._TOOL_ANCHOR_SEEK_SQL
         clamp_src = inspect.getsource(events_mod.read_windowed_events)
-        assert "_latest_cumulative_tokens(conn, session_id, stimulus_only=True)" in clamp_src
+        assert "_stimulus_anchor_tokens(conn, session_id)" in clamp_src
 
     def test_connectors_cannot_mint_a_reminder(self) -> None:
         assert REMINDER_METADATA_KEY in _RESERVED_METADATA_KEYS
