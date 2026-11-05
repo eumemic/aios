@@ -227,9 +227,7 @@ class TestToolAnchorSeekBounded:
                 _SESSION_ID,
                 assistant_seq,
             )
-            anchor = await events_q._latest_cumulative_tokens(
-                conn, _SESSION_ID, stimulus_only=True
-            )
+            anchor = await events_q._latest_cumulative_tokens(conn, _SESSION_ID, stimulus_only=True)
         assert anchor == expected
 
     async def test_anchor_seek_plan_is_bounded(
@@ -266,7 +264,6 @@ class TestToolAnchorSeekBounded:
                 overhead_local=0,
             )
             assert rec.calls, "read_windowed_events issued no SQL"
-            assert any(sql == events_q.TOOL_ANCHOR_SQL for sql, _ in rec.calls)
             violations: dict[str, list[str]] = {}
             for sql, args in rec.calls:
                 plan = await _explain_analyze(conn, sql, *args)
@@ -274,6 +271,7 @@ class TestToolAnchorSeekBounded:
                 if bad:
                     violations[sql] = bad
         assert not violations, violations
+        assert any(sql == events_q.TOOL_ANCHOR_SQL for sql, _ in rec.calls)
         # The clamp still retains the issuing assistant (the #2391 anchor).
         assert windowed.events and windowed.events[0].seq <= assistant_seq
 
@@ -285,5 +283,7 @@ class TestToolAnchorSeekBounded:
         consider every tool-calling assistant in the session."""
         pool, _assistant_seq, _tool_seq = seeded
         async with pool.acquire() as conn:
-            plan = await _explain_analyze(conn, _SQL_PRE_2575_ANCHOR, _SESSION_ID, "tc_no_such_call")
+            plan = await _explain_analyze(
+                conn, _SQL_PRE_2575_ANCHOR, _SESSION_ID, "tc_no_such_call"
+            )
         assert _offenders(plan), plan

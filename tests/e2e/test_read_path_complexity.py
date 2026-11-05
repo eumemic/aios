@@ -80,6 +80,7 @@ from typing import Any, cast
 import asyncpg
 import pytest
 
+from aios.db.queries.events import TOOL_ANCHOR_SQL
 from aios.harness.loop import _PREEMPT_STARVATION_COUNT_SQL
 from aios.harness.sweep import (
     ALL_RESULT_ROWS_SQL,
@@ -573,6 +574,16 @@ HOT_PATH_READS: list[HotRead] = [
         args=lambda: (_SESSION_ID,),
         max_rows=_O1_ROW_CEIL,
     ),
+    # #2575: the tool-result stimulus -> issuing-assistant anchor seek inside
+    # ``_latest_cumulative_tokens(stimulus_only=True)``. Arg 3 is the tool
+    # row's seq; a miss id is the worst case (the walk runs to its cap).
+    HotRead(
+        name="tool_anchor_seek",
+        declared_complexity="O(distance to parent), capped",
+        sql=TOOL_ANCHOR_SQL,
+        args=lambda: (_SESSION_ID, "tc_no_such_call", _N_LARGE),
+        max_rows=_O1_ROW_CEIL,
+    ),
     HotRead(
         name="_retained_class_mass",
         declared_complexity="O(1)",
@@ -769,6 +780,38 @@ _OMISSION_738_COUNT_SQL = (
     "FROM events "
     "WHERE session_id = $1 AND account_id = $2 AND kind = 'message'"
 )
+
+
+@needs_docker
+class TestToolAnchorSeekPlanShape:
+    """#2575: the tool-result anchor seek must never plan as a Bitmap Heap
+    Scan over ``events`` (the shape that read every message row of Ultron's
+    session via ``events_session_cumtokens_idx``) and must walk ``seq``
+    backward from the tool row (an Index Cond on ``seq``), bounded by a
+    LIMIT, so its cost is O(distance) rather than O(session)."""
+
+    async def test_no_bitmap_heap_scan_and_seq_bounded(
+        self, seeded_pool: asyncpg.Pool[Any]
+    ) -> None:
+        plan = await _explain(seeded_pool, TOOL_ANCHOR_SQL, _SESSION_ID, "tc_x", _N_LARGE)
+        nodes: list[dict[str, Any]] = []
+
+        def walk(node: dict[str, Any]) -> None:
+            nodes.append(node)
+            for child in node.get("Plans", []):
+                walk(child)
+
+        walk(plan)
+        events_scans = [n for n in nodes if n.get("Relation Name") == "events"]
+        assert events_scans, plan
+        assert not [n for n in nodes if n.get("Node Type") == "Bitmap Heap Scan"], plan
+        for scan in events_scans:
+            assert scan.get("Node Type") in ("Index Scan", "Index Only Scan"), plan
+            assert scan.get("Scan Direction") == "Backward", plan
+            assert "seq <" in str(scan.get("Index Cond", "")), plan
+        # A LIMIT sits above the walk: the inner cap, not the session size,
+        # bounds how many rows it reads.
+        assert any(n.get("Node Type") == "Limit" for n in nodes), plan
 
 
 @needs_docker
