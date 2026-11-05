@@ -1,0 +1,85 @@
+name: pipeline-provenance-rerun
+
+# Companion to pipeline-provenance.yml. The canonical review record that makes `reviewed:green`
+# valid for a head is a PR COMMENT, and so is an `override:chief` ruling. Comments do not fire
+# pull_request_target. An issue_comment-triggered job cannot report the check itself (its check
+# suite belongs to the default branch, not the PR head), so it RE-RUNS the latest
+# pipeline-provenance run for the PR's live head; that run re-reads labels + thread live.
+# Deletions/edits re-run too, so removing or vetoing a record can turn a green check red again.
+#
+# Non-pipeline PRs exit early with no re-run: pipeline-provenance passes them ungated, so a re-run
+# could never change the result.
+#
+# RUN LOOKUP. A run is selected by BOTH:
+#   * head_sha = the PR's live head (server-side filter). For a pull_request_target run, GitHub
+#     records the run's `head_sha`/`head_branch` as the PR HEAD commit/ref. Only the job's
+#     GITHUB_SHA/GITHUB_REF env is the base tip. Verified on a live run: pytorch/pytorch run
+#     42084347794 (event pull_request_target) has head_sha 82ecda34e358... = PR #203471's
+#     head.sha, while that PR's base.sha is a3d2ba8af60c....
+#   * `.pull_requests[].number == PR`: head_sha alone does not identify the PR, because two PRs
+#     can share a head commit.
+# `pull_requests` is EMPTY for a fork PR (seen on the same pytorch runs). Pipeline PRs are same-repo
+# (`dev-pipeline/*` branches of this repo), so an empty match means something is wrong; it fails
+# loudly rather than re-running a guess. The newest matching run by created_at wins.
+#
+# Only GitHub metadata is read; nothing is checked out and no comment text reaches a shell (the
+# PR number is the only event field used).
+
+on:
+  issue_comment:
+    types: [created, edited, deleted]
+
+concurrency:
+  group: pipeline-provenance-rerun-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  rerun-on-comment:
+    if: github.event.issue.pull_request
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      actions: write
+      pull-requests: read
+    steps:
+      - name: Re-run pipeline-provenance for the PR head
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.issue.number }}
+        run: |
+          set -euo pipefail
+          pr_json=$(gh api "repos/${REPO}/pulls/${PR}")
+          state=$(jq -er '.state' <<<"$pr_json")
+          head=$(jq -er '.head.sha' <<<"$pr_json")
+          if [[ "$state" != "open" ]]; then echo "PR #${PR} is ${state}; nothing to re-run"; exit 0; fi
+          # Same predicate as scripts/pipeline_provenance.py is_pipeline_pr. A payload jq cannot
+          # read fails the step; it is never treated as "not a pipeline PR".
+          pipeline=$(jq -r '(.head.ref | startswith("dev-pipeline/")) or any(.labels[]; .name == "pipeline:v2")' <<<"$pr_json")
+          if [[ "$pipeline" != "true" ]]; then
+            echo "PR #${PR} is not a pipeline PR; pipeline-provenance passes it ungated, nothing to re-run"
+            exit 0
+          fi
+          runs="repos/${REPO}/actions/workflows/pipeline-provenance.yml/runs?event=pull_request_target&head_sha=${head}&per_page=100"
+          # A run still in flight already reads the thread live at its fetch step, but it may have
+          # fetched before this comment landed, so wait for it to finish and re-run it anyway.
+          for _ in $(seq 1 60); do
+            run=$(gh api --paginate "$runs" | jq -rs --argjson pr "$PR" \
+              '[.[].workflow_runs[] | select(any(.pull_requests[]?; .number == $pr))]
+               | sort_by(.created_at) | last | select(.) | "\(.id) \(.status)"')
+            if [[ -z "$run" ]]; then
+              echo "::error::no pipeline-provenance run found for PR #${PR} head ${head} (pull_requests empty or unmatched: a fork PR, or the run is missing)"
+              exit 1
+            fi
+            read -r run_id status <<<"$run"
+            if [[ "$status" == "completed" ]]; then
+              gh api -X POST "repos/${REPO}/actions/runs/${run_id}/rerun"
+              echo "re-ran pipeline-provenance run ${run_id} for PR #${PR} head ${head}"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::error::pipeline-provenance run ${run_id} for PR #${PR} did not complete in time"
+          exit 1

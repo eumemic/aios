@@ -1,0 +1,82 @@
+name: pipeline-provenance
+
+# REQUIRED STATUS CHECK on master (aios#2572 provenance miss). A dev-pipeline PR (head ref
+# `dev-pipeline/*` OR label `pipeline:v2`) may merge into master only with BOTH a `reviewed:green`
+# valid for the LIVE head (the reconciler's company#349 rule: flat label + a trusted canonical
+# review record green at exactly this head, or the legacy `reviewed:green@<sha12>` for it) AND
+# exactly one `risk:tier-N`, N in 1..AUTO_MERGE_MAX_TIER. Every other PR passes in seconds.
+# OVERRIDE: a pipeline PR labelled `override:chief` instead passes only on an AIOS Bot comment
+# (`eumemic`) `override:chief @ <live head sha, >=12 hex> ruling: Chief|Tom ...`. Seats never
+# apply it. See the script docstring.
+# The decision lives in `scripts/pipeline_provenance.py` (unit-tested in
+# tests/unit/test_pipeline_provenance.py); this file only fetches live state and calls it.
+#
+# WHY pull_request_target: it runs THIS file and the script from the BASE branch, so a pipeline PR
+# cannot edit the gate that judges it (under `pull_request` the PR's own copy would run). That is
+# safe here because the job never checks out or executes PR code and its token is read-only.
+#
+# Re-evaluation triggers:
+#   * synchronize           -- a new head invalidates a green for the old one (fails until re-review)
+#   * labeled / unlabeled   -- the reconciler stamps risk:tier-N then reviewed:green AFTER it posts
+#                              the canonical record, so the last label event sees the record
+#   * edited                -- base retargeted onto master
+#   * a review record / override posted, edited or deleted AFTER the last run:
+#     pipeline-provenance-rerun.yml re-runs this workflow's newest run for the PR (matched by
+#     head_sha AND pull_requests[].number) on every comment on a pipeline PR. The run's
+#     check attaches to that run's head_sha, which for pull_request_target is the PR head.
+#     This job reads the LIVE head from pulls/{n}, never GITHUB_SHA (the base tip).
+#
+# No `if:`, no paths/branches filter: a required check must conclude on EVERY PR, never sit at
+# "skipped"/"expected".
+#
+# ROLLOUT ORDER (load-bearing): the dev-pipeline reconciler's CI read (eumemic-company
+# dev_pipeline_lib `_read_ci` -> `_check_runs_terminal`) counts EVERY check run on the head, and
+# this check is red on every pipeline PR until review stamps it. Until that read excludes
+# `pipeline-provenance`, landing this file routes every pipeline PR to the `ci` fix transition
+# instead of review (deadlock). Merge this only after the reconciler-side exclusion is live.
+#
+# ADMIN STEP: add `pipeline-provenance` to master's required checks PINNED to the GitHub Actions
+# app (`{"context": "pipeline-provenance", "app_id": 15368}`, like the existing checks). An
+# unpinned context can be satisfied by a commit status any write token can POST.
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, labeled, unlabeled, edited]
+
+concurrency:
+  group: pipeline-provenance-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  pipeline-provenance:
+    name: pipeline-provenance
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
+    steps:
+      # Base-branch checkout (pull_request_target default): the gate script, never PR code.
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          sparse-checkout: scripts/pipeline_provenance.py
+          sparse-checkout-cone-mode: false
+
+      - name: Fetch live PR and comment thread
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          # Live reads, not the event payload: labels/head may have moved since the event fired
+          # (and a re-run replays the original payload). Any read failure fails the check closed.
+          gh api "repos/${REPO}/pulls/${PR}" > pr.json
+          gh api --paginate "repos/${REPO}/issues/${PR}/comments?per_page=100" --jq '.[]' > comments.jsonl
+
+      - name: Evaluate provenance
+        run: python3 scripts/pipeline_provenance.py --pr pr.json --comments comments.jsonl
