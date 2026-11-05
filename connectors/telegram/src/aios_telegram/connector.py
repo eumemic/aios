@@ -45,6 +45,11 @@ from aios_connector_http import (
     AttachmentError,
     HttpConnector,
     SandboxPath,
+    append_markers,
+    coerce_size,
+    drop_attachment,
+    is_failed_download,
+    is_over_cap,
     tool,
 )
 from telegram import (
@@ -321,7 +326,7 @@ class TelegramConnector(HttpConnector):
             "display_name": msg.sender_name or str(msg.sender_id),
         }
         metadata = build_metadata(msg, state.bot_id)
-        attachments = await self._download_attachments(state, msg.attachments)
+        attachments, markers = await self._collect_attachments(state, msg.attachments)
         # Telegram's (chat_id, message_id) pair is the platform's
         # canonical message identity; feeding it as ``event_id`` lets
         # aios's ``inbound_acks`` dedupe a redelivered update after a
@@ -348,7 +353,10 @@ class TelegramConnector(HttpConnector):
             event_id=event_id,
             chat_id=str(msg.chat_id),
             sender=sender_payload,
-            content=msg.text,
+            # Undelivered attachments surface as marker lines after the
+            # message text (#2551). event_id above is platform-derived,
+            # so markers never perturb dedup.
+            content=append_markers(msg.text, markers),
             attachments=attachments,
             metadata=metadata,
             timestamp=_iso(msg.timestamp_ms),
@@ -402,11 +410,46 @@ class TelegramConnector(HttpConnector):
         state: _TelegramConnectionState,
         attachments: tuple[Attachment, ...],
     ) -> list[tuple[str, bytes, str]] | None:
-        """Download each attachment, validate size + bytes, return runtime tuples."""
+        """Runtime tuples only; see :meth:`_collect_attachments`."""
+        tuples, _ = await self._collect_attachments(state, attachments)
+        return tuples
+
+    async def _collect_attachments(
+        self,
+        state: _TelegramConnectionState,
+        attachments: tuple[Attachment, ...],
+    ) -> tuple[list[tuple[str, bytes, str]] | None, list[str]]:
+        """Download each attachment, validate size + bytes, return runtime tuples.
+
+        Returns ``(tuples, markers)``.  Every per-attachment exit that
+        skips the attachment appends one ``[attachment not delivered:
+        ...]`` marker (#2551), in attachment order:
+
+        * ``_download_one`` swallowed a getFile / download failure →
+          ``download failed``;
+        * 0-byte tempfile while Telegram declared ``file_size`` > 0 →
+          ``download failed`` (never delivered as an empty file);
+        * ``as_params`` raised :class:`AttachmentError` → over-cap or
+          ``rejected``;
+        * reading the tempfile failed → ``rejected``.
+        """
         host_paths = await asyncio.gather(*(self._download_one(state, a) for a in attachments))
         out: list[tuple[str, bytes, str]] = []
+        markers: list[str] = []
         for att, host_path in zip(attachments, host_paths, strict=True):
+            declared = coerce_size(att.file_size)
             if host_path is None:
+                drop_attachment(
+                    markers,
+                    log,
+                    "telegram",
+                    name=att.filename,
+                    content_type=att.content_type,
+                    size=declared,
+                    failed_download=True,
+                    reason="download_failed",
+                    file_id=att.file_id,
+                )
                 continue
             # Unconditionally drop the per-attachment temp file once we've
             # taken the runtime tuple. ``_download_one`` creates it with
@@ -418,6 +461,25 @@ class TelegramConnector(HttpConnector):
             # down. The runtime tuple carries the in-memory ``blob``
             # bytes; the on-disk path is single-use scratch.
             try:
+                try:
+                    st_size: int | None = coerce_size(host_path.stat().st_size)
+                except OSError:
+                    st_size = None  # as_params' existing handling decides
+                if is_failed_download(st_size, declared):
+                    drop_attachment(
+                        markers,
+                        log,
+                        "telegram",
+                        name=att.filename,
+                        content_type=att.content_type,
+                        size=declared,
+                        failed_download=True,
+                        reason="download_failed",
+                        file_id=att.file_id,
+                        st_size=st_size,
+                        declared_size=declared,
+                    )
+                    continue
                 candidate = SDKAttachment(
                     host_path=str(host_path),
                     filename=att.filename,
@@ -432,6 +494,21 @@ class TelegramConnector(HttpConnector):
                         filename=att.filename,
                         error=str(err),
                     )
+                    size = st_size if st_size is not None else declared
+                    over = is_over_cap(size)
+                    drop_attachment(
+                        markers,
+                        log,
+                        "telegram",
+                        name=att.filename,
+                        content_type=att.content_type,
+                        size=size,
+                        over_cap=over,
+                        reason="over_cap" if over else "rejected",
+                        file_id=att.file_id,
+                        st_size=st_size,
+                        declared_size=declared,
+                    )
                     continue
                 try:
                     blob = host_path.read_bytes()
@@ -442,11 +519,21 @@ class TelegramConnector(HttpConnector):
                         filename=att.filename,
                         error=str(err),
                     )
+                    drop_attachment(
+                        markers,
+                        log,
+                        "telegram",
+                        name=att.filename,
+                        content_type=att.content_type,
+                        size=st_size if st_size is not None else declared,
+                        reason="rejected",
+                        file_id=att.file_id,
+                    )
                     continue
                 out.append((att.filename, blob, att.content_type))
             finally:
                 await asyncio.to_thread(host_path.unlink, missing_ok=True)
-        return out or None
+        return (out or None), markers
 
     async def _download_one(self, state: _TelegramConnectionState, att: Attachment) -> Path | None:
         try:
