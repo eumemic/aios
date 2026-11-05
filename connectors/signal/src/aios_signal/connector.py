@@ -35,6 +35,7 @@ mixed in via :class:`SignalManagementMixin`.
 from __future__ import annotations
 
 import asyncio
+import os
 from collections import deque
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
@@ -842,7 +843,7 @@ class SignalConnector(SignalManagementMixin, HttpConnector):
                 )
                 continue
             try:
-                st_size: int | None = coerce_size(Path(host_path).stat().st_size)
+                st_size: int | None = coerce_size(os.stat(host_path).st_size)
             except OSError:
                 st_size = None  # as_params' existing handling decides
             partial = (

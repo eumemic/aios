@@ -9,7 +9,6 @@ empty event.  Each must now surface as an ``[attachment not delivered:
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
@@ -41,7 +40,13 @@ def _sparse(path: Path, size: int) -> Path:
 
 
 def _att(path: Path, name: str, ctype: str, size: Any) -> dict[str, Any]:
-    return {"contentType": ctype, "filename": name, "id": path.name, "size": size, "file": str(path)}
+    return {
+        "contentType": ctype,
+        "filename": name,
+        "id": path.name,
+        "size": size,
+        "file": str(path),
+    }
 
 
 def _envelope(attachments: list[dict[str, Any]], text: str | None = None) -> dict[str, Any]:
@@ -214,18 +219,12 @@ async def test_generic_rejection_marker(
 async def test_stat_oserror_does_not_escape(
     connector: SignalConnector, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    """The guarded pre-stat raises (file never downloaded); the message is
+    still emitted, the sibling attachment is delivered, nothing escapes."""
     missing = tmp_path / "att" / "gone.pdf"
     ok = tmp_path / "att" / "ok.txt"
     ok.parent.mkdir(parents=True)
     ok.write_bytes(b"ok")
-    real_stat = Path.stat
-
-    def flaky_stat(self: Path, *a: Any, **k: Any) -> os.stat_result:
-        if self.name == "gone.pdf":
-            raise PermissionError("denied")
-        return real_stat(self, *a, **k)
-
-    monkeypatch.setattr(Path, "stat", flaky_stat)
     kwargs, _ = await _run(
         connector,
         monkeypatch,
@@ -234,7 +233,10 @@ async def test_stat_oserror_does_not_escape(
         ),
     )
     assert kwargs["attachments"] == [("ok.txt", b"ok", "text/plain")]
-    assert kwargs["content"].endswith(": rejected]")
+    assert (
+        kwargs["content"]
+        == "[attachment not delivered: 'gone.pdf', application/pdf, 5 B: rejected]"
+    )
 
 
 async def test_r2_leaves_file_like_over_cap_path(

@@ -73,9 +73,7 @@ async def _collect(
 
 
 def _reasons(logs: list[dict[str, Any]]) -> list[str]:
-    return [
-        e["reason"] for e in logs if e["event"] == "telegram.inbound.attachment_not_delivered"
-    ]
+    return [e["reason"] for e in logs if e["event"] == "telegram.inbound.attachment_not_delivered"]
 
 
 async def test_over_cap_marker_and_no_tempfile(isolated_tmp: Path) -> None:

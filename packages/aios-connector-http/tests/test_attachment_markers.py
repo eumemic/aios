@@ -14,7 +14,6 @@ from typing import Any
 
 import pytest
 import structlog
-
 from aios_connector_http import sandbox
 from aios_connector_http.sandbox import (
     FALLBACK_MARKER,
@@ -329,8 +328,13 @@ def test_drop_attachment_stdlib_logger_reserved_key_safe(
     markers: list[str] = []
     with caplog.at_level(logging.WARNING, logger="t.drop"):
         drop_attachment(
-            markers, logger, "signal", name="x.pdf", content_type="application/pdf",
-            size=7441443, reason="over_cap",
+            markers,
+            logger,
+            "signal",
+            name="x.pdf",
+            content_type="application/pdf",
+            size=7441443,
+            reason="over_cap",
         )
     [rec] = [r for r in caplog.records if r.name == "t.drop"]
     assert rec.__dict__["attachment_name"] == "x.pdf"

@@ -18,6 +18,7 @@ importing it: the SDK has zero aios-server dependency.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import re
@@ -369,10 +370,8 @@ def _emit(logger: Any, event: str, **fields: Any) -> None:
         except TypeError:
             logger.warning("%s %s", event, fields)
     except Exception:
-        try:
+        with contextlib.suppress(Exception):
             logging.getLogger("aios_connector_http").warning("%s %r", event, fields)
-        except Exception:
-            pass
 
 
 def drop_attachment(
@@ -398,9 +397,7 @@ def drop_attachment(
     """
     build = builder or rejection_marker
     try:
-        marker = build(
-            name, content_type, size, failed_download=failed_download, over_cap=over_cap
-        )
+        marker = build(name, content_type, size, failed_download=failed_download, over_cap=over_cap)
         if not isinstance(marker, str) or not marker:
             raise ValueError("empty marker")
     except Exception as err:
@@ -411,10 +408,8 @@ def drop_attachment(
             reason=reason,
             error_type=type(err).__name__,
         )
-    try:
+    with contextlib.suppress(Exception):
         markers.append(marker)
-    except Exception:
-        pass
     try:
         attachment_name = safe_marker(name, content_type)[0]
     except Exception:
