@@ -96,10 +96,11 @@ TOOL_ANCHOR_WALK_CAP = 1024
 # per tool hop on Ultron's 1.78M-event session). Here the inner subquery
 # carries ONLY the predicates of ``events_assistant_tool_calls_idx``
 # (``kind``/``role`` columns + ``data ? 'tool_calls'``) plus ``seq < $3`` (the
-# tool row's own seq) under ``ORDER BY seq DESC LIMIT $4``: the partial
+# tool row's own seq) under ``ORDER BY seq DESC LIMIT <cap>``: the partial
 # cumtokens index cannot match it, and the only sane plan is an Index Scan
 # Backward that the outer ``LIMIT 1`` stops at the first containment hit --
-# O(distance to the parent), hard-capped at ``$4`` rows, never O(session).
+# O(distance to the parent), hard-capped at ``TOOL_ANCHOR_WALK_CAP`` rows (a literal, not a bind
+# parameter, so a generic plan cannot mis-estimate the inner LIMIT), never O(session).
 # Guarded by EXPLAIN in tests/e2e/test_read_path_complexity.py and
 # tests/e2e/test_tool_anchor_seek_bounded.py.
 TOOL_ANCHOR_SQL = (
@@ -108,7 +109,7 @@ TOOL_ANCHOR_SQL = (
     "  WHERE session_id = $1 AND kind = 'message' "
     "    AND role = 'assistant' AND data ? 'tool_calls' "
     "    AND seq < $3 "
-    "  ORDER BY seq DESC LIMIT $4"
+    f"  ORDER BY seq DESC LIMIT {TOOL_ANCHOR_WALK_CAP}"
     ") AS w "
     "WHERE w.data->'tool_calls' @> jsonb_build_array(jsonb_build_object('id', $2::text)) "
     "  AND w.cumulative_tokens IS NOT NULL "
@@ -161,7 +162,6 @@ async def _latest_cumulative_tokens(
             session_id,
             row["tool_call_id"],
             row["seq"],
-            TOOL_ANCHOR_WALK_CAP,
         )
         if anchor is not None:
             return anchor
