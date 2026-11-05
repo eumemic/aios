@@ -107,15 +107,15 @@ class TestSqlForm:
         assert "jsonb_typeof(data->'metadata') = 'object'" in sql
 
     def test_windower_tail_clamp_keys_on_the_newest_stimulus(self) -> None:
-        assert REMINDER_EXCLUDE_SQL.format(col="data") in events_mod._STIMULUS_ROW_SQL
-        assert "role <> 'assistant'" in events_mod._STIMULUS_ROW_SQL
-        seek_src = inspect.getsource(events_mod._latest_cumulative_tokens)
-        assert "stimulus_only" in seek_src
-        assert "_STIMULUS_ROW_SQL" in seek_src
-        # A tool-result stimulus anchors on its issuing assistant.
-        assert "jsonb_build_object('id', $2::text)" in seek_src
+        # The newest stimulus comes from the scalar ``append_event`` maintains
+        # with the stimulus predicate (pinned by TestAppendEventReadsThePredicate).
+        assert "e.seq = s.last_stimulus_seq" in events_mod._STIMULUS_ROW_SEEK_SQL
+        # A tool-result stimulus anchors on its issuing assistant, found by
+        # walking back from the tool row's own seq.
+        assert events_mod._TOOL_PARENT_ROW_SQL in events_mod._TOOL_ANCHOR_SEEK_SQL
+        assert "seq < $3" in events_mod._TOOL_ANCHOR_SEEK_SQL
         clamp_src = inspect.getsource(events_mod.read_windowed_events)
-        assert "_latest_cumulative_tokens(conn, session_id, stimulus_only=True)" in clamp_src
+        assert "_stimulus_anchor_tokens(conn, session_id)" in clamp_src
 
     def test_connectors_cannot_mint_a_reminder(self) -> None:
         assert REMINDER_METADATA_KEY in _RESERVED_METADATA_KEYS

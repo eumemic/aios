@@ -80,64 +80,81 @@ def _row_to_event(row: asyncpg.Record) -> Event:
     )
 
 
-_STIMULUS_ROW_SQL = f"AND role <> 'assistant' AND {REMINDER_EXCLUDE_SQL.format(col='data')} "
+# The assistant row that issued tool call ``$2`` (every caller binds the
+# tool_call_id as ``$2``). The first three conjuncts are exactly the predicate of
+# ``events_assistant_tool_calls_idx``, which has been on the ``role`` COLUMN
+# since migration 0023; a ``data->>'role'`` test cannot match that index. When
+# the predicate matches, the planner walks the partial index backward by ``seq``
+# and stops at the first row passing the ``@>`` containment, so a lookup costs
+# the tool-calling assistants it passes before reaching the parent, not the
+# session size (#2575).
+_TOOL_PARENT_ROW_SQL = (
+    "AND kind = 'message' AND role = 'assistant' AND data ? 'tool_calls' "
+    "AND data->'tool_calls' @> jsonb_build_array(jsonb_build_object('id', $2::text)) "
+)
+
+# The newest stimulus row. ``append_event`` sets ``sessions.last_stimulus_seq``
+# on the row-locked UPDATE that allocates the seq, using the stimulus predicate
+# itself (``is_stimulus``: a non-assistant message that is not a reminder), so
+# this is two unique-key lookups. A log scan for the same row planned well as a
+# custom plan, but asyncpg's cached statement switches to the generic plan after
+# five executions, and that plan read every message row of the session through
+# ``events_session_cumtokens_idx`` (4.7 s on a 1.78M-event session, #2575).
+_STIMULUS_ROW_SEEK_SQL = (
+    "SELECT e.seq, e.cumulative_tokens, e.role, e.data->>'tool_call_id' AS tool_call_id "
+    "FROM sessions s JOIN events e ON e.session_id = s.id AND e.seq = s.last_stimulus_seq "
+    "WHERE s.id = $1"
+)
+
+# The issuing assistant of the tool-result stimulus at seq ``$3``, walking back
+# from that row. There is deliberately no ``cumulative_tokens IS NOT NULL``
+# conjunct: it made ``events_session_cumtokens_idx`` eligible, and the planner
+# then read every message row of the session through it (#2575). A NULL value
+# reads back as ``None``, which the caller already handles.
+_TOOL_ANCHOR_SEEK_SQL = (
+    "SELECT cumulative_tokens FROM events "
+    f"WHERE session_id = $1 AND seq < $3 {_TOOL_PARENT_ROW_SQL}"
+    "ORDER BY seq DESC LIMIT 1"
+)
 
 
-async def _latest_cumulative_tokens(
-    conn: asyncpg.Connection[Any], session_id: str, *, stimulus_only: bool = False
-) -> int | None:
-    """Fetch the cumulative_tokens value of the most recent message event.
+async def _latest_cumulative_tokens(conn: asyncpg.Connection[Any], session_id: str) -> int | None:
+    """Fetch the cumulative_tokens value of the most recent message event."""
+    val: int | None = await conn.fetchval(
+        "SELECT cumulative_tokens FROM events "
+        "WHERE session_id = $1 AND kind = 'message' "
+        "AND cumulative_tokens IS NOT NULL "
+        "ORDER BY seq DESC LIMIT 1",
+        session_id,
+    )
+    return val
 
-    ``stimulus_only`` narrows it to the RENDERABLE ANCHOR of the most recent
-    STIMULUS — a non-assistant row that is not a harness-authored reminder.
-    The windower's retain-the-tail clamp keys on that anchor, not on the
-    newest message: durable reminder rows are appended AFTER the stimulus and
-    BEFORE the model call, so on a failed attempt (context overflow retry with
-    ``window_min=0``, a provider error, a deadline) they are the newest rows.
-    Clamping to the newest *message* would retain a reminder and evict the
+
+async def _stimulus_anchor_tokens(conn: asyncpg.Connection[Any], session_id: str) -> int | None:
+    """Fetch the cumulative_tokens of the RENDERABLE ANCHOR of the newest STIMULUS.
+
+    A stimulus is a non-assistant message that is not a harness-authored
+    reminder. The windower's retain-the-tail clamp keys on its anchor, not on
+    the newest message: durable reminder rows are appended AFTER the stimulus
+    and BEFORE the model call, so on a failed attempt (context overflow retry
+    with ``window_min=0``, a provider error, a deadline) they are the newest
+    rows. Clamping to the newest *message* would retain a reminder and evict the
     unanswered stimulus — the retry would then succeed on a reminder-only
     prompt and the session would idle with the stimulus never answered. A
     tool-result stimulus renders only with its issuing assistant in the slate
     (``_prune_orphans`` drops it otherwise, while the watermark still
     advances), so its anchor is that assistant's ``cumulative_tokens``.
     """
-    if not stimulus_only:
-        val: int | None = await conn.fetchval(
-            "SELECT cumulative_tokens FROM events "
-            "WHERE session_id = $1 AND kind = 'message' "
-            "AND cumulative_tokens IS NOT NULL "
-            "ORDER BY seq DESC LIMIT 1",
-            session_id,
-        )
-        return val
-    row = await conn.fetchrow(
-        "SELECT cumulative_tokens, role, data->>'tool_call_id' AS tool_call_id FROM events "
-        "WHERE session_id = $1 AND kind = 'message' "
-        f"{_STIMULUS_ROW_SQL}"
-        "AND cumulative_tokens IS NOT NULL "
-        "ORDER BY seq DESC LIMIT 1",
-        session_id,
-    )
+    row = await conn.fetchrow(_STIMULUS_ROW_SEEK_SQL, session_id)
     if row is None:
         return None
     if row["role"] == "tool" and isinstance(row["tool_call_id"], str) and row["tool_call_id"]:
-        # Same predicates as ``_lookup_tool_parent_channel`` (the
-        # ``events_assistant_tool_calls_idx`` partial index, reverse-seq walk).
         anchor: int | None = await conn.fetchval(
-            "SELECT cumulative_tokens FROM events "
-            "WHERE session_id = $1 AND kind = 'message' "
-            "  AND data->>'role' = 'assistant' "
-            "  AND data ? 'tool_calls' "
-            "  AND data->'tool_calls' @> jsonb_build_array("
-            "    jsonb_build_object('id', $2::text)) "
-            "  AND cumulative_tokens IS NOT NULL "
-            "ORDER BY seq DESC LIMIT 1",
-            session_id,
-            row["tool_call_id"],
+            _TOOL_ANCHOR_SEEK_SQL, session_id, row["tool_call_id"], row["seq"]
         )
         if anchor is not None:
             return anchor
-    val = row["cumulative_tokens"]
+    val: int | None = row["cumulative_tokens"]
     return val
 
 
@@ -822,6 +839,14 @@ def _derive_is_error(kind: str, data: dict[str, Any]) -> bool | None:
     return bool(flag)
 
 
+# A backward walk of ``events_assistant_tool_calls_idx`` (see ``_TOOL_PARENT_ROW_SQL``).
+_TOOL_PARENT_CHANNEL_SQL = (
+    "SELECT focal_channel_at_arrival FROM events "
+    f"WHERE session_id = $1 AND account_id = $3 {_TOOL_PARENT_ROW_SQL}"
+    "ORDER BY seq DESC LIMIT 1"
+)
+
+
 async def _lookup_tool_parent_channel(
     conn: asyncpg.Connection[Any],
     session_id: str,
@@ -844,23 +869,8 @@ async def _lookup_tool_parent_channel(
     """
     if not isinstance(tool_call_id, str) or not tool_call_id:
         return None
-    # Predicates match ``events_assistant_tool_calls_idx`` (partial
-    # index on (session_id, seq) for role=assistant rows that have
-    # tool_calls — migration 0011) so the planner can walk it in
-    # reverse-seq order and stop at the first matching parent.
     parent_focal: str | None = await conn.fetchval(
-        "SELECT focal_channel_at_arrival FROM events "
-        "WHERE session_id = $1 "
-        "  AND account_id = $3 "
-        "  AND kind = 'message' "
-        "  AND data->>'role' = 'assistant' "
-        "  AND data ? 'tool_calls' "
-        "  AND data->'tool_calls' @> jsonb_build_array("
-        "    jsonb_build_object('id', $2::text)) "
-        "ORDER BY seq DESC LIMIT 1",
-        session_id,
-        tool_call_id,
-        account_id,
+        _TOOL_PARENT_CHANNEL_SQL, session_id, tool_call_id, account_id
     )
     return parent_focal
 
@@ -1106,6 +1116,14 @@ async def find_latest_interrupt_seq(
     return seq
 
 
+# Same walk as ``_TOOL_PARENT_CHANNEL_SQL``, also projecting the parent's ``tool_calls``.
+_TOOL_NAME_BY_CALL_ID_SQL = (
+    "SELECT data->'tool_calls' AS tool_calls, focal_channel_at_arrival FROM events "
+    f"WHERE session_id = $1 AND account_id = $3 {_TOOL_PARENT_ROW_SQL}"
+    "ORDER BY seq DESC LIMIT 1"
+)
+
+
 async def lookup_tool_name_by_call_id(
     conn: asyncpg.Connection[Any],
     session_id: str,
@@ -1126,20 +1144,7 @@ async def lookup_tool_name_by_call_id(
     ``append_tool_result`` path can pass it as ``tool_parent_channel`` and skip
     the second byte-identical ``@>`` scan (#991): one scan per append, not two.
     """
-    row = await conn.fetchrow(
-        "SELECT data->'tool_calls' AS tool_calls, focal_channel_at_arrival FROM events "
-        "WHERE session_id = $1 "
-        "  AND account_id = $3 "
-        "  AND kind = 'message' "
-        "  AND data->>'role' = 'assistant' "
-        "  AND data ? 'tool_calls' "
-        "  AND data->'tool_calls' @> jsonb_build_array("
-        "    jsonb_build_object('id', $2::text)) "
-        "ORDER BY seq DESC LIMIT 1",
-        session_id,
-        tool_call_id,
-        account_id,
-    )
+    row = await conn.fetchrow(_TOOL_NAME_BY_CALL_ID_SQL, session_id, tool_call_id, account_id)
     if row is None:
         return None, None
     focal: str | None = row["focal_channel_at_arrival"]
@@ -3008,10 +3013,10 @@ async def read_windowed_events(
     # on the inverse invariant. Clamp so the most recent STIMULUS always
     # survives — the retain-the-tail-even-when-oversized guarantee. The newest
     # message row may be a durable reminder written before a failed attempt
-    # (see ``_latest_cumulative_tokens``); keying on it would evict the
+    # (see ``_stimulus_anchor_tokens``); keying on it would evict the
     # unanswered stimulus behind it. Falls back to the newest message when
     # the log holds no stimulus row at all.
-    stimulus_cum = await _latest_cumulative_tokens(conn, session_id, stimulus_only=True)
+    stimulus_cum = await _stimulus_anchor_tokens(conn, session_id)
     drop = min(drop, (stimulus_cum if stimulus_cum is not None else total) - 1)
 
     # The boundary row: the last dropped message, i.e. the greatest
