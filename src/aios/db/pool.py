@@ -126,8 +126,8 @@ async def create_pool(db_url: str, *, min_size: int = 1, max_size: int = 8) -> a
             # and sessions here are heavily skewed (one has 1.78M events, most
             # have hundreds), so on the large ones it chose plans that sort every
             # row of the session: 4.7 s for the windower's stimulus seek (#2575).
-            # Planning every execution with its real parameters costs well under
-            # a millisecond per statement.
+            # Planning every execution with its real parameters cost 0.3-1 ms
+            # per statement on prod.
             "plan_cache_mode": "force_custom_plan",
             **_POOL_TCP_KEEPALIVE_SETTINGS,
         },

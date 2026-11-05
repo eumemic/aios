@@ -330,9 +330,10 @@ class TestAwaitingMarkerLookupBounded:
     async def test_marker_lookup_plan_uses_marker_index(
         self, many_sessions: tuple[asyncpg.Pool[Any], list[Session]]
     ) -> None:
-        """Generic-plan EXPLAIN of the exact marker SQL (asyncpg prepares
-        statements, so the generic plan is the one that matters) probes
-        ``events_tool_marker_idx``, not the lifecycle-wide index."""
+        """EXPLAIN of the exact marker SQL probes ``events_tool_marker_idx``,
+        not the lifecycle-wide index. The pool sets
+        ``plan_cache_mode=force_custom_plan``, so this is the plan production
+        runs."""
         pool, sessions = many_sessions
         async with pool.acquire() as conn:
             rec = _RecordingConn(conn)
@@ -340,9 +341,7 @@ class TestAwaitingMarkerLookupBounded:
                 cast(Any, rec), [s.id for s in sessions], account_id=_ACCOUNT
             )
             sql, args, _rows = _marker_fetch(rec)
-            async with conn.transaction():
-                await conn.execute("SET LOCAL plan_cache_mode = force_generic_plan")
-                plan = await conn.fetchval(f"EXPLAIN (FORMAT JSON) {sql}", *args)
+            plan = await conn.fetchval(f"EXPLAIN (FORMAT JSON) {sql}", *args)
         if isinstance(plan, str):
             plan = json.loads(plan)
         nodes = list(_walk(plan[0]["Plan"]))

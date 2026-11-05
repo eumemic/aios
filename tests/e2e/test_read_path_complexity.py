@@ -25,7 +25,12 @@ registry-completeness gate that catches the *next* unregistered O(N) read.
 Four oracles (Chairman directive: gate the first three like correctness):
   1. PRIMARY GATE (deterministic) — plan SHAPE. For every read in
      ``HOT_PATH_READS``, capture the SQL, ``EXPLAIN (FORMAT JSON)`` it, assert
-     ``find_unbounded_events_scan_over_seq(plan) == []``.
+     no unbounded aggregate (``find_unbounded_events_scan_over_seq``), no
+     predicate-mismatch Seq Scan (``find_predicate_mismatch_events_scan``), no
+     whole-session sorted seek (``find_unbounded_sorted_events_seek``), and,
+     for a read with a ``plan_check``, its one bounded plan. GATE 1d (#2575)
+     additionally replays every statement ``read_windowed_events`` issues under
+     ``EXPLAIN ANALYZE`` and bounds the ``events`` rows each one examines.
   2. ROWS-RETURNED GATE (deterministic) — each hot read returns <= c*W rows to
      Python (exact count). Closes the SQL->Python O(N) escape hatch the plan
      can't see.
@@ -38,10 +43,11 @@ Four oracles (Chairman directive: gate the first three like correctness):
      2.5x for O(1), so it must NEVER be in required-checks. Catches complexity
      the planner can't (app-side loops, N+1).
 
-Complexity-ONLY: this file makes ZERO output/behavioral/token-value assertions
-(correctness lives in ``test_clone_window_regression.py`` + #1657's own tests).
-No wall-clock or estimated-row-count appears in any GATING assertion; the only
-timing is under the advisory ``perf`` mark.
+Complexity-ONLY: correctness lives in ``test_clone_window_regression.py`` +
+#1657's own tests. The one output assertion (GATE 1d's window-start check) only
+proves the clamp path under measurement actually ran. No wall-clock or
+estimated-row-count appears in any GATING assertion (GATE 1d counts ACTUAL
+rows); the only timing is under the advisory ``perf`` mark.
 
 ── append / tool-result phase (issue #1750) ──────────────────────────────────
 
@@ -83,6 +89,7 @@ import asyncpg
 import pytest
 
 from aios.db.queries.events import (
+    _LATEST_CUMULATIVE_STATE_SQL,
     _LATEST_CUMULATIVE_TOKENS_SQL,
     _RETAINED_CLASS_MASS_SQL,
     _STIMULUS_ROW_SEEK_SQL,
@@ -610,6 +617,15 @@ _STIMULUS_SEEK_SHAPE = partial(
         n.get("Node Type") == "Index Scan" and "seq = " in str(n.get("Index Cond", ""))
     ),
 )
+# A newest-cumulative-row seek walks the cumtokens index backward, by its key.
+_NEWEST_CUMULATIVE_SHAPE = partial(
+    _scan_shape_offenders,
+    accept=lambda n: (
+        n.get("Node Type") in ("Index Scan", "Index Only Scan")
+        and n.get("Index Name") == "events_session_cumtokens_idx"
+        and n.get("Scan Direction") == "Backward"
+    ),
+)
 
 
 HOT_PATH_READS: list[HotRead] = [
@@ -619,6 +635,16 @@ HOT_PATH_READS: list[HotRead] = [
         sql=_LATEST_CUMULATIVE_TOKENS_SQL,
         args=lambda: (_SESSION_ID,),
         max_rows=_O1_ROW_CEIL,
+        plan_check=_NEWEST_CUMULATIVE_SHAPE,
+    ),
+    # The append path's running-counter seek, under the session row lock.
+    HotRead(
+        name="_latest_cumulative_state",
+        declared_complexity="O(1)",
+        sql=_LATEST_CUMULATIVE_STATE_SQL,
+        args=lambda: (_SESSION_ID,),
+        max_rows=_O1_ROW_CEIL,
+        plan_check=_NEWEST_CUMULATIVE_SHAPE,
     ),
     # #2575: the two reads behind the windower's retain-the-newest-stimulus
     # clamp, as production SQL constants. ``tc_no_such_call`` makes the anchor
@@ -645,6 +671,7 @@ HOT_PATH_READS: list[HotRead] = [
         sql=_RETAINED_CLASS_MASS_SQL,
         args=lambda: (_SESSION_ID, _ACCOUNT_ID),
         max_rows=_O1_ROW_CEIL,
+        plan_check=_NEWEST_CUMULATIVE_SHAPE,
     ),
     HotRead(
         name="read_windowed_context_events",
@@ -1112,21 +1139,29 @@ _SQL_STIMULUS_SEEK_PRE_2575 = (
     "ORDER BY seq DESC LIMIT 1"
 )
 
+# The newest-cumulative-row seeks before #2575 ordered by ``seq``.
+_SQL_LATEST_CUMULATIVE_PRE_2575 = _LATEST_CUMULATIVE_TOKENS_SQL.replace(
+    "ORDER BY cumulative_tokens DESC", "ORDER BY seq DESC"
+)
+
 
 @needs_docker
 class TestStimulusClampGateIsNotVacuous:
     async def test_pre_2575_forms_are_red(self, seeded_pool: asyncpg.Pool[Any]) -> None:
         """The removed SQL fails the same checks on the same slate. The shape
         checks do not depend on statistics: ``data->>'role'`` cannot match the
-        tool-calls index, and the log scan has no equality on ``seq``. The
+        tool-calls index, the log scan has no equality on ``seq``, and an
+        ``ORDER BY seq`` cannot be a sort-free walk of the cumtokens index. The
         removed anchor also plans as a sort of the session's rows, as on prod."""
         anchor = await _explain(
             seeded_pool, _SQL_TOOL_ANCHOR_PRE_2575, _SESSION_ID, "tc_no_such_call"
         )
         stimulus = await _explain(seeded_pool, _SQL_STIMULUS_SEEK_PRE_2575, _SESSION_ID)
+        latest = await _explain(seeded_pool, _SQL_LATEST_CUMULATIVE_PRE_2575, _SESSION_ID)
         assert _TOOL_PARENT_SHAPE(anchor), anchor
         assert find_unbounded_sorted_events_seek(anchor), anchor
         assert _STIMULUS_SEEK_SHAPE(stimulus), stimulus
+        assert _NEWEST_CUMULATIVE_SHAPE(latest), latest
 
 
 # The whole windowed read, end to end, on the shape that regressed: a large
@@ -1268,8 +1303,9 @@ class TestStimulusClampReadsStayBounded:
         # The anchor walk passed only the tool-calling assistants after the
         # parent, never the plain messages between them.
         assert touched[_TOOL_ANCHOR_SEEK_SQL] <= _TOOL_CALLS_BETWEEN + 1, touched
-        # Not-vacuous: on the same slate the removed anchor seek examines
-        # every message row.
+        # Not-vacuous, under any plan: the removed anchor seek cannot use the
+        # tool-calls index, so it examines at least the plain messages between
+        # the parent and the result (or, as on prod, the whole session).
         removed = await _explain(
             pool,
             _SQL_TOOL_ANCHOR_PRE_2575,
@@ -1277,7 +1313,7 @@ class TestStimulusClampReadsStayBounded:
             "tc_2575_parent",
             analyze=True,
         )
-        assert _events_rows_touched(removed) > _ROWS_TOUCHED_BUDGET, removed
+        assert _events_rows_touched(removed) > _PLAIN_MESSAGES_BETWEEN, removed
 
 
 # ─── GATE 3: REGISTRY-COMPLETENESS (deterministic, GATING) ───────────────────

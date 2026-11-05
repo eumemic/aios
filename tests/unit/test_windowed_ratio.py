@@ -106,7 +106,7 @@ class _FakeConn:
         return self.total_local
 
     async def fetchrow(self, sql: str, *args: Any) -> dict[str, Any] | None:
-        if "cumulative_messages" in sql and "ORDER BY cumulative_tokens DESC" in sql:
+        if "cumulative_tokens <= $2" in sql:
             self.omission_calls.append(args)
             return self.omission_row
         if "cumulative_text_mass" in sql:
@@ -384,7 +384,7 @@ async def test_ceil_div_never_overshoots_window(
     captured: dict[str, int] = {}
 
     async def _fetchrow(sql: str, *args: Any) -> None:
-        if "ORDER BY cumulative_tokens DESC" in sql:
+        if "cumulative_tokens <= $2" in sql:
             # The boundary seek: its second positional arg is the drop value.
             captured["drop_local"] = args[1]
         return None

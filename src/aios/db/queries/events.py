@@ -114,11 +114,22 @@ _TOOL_ANCHOR_SEEK_SQL = (
     "ORDER BY seq DESC LIMIT 1"
 )
 
+# The newest message row with cumulative data, for the seeks that share the
+# predicate of ``events_session_cumtokens_idx`` (``kind = 'message' AND
+# cumulative_tokens IS NOT NULL``). ``cumulative_tokens`` strictly increases
+# with ``seq`` within a session (every message adds at least one token), so
+# this is the row ``ORDER BY seq DESC`` would select, and ordering by the
+# index's own key makes the seek a backward walk of that index whatever the
+# planner estimates. Ordered by ``seq``, a session outside the planner's
+# most-common-values list is estimated at a few rows, and the plan scanned the
+# index for the whole session and sorted it (#2575).
+_NEWEST_CUMULATIVE_ROW_SQL = "ORDER BY cumulative_tokens DESC LIMIT 1"
+
 _LATEST_CUMULATIVE_TOKENS_SQL = (
     "SELECT cumulative_tokens FROM events "
     "WHERE session_id = $1 AND kind = 'message' "
     "AND cumulative_tokens IS NOT NULL "
-    "ORDER BY seq DESC LIMIT 1"
+    f"{_NEWEST_CUMULATIVE_ROW_SQL}"
 )
 
 
@@ -216,27 +227,30 @@ class _CumulativeState(NamedTuple):
     mass: dict[str, int | None]
 
 
+_LATEST_CUMULATIVE_STATE_SQL = (
+    "SELECT cumulative_tokens, cumulative_messages, "
+    "       cumulative_text_mass, cumulative_tool_result_mass, "
+    "       cumulative_thinking_mass, cumulative_tool_use_mass, cumulative_image_mass "
+    "FROM events "
+    "WHERE session_id = $1 AND kind = 'message' "
+    "AND cumulative_tokens IS NOT NULL "
+    f"{_NEWEST_CUMULATIVE_ROW_SQL}"
+)
+
+
 async def _latest_cumulative_state(
     conn: asyncpg.Connection[Any], session_id: str
 ) -> _CumulativeState:
     """Fetch the running cumulative counters from the most recent message row.
 
-    One index seek on ``events_session_cumtokens_idx`` (``ORDER BY seq DESC``,
-    the latest message). Returns the ``cumulative_tokens`` total plus the
+    One backward step of ``events_session_cumtokens_idx`` (see
+    ``_NEWEST_CUMULATIVE_ROW_SQL``; this runs under the session row lock).
+    Returns the ``cumulative_tokens`` total plus the
     ``cumulative_messages`` count and the four per-class mass running sums the
     append path increments (issue #1657). All-``None`` when the session has no
     message with cumulative data yet (pre-backfill / brand-new session).
     """
-    row = await conn.fetchrow(
-        "SELECT cumulative_tokens, cumulative_messages, "
-        "       cumulative_text_mass, cumulative_tool_result_mass, "
-        "       cumulative_thinking_mass, cumulative_tool_use_mass, cumulative_image_mass "
-        "FROM events "
-        "WHERE session_id = $1 AND kind = 'message' "
-        "AND cumulative_tokens IS NOT NULL "
-        "ORDER BY seq DESC LIMIT 1",
-        session_id,
-    )
+    row = await conn.fetchrow(_LATEST_CUMULATIVE_STATE_SQL, session_id)
     if row is None:
         return _CumulativeState(
             tokens=None,
@@ -2114,7 +2128,7 @@ async def list_pending_calls_for_session_and_connection(
 # The per-call result probe is a ``LEFT JOIN LATERAL (... LIMIT 1)``, NOT a
 # ``NOT EXISTS`` (#2560).  With ``NOT EXISTS`` the planner is free to flatten
 # the probe into a set-at-a-time anti join, and it does: the CUSTOM plan
-# (asyncpg's first five executions per connection) chose a Merge Anti Join
+# (every execution, under the pool's ``force_custom_plan``) chose a Merge Anti Join
 # that seq-scanned and SORTED every tool-result row in the ACCOUNT (disk
 # spill), and the GENERIC plan a Hash Anti Join that hashed the same set — so
 # cost scaled with account tool-result volume rather than the page's open
@@ -2766,7 +2780,7 @@ _RETAINED_CLASS_MASS_SQL = (
     "FROM events "
     "WHERE session_id = $1 AND account_id = $2 "
     "AND kind = 'message' AND cumulative_tokens IS NOT NULL "
-    "ORDER BY seq DESC LIMIT 1"
+    f"{_NEWEST_CUMULATIVE_ROW_SQL}"
 )
 
 
