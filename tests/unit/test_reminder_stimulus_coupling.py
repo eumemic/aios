@@ -5,12 +5,14 @@ A reminder is a ``role='user'`` message row tagged
 non-stimulus (no ``last_stimulus_seq`` / ``last_user_seq`` / ``updated_at``
 bump). Every LOG-DERIVED reader of user rows must agree, or a reminder past
 the reaction watermark would (a) defeat the sweep's incomplete-batch filter,
-(b) consume the inbound budget, (c) be retained by the windower's tail clamp
-in place of the real stimulus. These tests pin that every such reader routes
-through the single-source constants in ``aios.models.events`` — and that the
-SQL form is NULL-safe, since ``data->'metadata'`` is NULL on every row without
-a metadata key (tool results, plain user posts) and ``NOT (NULL ? k)`` would
-exclude those rows entirely.
+(b) consume the inbound budget. The windower's tail clamp (c) reads
+``last_stimulus_seq`` itself, so it agrees by construction: a reminder is
+never retained in place of the real stimulus. These tests pin that every
+such reader routes through the single-source constants in
+``aios.models.events`` — and that the SQL form is NULL-safe, since
+``data->'metadata'`` is NULL on every row without a metadata key (tool
+results, plain user posts) and ``NOT (NULL ? k)`` would exclude those rows
+entirely.
 """
 
 from __future__ import annotations

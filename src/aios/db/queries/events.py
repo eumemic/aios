@@ -2769,6 +2769,22 @@ def _normalize_overhead(overhead_local: int | OverheadLocalSplit) -> _Normalized
     )
 
 
+# The newest message row's per-class running sums. ``cumulative_tokens`` strictly
+# increases with ``seq`` within a session, so ordering by it selects the same row
+# as ``ORDER BY seq DESC``, and it is the key of ``events_session_cumtokens_idx``:
+# the seek is a backward walk of that index under every plan. Ordered by ``seq``,
+# the generic plan instead read the session's rows through that index and sorted
+# them (433 ms on a 1.78M-event session, #2575).
+_RETAINED_CLASS_MASS_SQL = (
+    "SELECT cumulative_text_mass, cumulative_tool_result_mass, "
+    "       cumulative_thinking_mass, cumulative_tool_use_mass, cumulative_image_mass "
+    "FROM events "
+    "WHERE session_id = $1 AND account_id = $2 "
+    "AND kind = 'message' AND cumulative_tokens IS NOT NULL "
+    "ORDER BY cumulative_tokens DESC LIMIT 1"
+)
+
+
 async def _retained_class_mass(
     conn: asyncpg.Connection[Any],
     session_id: str,
@@ -2787,9 +2803,9 @@ async def _retained_class_mass(
     the prior message's totals, classifying by role+data with
     ``_message_content_class``). Because the mass pools over the whole slate,
     the answer is just the LATEST message row's four cumulative totals -- one
-    index seek on ``events_session_cumtokens_idx`` (``ORDER BY seq DESC``),
-    replacing the O(session-size) full-slate ``LAG() OVER (ORDER BY seq)``
-    WindowAgg (measured 3.8s / 90k rows / 46 MB spill on Ultron) entirely.
+    index seek (``_RETAINED_CLASS_MASS_SQL``), replacing the O(session-size)
+    full-slate ``LAG() OVER (ORDER BY seq)`` WindowAgg (measured 3.8s / 90k
+    rows / 46 MB spill on Ultron) entirely.
 
     Returns an empty dict when the latest message carries no per-class
     cumulative data (pre-backfill sessions / rolling deploys, where every
@@ -2797,16 +2813,7 @@ async def _retained_class_mass(
     overhead split alone, the same neutral behavior as before backfill. Any
     class whose stored running sum is ``NULL`` is simply omitted (unseen).
     """
-    row = await conn.fetchrow(
-        "SELECT cumulative_text_mass, cumulative_tool_result_mass, "
-        "       cumulative_thinking_mass, cumulative_tool_use_mass, cumulative_image_mass "
-        "FROM events "
-        "WHERE session_id = $1 AND account_id = $2 "
-        "AND kind = 'message' AND cumulative_tokens IS NOT NULL "
-        "ORDER BY seq DESC LIMIT 1",
-        session_id,
-        account_id,
-    )
+    row = await conn.fetchrow(_RETAINED_CLASS_MASS_SQL, session_id, account_id)
     if row is None:
         return {}
     stored = {

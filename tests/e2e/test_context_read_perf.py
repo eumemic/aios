@@ -46,6 +46,7 @@ from typing import Any, cast
 import asyncpg
 import pytest
 
+from aios.db.queries.events import _RETAINED_CLASS_MASS_SQL
 from tests.conftest import needs_docker
 from tests.support import find_unbounded_events_aggregates
 
@@ -221,16 +222,9 @@ FROM deltas
 GROUP BY cls
 """
 
-# The O(1) post-fix reads the per-turn path now runs (the exact SQL from
+# The O(1) post-fix reads the per-turn path now runs (the production SQL of
 # ``_retained_class_mass`` and the omission boundary seek in ``events.py``).
-_FIXED_RETAINED_MASS_SQL = (
-    "SELECT cumulative_text_mass, cumulative_tool_result_mass, "
-    "       cumulative_thinking_mass, cumulative_tool_use_mass "
-    "FROM events "
-    "WHERE session_id = $1 AND account_id = $2 "
-    "AND kind = 'message' AND cumulative_tokens IS NOT NULL "
-    "ORDER BY seq DESC LIMIT 1"
-)
+_FIXED_RETAINED_MASS_SQL = _RETAINED_CLASS_MASS_SQL
 
 _FIXED_OMISSION_BOUNDARY_SQL = (
     "SELECT seq, cumulative_messages "

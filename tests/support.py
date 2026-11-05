@@ -274,6 +274,34 @@ def find_predicate_mismatch_events_scan(plan_node: dict[str, Any]) -> list[dict[
     return found
 
 
+def find_unbounded_sorted_events_seek(plan_node: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return every ``Sort`` node beneath a ``Limit`` whose input scans
+    ``events`` without a ``cumulative_tokens``/``seq`` lower bound: a
+    newest-row seek the planner answers by gathering the whole session's rows
+    and sorting them, O(session-size), instead of walking an index in order.
+
+    This is the shape of both reads behind the windower's stimulus clamp before
+    issue #2575 (``Limit -> Sort -> Bitmap Heap Scan`` or ``Index Scan`` on
+    ``events_session_cumtokens_idx`` keyed on ``session_id`` alone). It trips
+    neither :func:`find_unbounded_events_scan_over_seq` (no aggregate) nor
+    :func:`find_predicate_mismatch_events_scan` (no Seq Scan). Present-vs-absent
+    on plan shape, like its siblings.
+    """
+    found: list[dict[str, Any]] = []
+
+    def walk(node: dict[str, Any], under_limit: bool) -> None:
+        under_limit = under_limit or node.get("Node Type") == "Limit"
+        if under_limit and node.get("Node Type") == "Sort":
+            scans = [s for s in _collect_scan_relations(node) if s.get("Relation Name") == "events"]
+            if scans and not any(_scan_has_events_lower_bound(s) for s in scans):
+                found.append(node)
+        for child in node.get("Plans", []):
+            walk(child, under_limit)
+
+    walk(plan_node, False)
+    return found
+
+
 def has_external_disk_sort(plan_node: dict[str, Any]) -> bool:
     """True if any ``Sort`` node in the plan spilled to disk via an
     external merge.
