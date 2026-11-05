@@ -112,8 +112,11 @@ class TestSqlForm:
         seek_src = inspect.getsource(events_mod._latest_cumulative_tokens)
         assert "stimulus_only" in seek_src
         assert "_STIMULUS_ROW_SQL" in seek_src
-        # A tool-result stimulus anchors on its issuing assistant.
-        assert "jsonb_build_object('id', $2::text)" in seek_src
+        # A tool-result stimulus anchors on its issuing assistant, via the
+        # bounded backward seq walk from the tool row (#2575).
+        assert "TOOL_ANCHOR_SQL" in seek_src
+        assert "jsonb_build_object('id', $2::text)" in events_mod.TOOL_ANCHOR_SQL
+        assert "seq < $3" in events_mod.TOOL_ANCHOR_SQL
         clamp_src = inspect.getsource(events_mod.read_windowed_events)
         assert "_latest_cumulative_tokens(conn, session_id, stimulus_only=True)" in clamp_src
 
