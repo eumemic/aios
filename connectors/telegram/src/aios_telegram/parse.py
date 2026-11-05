@@ -15,6 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
+from aios_connector_http import coerce_size
 from telegram import Message, MessageReactionUpdated, ReactionTypeEmoji
 from telegram.constants import ChatType, MessageEntityType
 
@@ -26,6 +27,9 @@ class Attachment:
     file_id: str
     content_type: str
     filename: str
+    # Bot API-declared ``file_size`` (coerced; ``None`` when absent).
+    # Used to detect a failed download (0-byte file, declared > 0, #2551).
+    file_size: int | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -172,6 +176,7 @@ def _extract_attachments(message: Message) -> tuple[Attachment, ...]:
         out.append(
             Attachment(
                 file_id=largest.file_id,
+                file_size=coerce_size(getattr(largest, "file_size", None)),
                 content_type="image/jpeg",
                 filename=f"photo-{message.message_id}.jpg",
             )
@@ -180,6 +185,7 @@ def _extract_attachments(message: Message) -> tuple[Attachment, ...]:
         out.append(
             Attachment(
                 file_id=message.voice.file_id,
+                file_size=coerce_size(getattr(message.voice, "file_size", None)),
                 content_type=message.voice.mime_type or "audio/ogg",
                 filename=f"voice-{message.message_id}.ogg",
             )
@@ -193,6 +199,7 @@ def _extract_attachments(message: Message) -> tuple[Attachment, ...]:
         out.append(
             Attachment(
                 file_id=doc.file_id,
+                file_size=coerce_size(getattr(doc, "file_size", None)),
                 content_type=doc.mime_type or "application/octet-stream",
                 filename=doc.file_name or f"document-{message.message_id}",
             )
@@ -202,6 +209,7 @@ def _extract_attachments(message: Message) -> tuple[Attachment, ...]:
         out.append(
             Attachment(
                 file_id=vid.file_id,
+                file_size=coerce_size(getattr(vid, "file_size", None)),
                 content_type=vid.mime_type or "video/mp4",
                 filename=vid.file_name or f"video-{message.message_id}.mp4",
             )
@@ -211,6 +219,7 @@ def _extract_attachments(message: Message) -> tuple[Attachment, ...]:
         out.append(
             Attachment(
                 file_id=aud.file_id,
+                file_size=coerce_size(getattr(aud, "file_size", None)),
                 content_type=aud.mime_type or "audio/mpeg",
                 filename=aud.file_name or f"audio-{message.message_id}.mp3",
             )
@@ -228,6 +237,7 @@ def _extract_attachments(message: Message) -> tuple[Attachment, ...]:
         out.append(
             Attachment(
                 file_id=st.file_id,
+                file_size=coerce_size(getattr(st, "file_size", None)),
                 content_type=content_type,
                 filename=f"sticker-{message.message_id}{ext}",
             )
@@ -238,6 +248,7 @@ def _extract_attachments(message: Message) -> tuple[Attachment, ...]:
         out.append(
             Attachment(
                 file_id=anim.file_id,
+                file_size=coerce_size(getattr(anim, "file_size", None)),
                 content_type=anim.mime_type or "video/mp4",
                 filename=anim.file_name or f"animation-{message.message_id}.mp4",
             )
@@ -247,6 +258,7 @@ def _extract_attachments(message: Message) -> tuple[Attachment, ...]:
         out.append(
             Attachment(
                 file_id=vn.file_id,
+                file_size=coerce_size(getattr(vn, "file_size", None)),
                 content_type="video/mp4",
                 filename=f"video_note-{message.message_id}.mp4",
             )
