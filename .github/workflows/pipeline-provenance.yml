@@ -5,6 +5,9 @@ name: pipeline-provenance
 # valid for the LIVE head (the reconciler's company#349 rule: flat label + a trusted canonical
 # review record green at exactly this head, or the legacy `reviewed:green@<sha12>` for it) AND
 # exactly one `risk:tier-N`, N in 1..AUTO_MERGE_MAX_TIER. Every other PR passes in seconds.
+# OVERRIDE: a pipeline PR labelled `override:chief` instead passes only on an AIOS Bot comment
+# (`eumemic`) `override:chief @ <live head sha, >=12 hex> ruling: Chief|Tom ...`. Seats never
+# apply it. See the script docstring.
 # The decision lives in `scripts/pipeline_provenance.py` (unit-tested in
 # tests/unit/test_pipeline_provenance.py); this file only fetches live state and calls it.
 #
@@ -17,8 +20,11 @@ name: pipeline-provenance
 #   * labeled / unlabeled   -- the reconciler stamps risk:tier-N then reviewed:green AFTER it posts
 #                              the canonical record, so the last label event sees the record
 #   * edited                -- base retargeted onto master
-#   * a review record posted/edited/deleted AFTER the last run: pipeline-provenance-rerun.yml
-#     re-runs this workflow's latest run for the PR head on every PR comment.
+#   * a review record / override posted, edited or deleted AFTER the last run:
+#     pipeline-provenance-rerun.yml re-runs this workflow's newest run for the PR (matched by
+#     head_sha AND pull_requests[].number) on every comment on a pipeline PR. The run's
+#     check attaches to that run's head_sha, which for pull_request_target is the PR head.
+#     This job reads the LIVE head from pulls/{n}, never GITHUB_SHA (the base tip).
 #
 # No `if:`, no paths/branches filter: a required check must conclude on EVERY PR, never sit at
 # "skipped"/"expected".

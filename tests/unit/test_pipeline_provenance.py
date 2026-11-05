@@ -8,6 +8,9 @@ a ``reviewed:green`` that is valid for the LIVE head (reconciler rule, company#3
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -172,6 +175,93 @@ def test_non_master_base_is_not_gated() -> None:
     assert _passes(_pr(["pipeline:v2"], base="release"), [])
 
 
+# ─── override:chief (Chief ruling 2026-11-05) ────────────────────────────────
+
+
+def _override(sha: str, who: str = "Chief") -> str:
+    return f"override:chief @ `{sha}` ruling: {who} 2026-11-05 12:28 CT, merge as-is."
+
+
+OVERRIDE_PR = _pr(["pipeline:v2", "override:chief"])  # no reviewed:green, no risk tier
+
+
+@pytest.mark.parametrize(
+    "sha",
+    [HEAD, HEAD[: pp.OVERRIDE_MIN_SHA_LEN]],
+    ids=["full", "sha12"],
+)
+@pytest.mark.parametrize("who", ["Chief", "Tom"])
+def test_override_with_valid_comment_passes_without_stamp_or_tier(sha: str, who: str) -> None:
+    verdict = pp.evaluate(OVERRIDE_PR, [_comment(_override(sha, who))])
+    assert verdict.passed, verdict.reasons
+
+
+def test_override_label_without_comment_fails() -> None:
+    assert not _passes(OVERRIDE_PR, [])
+
+
+def test_override_label_without_comment_fails_even_when_stamped_and_tiered() -> None:
+    """The label switches the PR onto the override path: only a valid override passes it."""
+    pr = _pr(["pipeline:v2", "override:chief", "reviewed:green", "risk:tier-1"])
+    assert not _passes(pr, [GREEN_AT_HEAD])
+
+
+@pytest.mark.parametrize(
+    ("login", "assoc"),
+    [
+        ("eumemic-bot[bot]", "CONTRIBUTOR"),  # trusted, but the advisory CI reviewer
+        ("some-member", "MEMBER"),  # trusted by association, not the AIOS Bot identity
+        ("aspire488", "CONTRIBUTOR"),  # outside contributor
+    ],
+)
+def test_override_comment_by_another_author_fails(login: str, assoc: str) -> None:
+    assert not _passes(OVERRIDE_PR, [_comment(_override(HEAD), login=login, assoc=assoc)])
+
+
+def test_override_comment_with_untrusted_association_fails() -> None:
+    """The exact login must ALSO pass the trusted-author predicate (fail closed on odd payloads)."""
+    comment = {"user": {"login": pp.OVERRIDE_AUTHOR_LOGIN}, "body": _override(HEAD)}
+    assert pp._comment_trusted(comment)  # login-allowlisted: no association needed
+    assert _passes(OVERRIDE_PR, [comment])
+    assert not _passes(OVERRIDE_PR, [{"author_association": "OWNER", "body": _override(HEAD)}])
+
+
+@pytest.mark.parametrize("sha", [OLD_HEAD, OLD_HEAD[:12]], ids=["full", "sha12"])
+def test_override_for_an_old_head_fails(sha: str) -> None:
+    verdict = pp.evaluate(OVERRIDE_PR, [_comment(_override(sha))])
+    assert not verdict.passed
+    assert "another head" in verdict.reasons[0]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        _override(HEAD[:11]),  # shorter than 12 hex
+        _override(HEAD, who="Shepherd"),  # not a Chief/Tom ruling
+        f"override:chief @ `{HEAD}`",  # no ruling cited
+        "> " + _override(HEAD),  # quoted
+        "    " + _override(HEAD),  # indented code
+        "```\n" + _override(HEAD) + "\n```",  # fenced
+        "per the " + _override(HEAD),  # not at line start
+    ],
+)
+def test_override_comment_shape_is_strict(body: str) -> None:
+    assert not _passes(OVERRIDE_PR, [_comment(body)])
+
+
+def test_override_line_inside_a_longer_comment_counts() -> None:
+    body = "Relaying the ruling.\n\n" + _override(HEAD) + "\n\nThread: chief#123"
+    assert _passes(OVERRIDE_PR, [_comment(body)])
+
+
+def test_override_comment_without_label_grants_nothing() -> None:
+    assert not _passes(_pr(["pipeline:v2"]), [_comment(_override(HEAD))])
+
+
+def test_override_does_not_touch_non_pipeline_prs() -> None:
+    assert _passes(_pr(["override:chief"], ref="feature/x"), [])
+
+
 # ─── the CLI contract the workflow relies on ─────────────────────────────────
 
 
@@ -259,3 +349,171 @@ def test_review_comments_re_run_the_check() -> None:
     assert "event=pull_request_target" in script
     assert "/rerun" in script
     assert "github.event.comment" not in script, "comment text must never reach the shell"
+
+
+# ─── the rerun step, executed against a fake `gh` ────────────────────────────
+
+_FAKE_GH = """\
+import json, os, sys
+d = os.environ["FAKE_GH_DIR"]
+args = sys.argv[1:]
+with open(os.path.join(d, "calls.log"), "a") as f:
+    f.write(json.dumps(args) + "\\n")
+assert args[0] == "api", args
+url = args[-1]
+if "-X" in args:
+    sys.exit(0)
+if "/pulls/" in url:
+    sys.stdout.write(open(os.path.join(d, "pr.json")).read())
+    sys.exit(0)
+assert "--paginate" in args, args
+n_path = os.path.join(d, "n")
+n = int(open(n_path).read()) if os.path.exists(n_path) else 0
+open(n_path, "w").write(str(n + 1))
+pages = json.load(open(os.path.join(d, "runs.json")))
+sys.stdout.write("".join(json.dumps(p) for p in pages[min(n, len(pages) - 1)]))
+"""
+
+
+def _rerun_script() -> str:
+    wf = yaml.safe_load(_RERUN.read_text())
+    script = wf["jobs"]["rerun-on-comment"]["steps"][-1]["run"]
+    assert isinstance(script, str)
+    return script
+
+
+def _wf_run(
+    run_id: int, pr_numbers: list[int], created: str, status: str = "completed"
+) -> dict[str, Any]:
+    return {
+        "id": run_id,
+        "status": status,
+        "created_at": created,
+        "head_sha": HEAD,
+        "pull_requests": [{"number": n} for n in pr_numbers],
+    }
+
+
+def _exec_rerun(
+    tmp_path: Path,
+    pr: dict[str, Any],
+    responses: list[list[dict[str, Any]]],
+    *,
+    number: int = 2573,
+) -> tuple[subprocess.CompletedProcess[str], list[list[str]]]:
+    """Run the workflow step's bash verbatim. ``responses[i]`` is the list of pages returned by the
+    i-th runs lookup (the last one repeats); ``gh`` and ``sleep`` are stubbed on PATH."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    gh = bindir / "gh"
+    gh.write_text(f"#!{sys.executable}\n" + _FAKE_GH)
+    gh.chmod(0o755)
+    stub_sleep = bindir / "sleep"
+    stub_sleep.write_text("#!/bin/sh\n")
+    stub_sleep.chmod(0o755)
+    (tmp_path / "pr.json").write_text(json.dumps(pr))
+    (tmp_path / "runs.json").write_text(json.dumps(responses))
+    env = {
+        "PATH": f"{bindir}{os.pathsep}{os.environ['PATH']}",
+        "FAKE_GH_DIR": str(tmp_path),
+        "REPO": "eumemic/aios",
+        "PR": str(number),
+        "GH_TOKEN": "unused",
+    }
+    proc = subprocess.run(
+        ["bash", "-c", _rerun_script()], env=env, capture_output=True, text=True, check=False
+    )
+    log = tmp_path / "calls.log"
+    calls = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+    return proc, calls
+
+
+def _open_pr(labels: list[str], ref: str = "dev-pipeline/issue-2572") -> dict[str, Any]:
+    return {**_pr(labels, ref=ref), "state": "open"}
+
+
+def _reruns(calls: list[list[str]]) -> list[str]:
+    return [c[-1] for c in calls if "-X" in c]
+
+
+def test_rerun_finds_the_prs_newest_run_by_pr_number(tmp_path: Path) -> None:
+    """Newest run FOR THIS PR wins: a newer run on the same head for a different PR, and a fork
+    run with empty ``pull_requests``, are not it."""
+    page = {
+        "workflow_runs": [
+            _wf_run(30, [9999], "2026-11-05T18:30:00Z"),  # same head, other PR, newest
+            _wf_run(20, [2573], "2026-11-05T18:20:00Z"),
+            _wf_run(25, [], "2026-11-05T18:25:00Z"),  # fork-shaped
+            _wf_run(10, [2573], "2026-11-05T18:10:00Z"),
+        ]
+    }
+    proc, calls = _exec_rerun(tmp_path, _open_pr(["pipeline:v2"]), [[page]])
+    assert proc.returncode == 0, proc.stderr
+    assert _reruns(calls) == ["repos/eumemic/aios/actions/runs/20/rerun"]
+    lookup = next(c[-1] for c in calls if "--paginate" in c)
+    assert "workflows/pipeline-provenance.yml/runs?" in lookup
+    assert "event=pull_request_target" in lookup
+    assert f"head_sha={HEAD}" in lookup
+
+
+def test_rerun_merges_paginated_pages(tmp_path: Path) -> None:
+    pages = [
+        {"workflow_runs": [_wf_run(10, [2573], "2026-11-05T18:10:00Z")]},
+        {"workflow_runs": [_wf_run(11, [2573], "2026-11-05T18:11:00Z")]},
+    ]
+    proc, calls = _exec_rerun(tmp_path, _open_pr(["pipeline:v2"]), [pages])
+    assert proc.returncode == 0, proc.stderr
+    assert _reruns(calls) == ["repos/eumemic/aios/actions/runs/11/rerun"]
+
+
+def test_rerun_waits_for_an_in_flight_run(tmp_path: Path) -> None:
+    flying = {"workflow_runs": [_wf_run(20, [2573], "2026-11-05T18:20:00Z", "in_progress")]}
+    done = {"workflow_runs": [_wf_run(20, [2573], "2026-11-05T18:20:00Z")]}
+    proc, calls = _exec_rerun(tmp_path, _open_pr(["pipeline:v2"]), [[flying], [flying], [done]])
+    assert proc.returncode == 0, proc.stderr
+    assert sum("--paginate" in c for c in calls) == 3
+    assert _reruns(calls) == ["repos/eumemic/aios/actions/runs/20/rerun"]
+
+
+@pytest.mark.parametrize(
+    "runs",
+    [[], [_wf_run(25, [], "2026-11-05T18:25:00Z")], [_wf_run(30, [1], "2026-11-05T18:30:00Z")]],
+    ids=["none", "fork-empty-pull_requests", "other-pr-only"],
+)
+def test_rerun_fails_loudly_when_no_run_matches_the_pr(
+    tmp_path: Path, runs: list[dict[str, Any]]
+) -> None:
+    proc, calls = _exec_rerun(tmp_path, _open_pr(["pipeline:v2"]), [[{"workflow_runs": runs}]])
+    assert proc.returncode == 1
+    assert "no pipeline-provenance run found for PR #2573" in proc.stdout
+    assert _reruns(calls) == []
+
+
+@pytest.mark.parametrize(
+    "pr",
+    [
+        _open_pr([], ref="feature/x"),
+        _open_pr(["risk:tier-1", "reviewed:green"], ref="prov-aios"),
+        {**_open_pr(["pipeline:v2"]), "state": "closed"},
+    ],
+    ids=["plain", "labelled-non-pipeline", "closed"],
+)
+def test_rerun_skips_non_pipeline_and_closed_prs(tmp_path: Path, pr: dict[str, Any]) -> None:
+    proc, calls = _exec_rerun(tmp_path, pr, [[{"workflow_runs": []}]])
+    assert proc.returncode == 0, proc.stderr
+    assert [c for c in calls if "/pulls/" not in c[-1]] == []  # no runs lookup, no rerun
+
+
+def test_rerun_treats_dev_pipeline_ref_without_label_as_pipeline(tmp_path: Path) -> None:
+    page = {"workflow_runs": [_wf_run(20, [2573], "2026-11-05T18:20:00Z")]}
+    proc, calls = _exec_rerun(tmp_path, _open_pr([]), [[page]])
+    assert proc.returncode == 0, proc.stderr
+    assert _reruns(calls) == ["repos/eumemic/aios/actions/runs/20/rerun"]
+
+
+def test_rerun_fails_closed_on_an_unreadable_pr_payload(tmp_path: Path) -> None:
+    """A payload missing head.ref/labels must error, never read as "not a pipeline PR"."""
+    pr = {"state": "open", "head": {"sha": HEAD}}
+    proc, calls = _exec_rerun(tmp_path, pr, [[{"workflow_runs": []}]])
+    assert proc.returncode != 0
+    assert _reruns(calls) == []

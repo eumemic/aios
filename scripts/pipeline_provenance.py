@@ -18,6 +18,20 @@ A pipeline PR targeting master passes only when BOTH hold:
 Every other PR (and any PR whose base is not master) passes immediately -- the check always
 reports a conclusion, so as a required check it never strands a PR in "expected".
 
+CHIEF OVERRIDE (``override:chief``, Chief ruling 2026-11-05). A pipeline PR carrying the label
+``override:chief`` is judged ONLY by the override: it passes iff a PR comment authored by
+``OVERRIDE_AUTHOR_LOGIN`` carries, on a visible line (not fenced, quoted or indented), exactly::
+
+    override:chief @ <sha> ruling: Chief|Tom <free text citing the ruling>
+
+where ``<sha>`` is the live head sha, full or a >=12-hex prefix. When valid, (a) and (b) are not
+required; the label WITHOUT such a comment FAILS, whatever stamps/tiers are present, and an
+override for an older head is stale and fails. SEATS NEVER APPLY ``override:chief`` OR POST THE
+OVERRIDE LINE: only AIOS Bot does, when relaying a Chief or Tom ruling on that exact head. The
+GitHub login cannot enforce that by itself, because AIOS Bot, the seats and the reconciler all post
+as ``eumemic``. The rule is procedural; the label-plus-exact-sha comment makes each use explicit,
+pinned to one head, and auditable.
+
 The review-record grammar below is VENDORED VERBATIM from eumemic-company
 ``app/src/eumemic_company_app/workflows/dev_pipeline_reconciler.py`` (origin/master
 b0fa9e3e3636577bc2a1573e1406c3f7f06ac12b): ``_strip_fenced_blocks``, ``_review_verdict_token``,
@@ -69,6 +83,20 @@ AUTO_MERGE_MAX_TIER = 4
 #: eumemic-company ``comment_trust.TRUSTED_COMMENT_LOGINS`` / ``TRUSTED_AUTHOR_ASSOCIATIONS``.
 TRUSTED_COMMENT_LOGINS: tuple[str, ...] = ("eumemic", "eumemic-bot[bot]")
 TRUSTED_AUTHOR_ASSOCIATIONS: tuple[str, ...] = ("OWNER", "MEMBER")
+
+LABEL_OVERRIDE = "override:chief"
+#: THE one identity whose comment can carry a Chief override: the GitHub login AIOS Bot posts as.
+#: AIOS Bot has no login of its own; it posts through ``eumemic`` (OWNER), as do the seats and the
+#: reconciler (company ``comment_trust.py`` enumeration; live comments on aios#2569-#2573). The
+#: author must pass ``_comment_trusted`` AND match this login exactly, so neither an OWNER/MEMBER
+#: association alone nor the advisory CI reviewer ``eumemic-bot[bot]`` qualifies.
+OVERRIDE_AUTHOR_LOGIN = "eumemic"
+#: Shortest sha prefix an override may cite (matches the legacy ``reviewed:green@<sha12>`` stamp).
+OVERRIDE_MIN_SHA_LEN = 12
+_OVERRIDE_LINE = re.compile(
+    rf"^override:chief[ \t]+@[ \t]*`?([0-9a-f]{{{OVERRIDE_MIN_SHA_LEN},40}})`?"
+    r"[ \t]+ruling:[ \t]*(Chief|Tom)\b"
+)
 
 EXIT_PASS = 0
 EXIT_FAIL = 1
@@ -576,6 +604,44 @@ def review_problem(labels: frozenset[str], head_sha: str, comments: list[Any]) -
     return None
 
 
+def override_problem(head_sha: str, comments: list[Any]) -> str | None:
+    """None when a comment by ``OVERRIDE_AUTHOR_LOGIN`` cites a Chief/Tom ruling for THIS head.
+
+    Only visible lines count: fenced blocks are stripped and quoted/indented lines skipped, so
+    quoting someone else's override (or an older one) never grants one."""
+    if not re.fullmatch(r"[0-9a-f]{40}", head_sha):
+        return f"live head sha {head_sha!r} is not a full sha"
+    cited: list[str] = []
+    for comment in comments:
+        if not isinstance(comment, dict):
+            continue
+        user = comment.get("user")
+        login = user.get("login") if isinstance(user, dict) else None
+        body = comment.get("body")
+        if not (_comment_trusted(comment) and login == OVERRIDE_AUTHOR_LOGIN):
+            continue
+        if not isinstance(body, str):
+            continue
+        for line in _strip_fenced_blocks(body).splitlines():
+            if re.match(r"^(?:\s*>| {4}|\t)", line):
+                continue
+            match = _OVERRIDE_LINE.match(line.strip())
+            if not match:
+                continue
+            sha = match.group(1)
+            if head_sha.startswith(sha):
+                return None
+            cited.append(sha)
+    if cited:
+        return "{} is set but every override comment cites another head ({}), not {}".format(
+            LABEL_OVERRIDE, ", ".join(cited), head_sha
+        )
+    return (
+        f"{LABEL_OVERRIDE} is set but no comment by {OVERRIDE_AUTHOR_LOGIN} cites a Chief/Tom "
+        f"ruling for head {head_sha} (`override:chief @ <sha> ruling: Chief|Tom ...`)"
+    )
+
+
 def evaluate(pr: dict[str, Any], comments: list[Any]) -> Verdict:
     """The whole decision over the live PR payload and its full comment thread."""
     base = (pr.get("base") or {}).get("ref")
@@ -589,6 +655,11 @@ def evaluate(pr: dict[str, Any], comments: list[Any]) -> Verdict:
         return Verdict(True, (f"base {base!r} is not {BASE_BRANCH}: not gated",))
     if not is_pipeline_pr(head_ref, labels):
         return Verdict(True, ("not a pipeline PR: not gated",))
+    if LABEL_OVERRIDE in labels:
+        problem = override_problem(head_sha, comments)
+        if problem:
+            return Verdict(False, (problem,))
+        return Verdict(True, (f"{LABEL_OVERRIDE}: Chief/Tom ruling cited for head {head_sha}",))
     reasons = [
         r for r in (review_problem(labels, head_sha, comments), risk_tier_problem(labels)) if r
     ]
