@@ -82,6 +82,39 @@ def _row_to_event(row: asyncpg.Record) -> Event:
 
 _STIMULUS_ROW_SQL = f"AND role <> 'assistant' AND {REMINDER_EXCLUDE_SQL.format(col='data')} "
 
+# Upper bound on how many tool-calling assistant rows the tool-result anchor
+# seek walks back from the tool row before giving up (issue #2575). A parent
+# is almost always within a handful of rows; past the cap the anchor falls
+# back to the tool row's own ``cumulative_tokens`` (the pre-#2391 clamp).
+TOOL_ANCHOR_WALK_CAP = 1024
+
+# The tool-result stimulus -> issuing-assistant anchor seek (#2391), bounded
+# (issue #2575). The old form put ``cumulative_tokens IS NOT NULL`` next to the
+# JSONB ``@>`` containment in one flat ``ORDER BY seq DESC LIMIT 1``: the
+# planner estimated rows=1 for the containment and took a Bitmap Heap Scan over
+# ``events_session_cumtokens_idx`` -- every message row of the session (~5 s
+# per tool hop on Ultron's 1.78M-event session). Here the inner subquery
+# carries ONLY the predicates of ``events_assistant_tool_calls_idx``
+# (``kind``/``role`` columns + ``data ? 'tool_calls'``) plus ``seq < $3`` (the
+# tool row's own seq) under ``ORDER BY seq DESC LIMIT $4``: the partial
+# cumtokens index cannot match it, and the only sane plan is an Index Scan
+# Backward that the outer ``LIMIT 1`` stops at the first containment hit --
+# O(distance to the parent), hard-capped at ``$4`` rows, never O(session).
+# Guarded by EXPLAIN in tests/e2e/test_read_path_complexity.py and
+# tests/e2e/test_tool_anchor_seek_bounded.py.
+TOOL_ANCHOR_SQL = (
+    "SELECT w.cumulative_tokens FROM ("
+    "  SELECT seq, cumulative_tokens, data FROM events "
+    "  WHERE session_id = $1 AND kind = 'message' "
+    "    AND role = 'assistant' AND data ? 'tool_calls' "
+    "    AND seq < $3 "
+    "  ORDER BY seq DESC LIMIT $4"
+    ") AS w "
+    "WHERE w.data->'tool_calls' @> jsonb_build_array(jsonb_build_object('id', $2::text)) "
+    "  AND w.cumulative_tokens IS NOT NULL "
+    "ORDER BY w.seq DESC LIMIT 1"
+)
+
 
 async def _latest_cumulative_tokens(
     conn: asyncpg.Connection[Any], session_id: str, *, stimulus_only: bool = False
@@ -111,7 +144,7 @@ async def _latest_cumulative_tokens(
         )
         return val
     row = await conn.fetchrow(
-        "SELECT cumulative_tokens, role, data->>'tool_call_id' AS tool_call_id FROM events "
+        "SELECT seq, cumulative_tokens, role, data->>'tool_call_id' AS tool_call_id FROM events "
         "WHERE session_id = $1 AND kind = 'message' "
         f"{_STIMULUS_ROW_SQL}"
         "AND cumulative_tokens IS NOT NULL "
@@ -121,19 +154,14 @@ async def _latest_cumulative_tokens(
     if row is None:
         return None
     if row["role"] == "tool" and isinstance(row["tool_call_id"], str) and row["tool_call_id"]:
-        # Same predicates as ``_lookup_tool_parent_channel`` (the
-        # ``events_assistant_tool_calls_idx`` partial index, reverse-seq walk).
+        # Bounded backward walk from the tool row's own seq (issue #2575);
+        # see ``TOOL_ANCHOR_SQL`` for why it is shaped this way.
         anchor: int | None = await conn.fetchval(
-            "SELECT cumulative_tokens FROM events "
-            "WHERE session_id = $1 AND kind = 'message' "
-            "  AND data->>'role' = 'assistant' "
-            "  AND data ? 'tool_calls' "
-            "  AND data->'tool_calls' @> jsonb_build_array("
-            "    jsonb_build_object('id', $2::text)) "
-            "  AND cumulative_tokens IS NOT NULL "
-            "ORDER BY seq DESC LIMIT 1",
+            TOOL_ANCHOR_SQL,
             session_id,
             row["tool_call_id"],
+            row["seq"],
+            TOOL_ANCHOR_WALK_CAP,
         )
         if anchor is not None:
             return anchor
