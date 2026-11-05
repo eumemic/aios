@@ -201,6 +201,7 @@ def test_build_browser_image_triggers_on_its_inputs() -> None:
         "tests/e2e/test_browser_image_contract.py",
         "tests/e2e/test_browser_driver_behavior.py",
         "tests/e2e/browser_image_common.py",
+        "scripts/browser_chromium_pin.py",
     ):
         assert re.search(rf"(?m)^\s*-\s*{re.escape(entry)}\s*$", workflow), (
             f"{entry!r} is not listed in the on.push.paths trigger of "
