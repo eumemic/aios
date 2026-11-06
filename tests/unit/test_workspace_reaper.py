@@ -25,6 +25,7 @@ These tests assert each of the six required guardrails directly:
 
 from __future__ import annotations
 
+import asyncio
 import os
 import time
 from pathlib import Path
@@ -362,10 +363,10 @@ async def test_symlinked_account_component_to_live_sibling_is_never_followed(
 async def test_nested_live_workspace_survives_real_sweep_and_rmtree(
     env: dict[str, Any],
 ) -> None:
-    """A live workspace nested in an archived candidate is never deleted."""
+    """A live workspace nested in an archived candidate, at any depth, is never deleted."""
     archived = _mk_workspace(env["root"], "acct1", "sess_archived")
-    live = archived / "child_live_ws"
-    live.mkdir()
+    live = archived / "a" / "b" / "child_live_ws"
+    live.mkdir(parents=True)
     credentials = live / "OPERATOR_CREDS.txt"
     credentials.write_text("live-secret")
     pool = _fake_pool([_row("acct1", "sess_archived", str(archived))], live_paths=[str(live)])
@@ -396,16 +397,25 @@ async def test_live_ancestor_workspace_keeps_archived_descendant(
 async def test_unrelated_live_workspace_does_not_disable_reaping(
     env: dict[str, Any],
 ) -> None:
-    """Positive control: containment protection does not turn off the reaper."""
+    """Positive control: containment protection does not turn off the reaper.
+
+    Overlap is by path component: live siblings whose names only share a
+    string prefix with the candidate do not protect it.
+    """
     archived = _mk_workspace(env["root"], "acct1", "sess_archived")
-    unrelated = _mk_workspace(env["root"], "acct1", "sess_live_elsewhere")
-    pool = _fake_pool([_row("acct1", "sess_archived", str(archived))], live_paths=[str(unrelated)])
+    longer = _mk_workspace(env["root"], "acct1", "sess_archived2")
+    shorter = _mk_workspace(env["root"], "acct1", "sess_arch")
+    pool = _fake_pool(
+        [_row("acct1", "sess_archived", str(archived))],
+        live_paths=[str(longer), str(shorter)],
+    )
 
     result = await sweep_archived_workspaces(pool)
 
     assert result.reaped == 1
     assert not archived.exists()
-    assert unrelated.exists()
+    assert longer.exists()
+    assert shorter.exists()
 
 
 async def test_live_clone_sharing_archived_parents_canonical_dir_is_skipped(
@@ -538,24 +548,28 @@ async def test_shared_run_created_after_scan_is_caught_by_pre_delete_revalidatio
 
 
 async def test_off_shape_ids_are_never_reaped(env: dict[str, Any]) -> None:
-    """An account/session id carrying a path separator or ``..`` is skipped.
+    """An account/session id carrying a path separator, ``..`` or whitespace is skipped.
 
     Defense-in-depth: a corrupt/crafted id can't reshape the delete-target path.
     """
     _mk_workspace(env["root"], "acct1", "sess_archived")  # a real dir exists
+    # ``$`` matches before a trailing newline, so this one needs a full match.
+    newline = _mk_workspace(env["root"], "acct1", "sess_nl\n")
     pool = _fake_pool(
         [
             _row("acct1", "../sess_archived", str(env["root"] / "acct1" / "sess_archived")),
             _row("..", "sess_archived", str(env["root"])),
             _row("acct1", "a/b", str(env["root"] / "acct1" / "a" / "b")),
+            _row("acct1", "sess_nl\n", str(newline)),
         ]
     )
 
     result = await sweep_archived_workspaces(pool)
 
     assert result.reaped == 0
-    assert result.skipped_confinement == 3
+    assert result.skipped_confinement == 4
     assert (env["root"] / "acct1" / "sess_archived").exists()
+    assert newline.exists()
 
 
 # ── guardrail 3: min-age floor (mtime belt) ──────────────────────────────────
@@ -719,3 +733,107 @@ async def test_rmtree_failure_counts_as_error_not_missing(
     assert result.reaped == 1, "a failure on one dir must not abort the sweep"
     assert bad.exists(), "the un-removable dir is left for the next sweep"
     assert not good.exists()
+
+
+async def test_unreadable_candidate_path_skips_only_that_candidate(
+    env: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A permission error while classifying one candidate counts as ``skipped_error``.
+
+    ``Path.is_symlink`` ignores ENOENT/ELOOP but raises EACCES (e.g. an account
+    dir the worker can no longer search). That candidate is skipped and the
+    sweep still reaps the others.
+    """
+    bad = _mk_workspace(env["root"], "acct1", "sess_bad")
+    good = _mk_workspace(env["root"], "acct2", "sess_good")
+
+    # What an unsearchable parent does: every stat of the child fails with EACCES.
+    def _denied(real: Any) -> Any:
+        def _stat(path: Any, *a: Any, **k: Any) -> os.stat_result:
+            if not isinstance(path, int) and os.fspath(path) == str(bad):
+                raise PermissionError(13, "Permission denied", str(bad))
+            return real(path, *a, **k)  # type: ignore[no-any-return]
+
+        return _stat
+
+    pool = _fake_pool([_row("acct1", "sess_bad", str(bad)), _row("acct2", "sess_good", str(good))])
+
+    with monkeypatch.context() as m:
+        m.setattr(os, "stat", _denied(os.stat))
+        m.setattr(os, "lstat", _denied(os.lstat))
+        result = await sweep_archived_workspaces(pool)
+
+    assert result.skipped_error == 1
+    assert result.reaped == 1
+    assert bad.exists()
+    assert not good.exists()
+
+
+async def test_unlistable_subdirectory_fails_closed(
+    env: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A subdirectory the mtime walk cannot list keeps the whole candidate.
+
+    Skipping the unreadable subtree would hide any recent write inside it from
+    the mtime floor, and the delete would then remove the readable rest.
+    """
+    bad = _mk_workspace(env["root"], "acct1", "sess_bad")
+    locked = bad / "locked"
+    locked.mkdir()
+    good = _mk_workspace(env["root"], "acct1", "sess_good")
+    real_scandir = os.scandir
+
+    def _scandir(path: Any = ".") -> Any:
+        if not isinstance(path, int) and os.fspath(path) == str(locked):
+            raise PermissionError(13, "Permission denied", str(locked))
+        return real_scandir(path)
+
+    monkeypatch.setattr(os, "scandir", _scandir)
+    pool = _fake_pool([_row("acct1", "sess_bad", str(bad)), _row("acct1", "sess_good", str(good))])
+
+    result = await sweep_archived_workspaces(pool)
+
+    assert result.skipped_error == 1
+    assert result.reaped == 1
+    assert (bad / "scratch.txt").exists(), "nothing in the unlistable candidate is deleted"
+    assert not good.exists()
+
+
+# ── the event loop keeps running during a sweep (aios#2581) ──────────────────
+
+
+@pytest.mark.parametrize(
+    "helper",
+    ["_live_workspace_realpath_keepset", "_resolve_reap_target", "_dir_size_bytes"],
+)
+async def test_filesystem_work_leaves_the_event_loop_free(
+    env: dict[str, Any], monkeypatch: pytest.MonkeyPatch, helper: str
+) -> None:
+    """A sweep's filesystem work must not block the worker's event loop.
+
+    The wrapped helper waits for the event loop to run a coroutine before it
+    does its work. Called on the event loop's own thread, it blocks the loop,
+    the coroutine never runs, and the wait times out.
+    """
+    d = _mk_workspace(env["root"], "acct1", "sess_archived")
+    pool = _fake_pool([_row("acct1", "sess_archived", str(d))])
+    loop = asyncio.get_running_loop()
+    real = getattr(workspace_reaper, helper)
+    calls = 0
+
+    def _needs_the_loop(*args: Any, **kwargs: Any) -> Any:
+        nonlocal calls
+        calls += 1
+        try:
+            asyncio.run_coroutine_threadsafe(asyncio.sleep(0), loop).result(timeout=5)
+        except TimeoutError:
+            raise AssertionError(f"{helper} blocked the event loop") from None
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(workspace_reaper, helper, _needs_the_loop)
+
+    result = await sweep_archived_workspaces(pool)
+
+    assert calls == 1, f"the sweep called {helper} {calls} times"
+    assert result.reaped == 1
+    assert not d.exists()

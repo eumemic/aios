@@ -39,8 +39,11 @@ reaps **only** that, and **only** when the stored ``workspace_volume_path``
 
 * A user-overridden / clone-shared / nested path that resolves elsewhere never
   equals the canonical path ⇒ it is skipped (a space leak, never a wrong delete).
-  A symlink alias of the canonical path is equivalent and may pass this check;
-  the canonical delete target itself must still contain no symlink component.
+  The candidate query already leaves out every row whose stored path is not
+  spelled exactly ``<configured root>/<account_id>/<id>``. When the configured
+  root is a symlink, that spelling is an alias of the canonical path and passes
+  this check; the canonical delete target itself must still contain no symlink
+  component.
 * The canonical path is always two levels under ``workspace_root`` ⇒ it can
   never be ``workspace_root`` itself or a reserved sibling root (``_runs`` …).
 * Empty, relative, or out-of-tree stored values are rejected explicitly.
@@ -59,6 +62,13 @@ canonical default dir (``clone_session`` shares volumes). Before reaping, the
 candidate's canonical realpath is cross-checked against the keep-set of every
 non-archived session's workspace realpath; a collision skips the candidate so
 reaping the parent never deletes a live clone's volume.
+
+Candidates and cost
+-------------------
+The candidate query returns only sessions still on their default path, the
+one directory this reaper deletes (``unscoped_reapable_archived_workspaces``
+lists what that leaves out). The filesystem work runs in a worker thread, so a
+pass never blocks the event loop (aios#2581).
 
 Six guardrails (irreversible deletion — never-delete care)
 ----------------------------------------------------------
@@ -109,8 +119,9 @@ log = get_logger("aios.harness.workspace_reaper")
 # (deepen it, or walk out of the root). A value off this shape is
 # skipped-as-confinement, never reaped. Deliberately a character-class allowlist
 # (not the exact ULID length) — it forecloses the path-escape class without
-# coupling the reaper to the id minter's exact format.
-_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_]*$")
+# coupling the reaper to the id minter's exact format. Always ``fullmatch`` it:
+# an anchored ``$`` pattern also matches an id ending in "\n".
+_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_]*")
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,15 +132,18 @@ class ReapResult:
     The ``skipped_*`` counters partition every candidate that was *not* reaped,
     so a deploy can confirm the keep-set is doing its job:
 
-    * ``skipped_confinement`` — stored path did not realpath-equal the canonical
-      ``<root>/<account>/<session>`` path (off-shape id / symlink leaf / relative
-      / out-of-tree / override / shared / aliased). The dominant safety skip.
+    * ``skipped_confinement`` — off-shape id, a symlink in the canonical chain,
+      a stored path that does not realpath-equal the canonical
+      ``<root>/<account>/<session>`` path, or a live workspace overlapping it.
+      Rows whose stored path is not their default spelling never get here: the
+      candidate query leaves them out, so this counter does not include them.
     * ``skipped_missing`` — canonical dir not on disk (already gone / never
       provisioned). Benign.
     * ``skipped_too_fresh`` — dir mtime is under the mtime floor.
-    * ``skipped_error`` — an ``rmtree`` raised (perm drift / read-only FS); the
-      dir is left for the next sweep to retry. Kept distinct from ``missing`` so
-      a recurring permission failure is visible, not masked as benign.
+    * ``skipped_error`` — a filesystem check or the ``rmtree`` raised (perm
+      drift / read-only FS); the dir is left for the next sweep to retry. Kept
+      distinct from ``missing`` so a recurring permission failure is visible,
+      not masked as benign.
     """
 
     reaped: int = 0
@@ -175,71 +189,87 @@ def _canonical_workspace_path(account_id: str, session_id: str, workspace_root: 
     return workspace_root / account_id / session_id
 
 
-def _paths_overlap(left: str, right: str) -> bool:
-    """Whether either normalized absolute path contains the other."""
-    left_path = Path(left)
-    right_path = Path(right)
-    return (
-        left_path == right_path
-        or left_path.is_relative_to(right_path)
-        or right_path.is_relative_to(left_path)
-    )
+def _self_and_ancestors(path: str) -> list[str]:
+    """``path`` followed by every directory above it, up to ``/``."""
+    return [path, *map(str, Path(path).parents)]
+
+
+@dataclass(frozen=True, slots=True)
+class _LiveWorkspaces:
+    """The realpaths of the workspaces that live sessions and shared runs use.
+
+    ``paths`` holds each live realpath. ``covered`` holds each live realpath
+    and every directory above it, so a directory that contains a live
+    workspace is a member, and an overlap check is a few set lookups.
+    """
+
+    paths: frozenset[str]
+    covered: frozenset[str]
+
+    def overlaps(self, path: str) -> bool:
+        """Whether a live workspace is ``path``, lies inside it, or contains it."""
+        return path in self.covered or not self.paths.isdisjoint(_self_and_ancestors(path))
+
+
+def _raise(err: OSError) -> None:
+    raise err
 
 
 def _max_tree_mtime(path: Path) -> float:
-    """Newest lstat mtime in a workspace tree, without following symlinks."""
+    """Newest lstat mtime in a workspace tree, without following symlinks.
+
+    A directory that cannot be listed raises instead of being skipped, so an
+    unreadable subtree can never hide a recent write from the mtime floor.
+    """
     newest = path.lstat().st_mtime
-    for root, dirs, files in os.walk(path, followlinks=False):
+    for root, dirs, files in os.walk(path, followlinks=False, onerror=_raise):
         for name in (*dirs, *files):
             newest = max(newest, (Path(root) / name).lstat().st_mtime)
     return newest
 
 
-def _live_workspace_realpath_keepset(live_paths: list[str]) -> frozenset[str]:
+def _live_workspace_realpath_keepset(live_paths: list[str]) -> _LiveWorkspaces:
     """Realpath-normalize the live-clone keep-set (Fix 2), in a sync helper.
 
-    Kept off the async sweep path so the ``os.path.realpath`` calls don't trip
-    ASYNC240 (and mirror ``_resolve_reap_target``'s sync filesystem discipline).
-    A ``realpath`` that raises (vanished path / perm) drops that entry — but a
-    dropped live path can never *match* a candidate's canonical realpath, so
-    dropping is conservative: it never causes a wrong delete. (A candidate's own
-    canonical realpath is computed independently and must equal a KEPT live path
-    to be skipped.)
+    Non-strict ``realpath`` resolves a missing path as far as it exists rather
+    than raising. If it does raise, the error propagates and the pass reaps
+    nothing: an incomplete keep-set must never be treated as "no live clones".
     """
-    out: set[str] = set()
-    for p in live_paths:
-        try:
-            out.add(os.path.realpath(p))
-        except OSError:
-            continue
-    return frozenset(out)
+    out = {os.path.realpath(p) for p in live_paths}
+    return _LiveWorkspaces(
+        paths=frozenset(out),
+        covered=frozenset(a for p in out for a in _self_and_ancestors(p)),
+    )
 
 
 def _resolve_reap_target(
     *,
     account_id: str,
     session_id: str,
-    stored_path: str | None,
+    stored_path: str,
     workspace_root: Path,
     mtime_cutoff: float,
-    live_workspace_realpaths: frozenset[str],
+    live_workspaces: _LiveWorkspaces,
 ) -> tuple[Path | None, str]:
     """Decide whether (and where) to reap a single archived session's workspace.
 
     Returns ``(path, reason)``. ``path`` is the canonical dir to ``rmtree`` (NOT
     symlink-dereferenced), or ``None`` to skip; ``reason`` is one of ``"reap"`` /
     ``"confinement"`` / ``"missing"`` / ``"too_fresh"``. Every branch is
-    fail-closed: anything we cannot positively confirm safe returns ``None``.
+    fail-closed: anything we cannot positively confirm safe returns ``None``,
+    and a directory check or tree walk that fails with anything but a missing
+    path (a permission error, say) raises ``OSError``, which the caller counts
+    as ``skipped_error``.
 
     ``workspace_root`` MUST be already-resolved (the caller resolves it once).
-    ``live_workspace_realpaths`` is the realpath keep-set of every LIVE (non-
-    archived) session's stored workspace path (the caller builds it once); a
-    candidate whose canonical realpath collides with a live path is skipped (a
-    live clone can share an archived parent's own canonical dir).
+    ``live_workspaces`` is the realpath keep-set of every LIVE (non-archived)
+    session's stored workspace path (the caller builds it once); a candidate
+    whose canonical realpath collides with a live path is skipped (a live clone
+    can share an archived parent's own canonical dir).
     """
     # Id-shape gate: a well-formed id can't contain a separator/``..``, so an
     # interpolated id can never reshape the path. Reject anything off-shape.
-    if not (_ID_RE.match(account_id) and _ID_RE.match(session_id)):
+    if not (_ID_RE.fullmatch(account_id) and _ID_RE.fullmatch(session_id)):
         return None, "confinement"
 
     canonical = _canonical_workspace_path(account_id, session_id, workspace_root)
@@ -264,10 +294,12 @@ def _resolve_reap_target(
     # so this is reachable, not theoretical.
     #
     # The fix: confirm the canonical path has NO symlink anywhere in its chain
-    # (``realpath(canonical) == canonical``) AND its realpath is still exactly
-    # ``realpath(workspace_root)/<account_id>/<session_id>`` (two levels under
-    # the RESOLVED root). A symlink at ANY component (leaf OR parent OR root)
-    # breaks one of these equalities ⇒ skipped, never reaped.
+    # (``realpath(canonical) == canonical``). ``canonical`` is the RESOLVED root
+    # joined with two well-formed ids, so that one equality also proves its
+    # realpath is exactly ``<resolved root>/<account_id>/<session_id>``: a
+    # symlink at ANY component (leaf OR parent OR root, including a root that
+    # became a symlink after the caller resolved it) makes the realpath differ
+    # from the un-resolved string ⇒ skipped, never reaped.
     #
     # IMPORTANT: never replace ``canonical`` (the rmtree target) with its
     # ``.resolve()``/``realpath`` form — the target must stay the un-resolved
@@ -280,13 +312,6 @@ def _resolve_reap_target(
         # A symlink exists somewhere in the canonical chain (leaf, parent, or
         # root). The un-resolved path differs from its realpath ⇒ fail closed.
         return None, "confinement"
-    # And the resolved canonical must sit exactly two levels under the RESOLVED
-    # root: ``realpath(root)/<account_id>/<session_id>``. ``workspace_root`` is
-    # already resolved by the caller, but a parent/root symlink could still have
-    # left ``canonical_real`` outside it — recompute against the resolved root.
-    expected_real = os.path.join(os.path.realpath(workspace_root), account_id, session_id)
-    if canonical_real != expected_real:
-        return None, "confinement"
 
     # Belt-and-suspenders: never follow a symlink at the canonical leaf either.
     # Checked on the UN-resolved path (``lstat``/``islink``); redundant with the
@@ -298,7 +323,7 @@ def _resolve_reap_target(
     # Confinement: reap ONLY the canonical default path, and ONLY when the
     # session's stored path points at the SAME real location. Relative paths are
     # rejected before realpath so the decision never depends on process CWD.
-    if not stored_path or not os.path.isabs(stored_path):
+    if not os.path.isabs(stored_path):
         return None, "confinement"
     try:
         if os.path.realpath(stored_path) != canonical_real:
@@ -314,20 +339,17 @@ def _resolve_reap_target(
     # fail-closed-empty only when its query erred — and on that error the caller
     # skips the WHOLE sweep, so an empty set here always means "no live collision
     # among the sessions we could enumerate".)
-    if any(_paths_overlap(canonical_real, live) for live in live_workspace_realpaths):
+    if live_workspaces.overlaps(canonical_real):
         return None, "confinement"
 
-    # Structural belt: a real dir that is exactly two levels under the root.
     if not canonical.is_dir():
         return None, "missing"
-    if canonical.parent.parent != workspace_root:
-        return None, "confinement"
 
     try:
         # Descendant writes do not update the candidate directory's mtime, so
         # inspect the full tree. os.walk never follows symlinked directories.
         mtime = _max_tree_mtime(canonical)
-    except OSError:
+    except FileNotFoundError:
         return None, "missing"
     if mtime > mtime_cutoff:
         return None, "too_fresh"
@@ -340,9 +362,13 @@ async def sweep_archived_workspaces(pool: asyncpg.Pool[Any]) -> ReapResult:
 
     Honors the kill-switch (``workspace_reaper_enabled``): disabled ⇒ deletes
     nothing, never queries the DB, returns an empty result. Fail-closed on a DB
-    error: the candidate read is the only DB call, so a failure reaps nothing
-    this pass. ``workspace_reaper_dry_run`` deletes nothing but still computes
-    and logs the would-reap set + reclaimable bytes.
+    error: if either the candidate read or the live keep-set read fails, the
+    pass reaps nothing. ``workspace_reaper_dry_run`` deletes nothing but still
+    computes and logs the would-reap set + reclaimable bytes.
+
+    Classification, the keep-set's realpaths and the reclaimable-size walk run
+    in a worker thread, so the event loop keeps serving session steps during a
+    pass (aios#2581).
     """
     settings = get_settings()
     if not settings.workspace_reaper_enabled:
@@ -357,10 +383,14 @@ async def sweep_archived_workspaces(pool: asyncpg.Pool[Any]) -> ReapResult:
             candidates = await queries.unscoped_reapable_archived_workspaces(
                 conn,
                 min_archived_age_seconds=float(settings.workspace_reaper_min_archived_age_seconds),
+                # The configured root, not the resolved one: stored default
+                # paths are spelled from it.
+                workspace_root=settings.workspace_root,
             )
             # Live-clone keep-set (Fix 2): every non-archived session's workspace
-            # path, realpath-normalized. Read in the SAME critical section as the
-            # candidate set so the two reads see one consistent DB snapshot.
+            # path, realpath-normalized. Read AFTER the candidate set (each
+            # statement takes its own READ COMMITTED snapshot), so the keep-set
+            # is at least as fresh as the candidates it protects against.
             live_paths = await queries.unscoped_live_workspace_volume_paths(conn)
     except (asyncpg.PostgresError, OSError):
         # fail-closed: a DB hiccup must never be read as "everything is dead".
@@ -369,9 +399,7 @@ async def sweep_archived_workspaces(pool: asyncpg.Pool[Any]) -> ReapResult:
         log.exception("workspace_reaper.candidate_read_failed")
         return ReapResult()
 
-    # Normalize the live keep-set once (sync helper — keeps os.path off the
-    # async path; see _live_workspace_realpath_keepset for the drop semantics).
-    live_workspace_realpaths = _live_workspace_realpath_keepset(live_paths)
+    live_workspaces = await asyncio.to_thread(_live_workspace_realpath_keepset, live_paths)
 
     reaped = bytes_freed = skip_conf = skip_missing = skip_fresh = skip_error = 0
     # One non-pooled backend is dedicated to this sweep's lock lifecycle.  The
@@ -384,14 +412,22 @@ async def sweep_archived_workspaces(pool: asyncpg.Pool[Any]) -> ReapResult:
     )
     try:
         for row in candidates:
-            target, reason = _resolve_reap_target(
-                account_id=row["account_id"],
-                session_id=row["id"],
-                stored_path=row["workspace_volume_path"],
-                workspace_root=workspace_root,
-                mtime_cutoff=mtime_cutoff,
-                live_workspace_realpaths=live_workspace_realpaths,
-            )
+            try:
+                target, reason = await asyncio.to_thread(
+                    _resolve_reap_target,
+                    account_id=row["account_id"],
+                    session_id=row["id"],
+                    stored_path=row["workspace_volume_path"],
+                    workspace_root=workspace_root,
+                    mtime_cutoff=mtime_cutoff,
+                    live_workspaces=live_workspaces,
+                )
+            except OSError:
+                # An unreadable path (perm drift) skips this candidate only:
+                # nothing is deleted, and the next sweep retries it.
+                log.exception("workspace_reaper.classify_failed", session_id=row["id"])
+                skip_error += 1
+                continue
             if reason == "confinement":
                 skip_conf += 1
                 continue
@@ -403,7 +439,7 @@ async def sweep_archived_workspaces(pool: asyncpg.Pool[Any]) -> ReapResult:
                 continue
             assert target is not None  # reason == "reap"
 
-            size = _dir_size_bytes(target)
+            size = await asyncio.to_thread(_dir_size_bytes, target)
             if dry_run:
                 reaped += 1
                 bytes_freed += size

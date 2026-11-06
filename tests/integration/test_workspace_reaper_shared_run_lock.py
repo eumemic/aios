@@ -14,6 +14,7 @@ import pytest
 from aios.config import get_settings
 from aios.db import queries
 from aios.db.pool import create_pool
+from aios.db.queries.sessions import _default_workspace_path
 from aios.harness import workspace_reaper
 from aios.harness.workspace_reaper import sweep_archived_workspaces
 from aios.sandbox.volumes import purge_session_directories
@@ -250,15 +251,28 @@ async def test_nested_workspace_activation_serializes_with_parent_delete(
         await contender.close()
 
 
+@pytest.mark.parametrize("symlinked_root", [False, True], ids=["root", "symlinked-root"])
 async def test_sweep_uses_real_pool_locking_path(
     migrated_db_url: str,
     _reset_db_state: None,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    symlinked_root: bool,
 ) -> None:
-    """The real asyncpg.Pool path locks, rechecks, and performs a real rmtree."""
+    """The real asyncpg.Pool path locks, rechecks, and performs a real rmtree.
+
+    Under a symlinked ``workspace_root`` the stored default path is spelled
+    through the symlink, so the candidate query has to match the configured
+    root rather than the resolved one (aios#2581).
+    """
     pool = await create_pool(migrated_db_url, min_size=1, max_size=2)
-    target = tmp_path / "acc_reaper" / "sess_archived"
+    real_root = tmp_path / "real"
+    real_root.mkdir()
+    root = real_root
+    if symlinked_root:
+        root = tmp_path / "link"
+        root.symlink_to(real_root, target_is_directory=True)
+    target = real_root / "acc_reaper" / "sess_archived"
     target.mkdir(parents=True)
     (target / "payload").write_text("orphan")
     settings = get_settings().model_copy(deep=True)
@@ -266,12 +280,14 @@ async def test_sweep_uses_real_pool_locking_path(
     # parse-only AIOS_DB_URL configured by CI.  Keep the reaper's dedicated lock
     # backend on that same database.
     settings.db_url = migrated_db_url
-    settings.workspace_root = tmp_path
+    settings.workspace_root = root
     settings.workspace_reaper_enabled = True
     settings.workspace_reaper_dry_run = False
     settings.workspace_reaper_min_archived_age_seconds = 0
     settings.workspace_reaper_min_mtime_age_seconds = 0
     monkeypatch.setattr(workspace_reaper, "get_settings", lambda: settings)
+    # Session creation reads the global settings to spell the default path.
+    monkeypatch.setattr(get_settings(), "workspace_root", root)
     try:
         async with pool.acquire() as conn:
             await _seed(conn)
@@ -283,7 +299,7 @@ async def test_sweep_uses_real_pool_locking_path(
                 VALUES ('sess_archived', 'agent_reaper', 'env_reaper', 1, '{}'::jsonb,
                         $1, '{}'::jsonb, 'acc_reaper', now() - interval '1 day')
                 """,
-                str(target),
+                _default_workspace_path("acc_reaper", "sess_archived"),
             )
         result = await sweep_archived_workspaces(pool)
         assert result.reaped == 1
