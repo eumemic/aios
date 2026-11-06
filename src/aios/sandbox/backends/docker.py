@@ -402,13 +402,15 @@ def _runsc_operator_preamble(operator_root: str = _RUNSC_OPERATOR_ROOT) -> str:
 # the immediately preceding ``inspect --size`` stat-walk. Commit must walk the
 # same paths and additionally read and compress their contents, so ten walk
 # durations is a deliberately generous measured-hardware budget. The floor
-# covers tiny layers and clocks with coarse resolution.
+# covers tiny layers and clocks with coarse resolution. A flatten exports the
+# whole image, which the walk does not cover, so it also gets the fixed-rate
+# budget for the bytes it moves.
 _SNAPSHOT_TIMEOUT_FLOOR_S = 60.0
 _SNAPSHOT_WALK_SAFETY_FACTOR = 10.0
 
 
 def _snapshot_timeout_s(
-    size_rw: int | None,
+    size_bytes: int | None,
     *,
     retry_attempt: int = 0,
     size_walk_seconds: float | None = None,
@@ -417,7 +419,7 @@ def _snapshot_timeout_s(
     if size_walk_seconds is not None:
         base = max(_SNAPSHOT_TIMEOUT_FLOOR_S, size_walk_seconds * _SNAPSHOT_WALK_SAFETY_FACTOR)
     else:
-        seconds = (size_rw or 0) * settings.sandbox_snapshot_timeout_ns_per_byte
+        seconds = (size_bytes or 0) * settings.sandbox_snapshot_timeout_ns_per_byte
         base = max(settings.sandbox_snapshot_timeout_floor_seconds, seconds)
         base *= settings.sandbox_snapshot_timeout_safety_margin
     retry_scale = min(
@@ -1244,6 +1246,15 @@ class DockerBackend:
             ephemeral = await self._ephemeral_bytes(sandbox_id)
             estimate = max(0, parent_size + rw - ephemeral)
             required = int(estimate * 1.75) + settings.sandbox_flatten_disk_floor_bytes
+            # The walk measured the writable layer, but the export moves the
+            # whole view (#2579), so also budget the bytes it moves. That
+            # includes the ephemeral bytes: the export reads them and the tar
+            # filter drops them afterwards, so they are subtracted only from
+            # the disk estimate.
+            snapshot_timeout_s = max(
+                snapshot_timeout_s,
+                _snapshot_timeout_s(parent_size + rw, retry_attempt=retry_attempt),
+            )
         else:
             # A commit writes one new layer, roughly the writable layer's size.
             # Ungated before #2280: the branch that runs when a sandbox is

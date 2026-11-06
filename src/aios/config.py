@@ -270,9 +270,9 @@ class Settings(BaseSettings):
     sandbox_snapshot_timeout_ns_per_byte: float = Field(
         default=20e-9,
         gt=0,
-        description="Fixed snapshot time per byte used to size ``docker image save``/``load`` "
-        "budgets. The snapshot verb (commit/flatten) is instead budgeted from the "
-        "preceding ``inspect --size`` stat walk (see ``_snapshot_timeout_s``).",
+        description="Fixed snapshot time per byte. Sizes the ``docker image save``/``load`` "
+        "budgets and a flatten's export. A commit is budgeted from the preceding "
+        "``inspect --size`` stat walk instead (see ``_snapshot_timeout_s``).",
     )
     sandbox_snapshot_timeout_safety_margin: float = Field(
         default=2.0,
