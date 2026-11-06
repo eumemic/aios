@@ -11,6 +11,7 @@ import hashlib
 import os
 from collections.abc import Sequence
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import asyncpg
@@ -432,13 +433,23 @@ async def unscoped_live_session_ids(
 
 
 async def unscoped_reapable_archived_workspaces(
-    conn: asyncpg.Connection[Any], *, min_archived_age_seconds: float
+    conn: asyncpg.Connection[Any], *, min_archived_age_seconds: float, workspace_root: Path
 ) -> list[asyncpg.Record]:
     """Return ``(id, account_id, workspace_volume_path)`` for sessions whose
     ``/workspace`` host dir is reap-eligible — the archived-session workspace
     reaper (aios#40, the "45G hole").
 
     A session qualifies iff ALL hold:
+
+    * ``workspace_volume_path`` is the session's default
+      ``<workspace_root>/<account_id>/<id>``, spelled the way session creation
+      writes it (from the configured, unresolved ``workspace_root``). That
+      directory is the only one the reaper ever deletes, so a session on any
+      other path can never be reaped and is not returned. Such sessions
+      include workflow children on their run's ``<account_id>/_runs/<run_id>``
+      scratch (the host-dir reaper reclaims that), pre-account
+      ``<workspace_root>/<id>`` rows, and clones that share another session's
+      volume. They far outnumber the reapable rows (aios#2581).
 
     * ``archived_at IS NOT NULL`` — archived-only. Session archival is terminal
       and permanent: no code path ever clears ``sessions.archived_at`` (the
@@ -458,12 +469,12 @@ async def unscoped_reapable_archived_workspaces(
       with the SAME predicate the wake sweep uses, read fresh at sweep time, so
       a session with work still pending is never a candidate.
 
-    Returns the *stored* ``workspace_volume_path`` verbatim; the caller is
-    responsible for the canonical-path confinement check (it reaps ONLY the
-    derived ``workspace_root/<account_id>/<session_id>`` and only when the
-    stored value resolves equal to it — a user-overridden / clone-shared /
-    aliased path is therefore never reaped). Worker-side / unscoped: the reaper
-    holds these rows across all accounts.
+    Returns the *stored* ``workspace_volume_path`` verbatim. The path filter
+    is a string comparison and proves nothing about the disk, so the caller
+    still runs the canonical-path confinement check before deleting anything
+    (it reaps ONLY the derived ``workspace_root/<account_id>/<session_id>`` and
+    only when the stored value resolves equal to it). Worker-side / unscoped:
+    the reaper holds these rows across all accounts.
     """
     rows: list[asyncpg.Record] = await conn.fetch(
         f"""
@@ -471,9 +482,12 @@ async def unscoped_reapable_archived_workspaces(
           FROM sessions
          WHERE archived_at IS NOT NULL
            AND archived_at < now() - make_interval(secs => $1::double precision)
+           AND workspace_volume_path = $2 || account_id || '/' || id
            AND NOT {session_active_predicate("sessions")}
         """,
         float(min_archived_age_seconds),
+        # The prefix ``str(workspace_root / account_id / id)`` starts with.
+        os.path.join(workspace_root, ""),
     )
     return rows
 
