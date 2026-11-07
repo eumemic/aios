@@ -9,6 +9,7 @@ script against a stubbed ``docker``/``uv`` to prove the wiring.
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -27,6 +28,7 @@ from scripts.browser_chromium_pin import (
     pinned_version,
     reported_version,
 )
+from scripts.browser_image_inputs import LABEL, inputs_digest
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -131,7 +133,9 @@ _FAKE_DOCKER = """#!/usr/bin/env bash
 # with the image's env, the protocol module print reads $FAKE_PROTOCOL.
 case "$1" in
   pull|tag) exit 0 ;;
-  image) echo "image registered: sha256:fake"; exit 0 ;;
+  image)
+    if [[ "$*" == *".Config.Labels"* ]]; then echo "$FAKE_LABELS"; exit 0; fi
+    echo "image registered: sha256:fake"; exit 0 ;;
   run)
     shift 3
     if [[ "$1" == python3 ]]; then exec cat "$FAKE_PROTOCOL"; fi
@@ -149,7 +153,11 @@ exec "$FAKE_PYTHON" "$@"
 
 
 def _run_pull_step(
-    tmp_path: Path, *, chrome: str | None, protocol: bytes | None = None
+    tmp_path: Path,
+    *,
+    chrome: str | None,
+    protocol: bytes | None = None,
+    labels: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Execute ``pull_browser``'s real ``run:`` script under GHA's default
     ``bash -e`` against a fake image whose Chromium is the ``chrome`` script
@@ -179,6 +187,10 @@ def _run_pull_step(
         "FAKE_CHROME": str(fake_chrome),
         "FAKE_PROTOCOL": str(fake_protocol),
         "FAKE_PYTHON": sys.executable,
+        # Default: an image stamped from exactly this checkout's inputs.
+        "FAKE_LABELS": labels
+        if labels is not None
+        else json.dumps({LABEL: inputs_digest(), "org.opencontainers.image.title": "x"}),
     }
     return subprocess.run(
         ["bash", "--noprofile", "--norc", "-e", str(tmp_path / "step.sh")],
@@ -222,3 +234,28 @@ def test_pull_step_still_fails_on_protocol_drift(tmp_path: Path) -> None:
     )
     assert r.returncode != 0
     assert "browser_protocol.py differs from checkout" in r.stdout
+
+
+def _current_banner() -> str:
+    return f"echo 'Google Chrome for Testing {fmt(pinned_version(DOCKERFILE.read_text()))}'"
+
+
+@pytest.mark.parametrize(
+    "labels",
+    [
+        # A :smoked published before #2570 carries no digest label at all.
+        "null",
+        "{}",
+        json.dumps({"org.opencontainers.image.title": "aios-browser"}),
+        # Protocol + Chromium match, but some other input (driver module,
+        # requirements.lock, Dockerfile apt layer) moved on master since.
+        json.dumps({LABEL: "sha256:" + "0" * 64}),
+        "",
+    ],
+)
+def test_pull_step_fails_closed_on_stale_or_missing_inputs_digest(
+    tmp_path: Path, labels: str
+) -> None:
+    r = _run_pull_step(tmp_path, chrome=_current_banner(), labels=labels)
+    assert r.returncode != 0, r.stdout + r.stderr
+    assert "browser-image inputs" in r.stdout

@@ -579,6 +579,14 @@ jobs:
         # second copy of the version here); any lag fails closed into the
         # local rebuild below.  ``chromium_version=$(…)`` is a bare
         # assignment so ``bash -e`` fails the step if ``docker run`` does.
+        #
+        # Protocol + Chromium still miss every OTHER image input (a driver
+        # module, ``requirements.lock``, an apt/base edit in the Dockerfile),
+        # so the image must also carry the ``browser-inputs-digest`` label
+        # ``build-browser-image.yml`` stamps from
+        # ``scripts/browser_image_inputs.py`` — a digest over every build
+        # input — and it must EQUAL the digest of THIS checkout (#2570).  An
+        # unlabeled (pre-#2570) or drifted image fails closed into the rebuild.
         id: pull_browser
         if: needs.detect.outputs.run_checks == 'true' && matrix.shard == 'docker' && needs.detect.outputs.browser_changed == 'false'
         continue-on-error: true
@@ -598,13 +606,19 @@ jobs:
             echo "::error::pulled :smoked Chromium does not match the Dockerfile.browser pin — :smoked is stale relative to HEAD"
             exit 1
           }
+          image_labels=$(docker image inspect aios-browser:ci --format '{{json .Config.Labels}}')
+          uv run python scripts/browser_image_inputs.py check "$image_labels" || {
+            echo "::error::pulled :smoked was not built from this checkout's browser-image inputs — :smoked is stale relative to HEAD"
+            exit 1
+          }
 
       - name: Build browser image
         # Fires when the image inputs changed (the pull path was skipped) OR
         # the pull attempted and failed — GHCR outage, ``:smoked`` not yet
         # published (e.g. the first run after the browser lane merges, before
         # ``build-browser-image.yml``'s first master publish), or the
-        # stale-probe above tripped (protocol or Chromium-pin mismatch).
+        # stale-probe above tripped (protocol, Chromium-pin, or inputs-digest
+        # mismatch).
         # amd64-only and QEMU-free, unlike the publishing workflow — roughly
         # a 10-minute cold build (apt install-deps + Chromium download
         # dominate).
