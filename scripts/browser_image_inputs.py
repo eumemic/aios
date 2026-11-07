@@ -109,7 +109,9 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("digest", help="print the checkout's browser-image inputs digest")
     sub.add_parser("label", help="print the OCI label key the digest is stamped under")
     check = sub.add_parser("check", help="fail unless the image's label equals the inputs digest")
-    check.add_argument("labels_json", help="docker image inspect --format '{{json .Config.Labels}}'")
+    check.add_argument(
+        "labels_json", help="docker image inspect --format '{{json .Config.Labels}}'"
+    )
     args = parser.parse_args(argv)
 
     try:
