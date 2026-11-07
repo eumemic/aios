@@ -45,6 +45,9 @@ on:
       # The contract suite's pin/floor check (``CHROMIUM_FLOOR`` and the
       # Dockerfile-pin equality) lives here.
       - scripts/browser_chromium_pin.py
+      # The inputs-digest label the PR stale-probe compares (#2570): a change
+      # to what it hashes must re-stamp :smoked.
+      - scripts/browser_image_inputs.py
       - .github/workflows/build-browser-image.yml
   workflow_dispatch:
 
@@ -98,6 +101,15 @@ jobs:
             type=raw,value=latest
             type=sha,format=short,prefix=sha-
 
+      - name: Compute browser-image inputs digest
+        # Stamped on the image as a label; code-validation's ``pull_browser``
+        # stale-probe recomputes it from the PR checkout and rebuilds locally
+        # unless they are EQUAL — so ANY input change (not just the protocol
+        # module or the Chromium pin) is caught while :smoked lags (#2570).
+        id: inputs
+        run: |
+          echo "label=$(python3 scripts/browser_image_inputs.py label)=$(python3 scripts/browser_image_inputs.py digest)" >> "$GITHUB_OUTPUT"
+
       - name: Build and push
         uses: docker/build-push-action@v5
         with:
@@ -112,7 +124,9 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          labels: |
+            ${{ steps.meta.outputs.labels }}
+            ${{ steps.inputs.outputs.label }}
           # Scoped: the default shared scope lets the sandbox/signal image
           # builds evict this cache — and a cold browser rebuild is the
           # most expensive build in the repo (QEMU arm64 + Chromium).
