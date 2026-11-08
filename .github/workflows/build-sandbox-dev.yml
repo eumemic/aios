@@ -1,0 +1,234 @@
+name: Build aios-sandbox-dev image
+
+# Builds and publishes ``ghcr.io/eumemic/aios-sandbox-dev``. This is the base
+# sandbox plus Google Chrome stable, the bundled-Chromium OS deps, Node 22 LTS
+# and a pinned playwright-core, for e2e-capable build lanes in LIMITED-network
+# environments (aios#2585). See ``docker/Dockerfile.sandbox-dev``.
+#
+# Triggers:
+# - Push to master that touches the Dockerfile, this workflow, or the gates
+#   (``:smoked`` means "passed THESE suites", so a gate change must re-stamp it)
+# - The base image publishing: ``workflow_run`` after "Build aios-sandbox
+#   image" succeeds on master. Its smoke job has then advanced the base
+#   ``:smoked`` tag, which this image is built FROM.
+# - Pull requests touching the same inputs: build WITHOUT pushing, then run the
+#   same smoke and negative control against the local image. The build and the
+#   gates are therefore proven before merge, and nothing is published from a PR.
+# - Manual ``workflow_dispatch``
+#
+# Tags published (non-PR only): ``latest`` and ``sha-<short>``. The smoke job
+# then retags ``:smoked``. amd64 ONLY: Google ships no linux-arm64 Chrome .deb,
+# and prod is amd64.
+#
+# The base is pinned per build. The digest of ``aios-sandbox:smoked`` (the
+# contract-tested base) is resolved once and passed as ``BASE_IMAGE``. It is
+# recorded in the ``aios.sandbox_dev.base_image`` label, and the same digest is
+# the negative control's subject.
+#
+# Security note: no untrusted input (issue titles, PR bodies, head_ref, etc.)
+# is interpolated into ``run:`` commands. Only trusted contexts
+# (github.actor, secrets.GITHUB_TOKEN, github.sha, step outputs computed
+# from those) are referenced.
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - docker/Dockerfile.sandbox-dev
+      - .github/workflows/build-sandbox-dev.yml
+      # The gates themselves. The base contract runs against this image too.
+      - tests/e2e/test_sandbox_dev_image_contract.py
+      - tests/e2e/test_sandbox_image_contract.py
+      # The runtime probes run under the worker's authored seccomp profile.
+      - docker/seccomp-sandbox.json
+  pull_request:
+    # Same list as on.push.paths (kept equal by tests/unit/test_detect_filter_sync.py).
+    paths:
+      - docker/Dockerfile.sandbox-dev
+      - .github/workflows/build-sandbox-dev.yml
+      # The gates themselves. The base contract runs against this image too.
+      - tests/e2e/test_sandbox_dev_image_contract.py
+      - tests/e2e/test_sandbox_image_contract.py
+      # The runtime probes run under the worker's authored seccomp profile.
+      - docker/seccomp-sandbox.json
+  workflow_run:
+    workflows: ["Build aios-sandbox image"]
+    types: [completed]
+    branches: [master]
+  workflow_dispatch:
+
+# One build+smoke pipeline at a time per ref. A newer run cancels the in-flight
+# one rather than racing to update :smoked.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  BASE_SMOKED: ghcr.io/eumemic/aios-sandbox:smoked
+  DEV_REPO: ghcr.io/eumemic/aios-sandbox-dev
+
+jobs:
+  build:
+    # A failed or cancelled base build must not trigger a rebuild on top of a stale base.
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    outputs:
+      # The image the smoke job tests. On non-PR events this is the immutable
+      # pushed sha tag. On PRs it is empty, and smoke rebuilds locally from
+      # the same cache.
+      sha_tag: ${{ steps.sha_tag.outputs.tag }}
+      base_ref: ${{ steps.base.outputs.ref }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve base image digest
+        id: base
+        run: |
+          digest=$(docker buildx imagetools inspect "$BASE_SMOKED" --format '{{json .Manifest}}' | jq -r .digest)
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::could not resolve $BASE_SMOKED digest"; exit 1; }
+          echo "ref=ghcr.io/eumemic/aios-sandbox@${digest}" >> "$GITHUB_OUTPUT"
+
+      - name: Extract image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.DEV_REPO }}
+          tags: |
+            type=raw,value=latest
+            type=sha,format=short,prefix=sha-
+
+      - name: Build (and push on non-PR events)
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: docker/Dockerfile.sandbox-dev
+          platforms: linux/amd64
+          build-args: |
+            BASE_IMAGE=${{ steps.base.outputs.ref }}
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=sandbox-dev-image
+          cache-to: type=gha,mode=max,scope=sandbox-dev-image
+
+      - name: Expose sha tag for smoke job
+        id: sha_tag
+        if: github.event_name != 'pull_request'
+        run: echo "tag=${DEV_REPO}:sha-${GITHUB_SHA:0:7}" >> "$GITHUB_OUTPUT"
+
+  smoke:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      packages: write
+    env:
+      BASE_REF: ${{ needs.build.outputs.base_ref }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/setup-buildx-action@v3
+      - uses: astral-sh/setup-uv@v4
+        with:
+          python-version: '3.13'
+          enable-cache: true
+      - name: Install test deps
+        run: uv sync --dev --frozen
+
+      - name: Pull just-built image
+        # Pull by immutable sha tag, so a concurrent master push that advances
+        # :latest cannot race the smoke.
+        if: github.event_name != 'pull_request'
+        run: |
+          docker pull "${{ needs.build.outputs.sha_tag }}"
+          echo "DEV_IMAGE=${{ needs.build.outputs.sha_tag }}" >> "$GITHUB_ENV"
+      - name: Build image locally (PR, no push)
+        # A CI-local tag with no registry prefix. If the local build were
+        # somehow missing, the suites' pull fallback then fails loudly instead
+        # of silently testing a registry image (the PR #670 footgun).
+        if: github.event_name == 'pull_request'
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: docker/Dockerfile.sandbox-dev
+          platforms: linux/amd64
+          build-args: |
+            BASE_IMAGE=${{ needs.build.outputs.base_ref }}
+          load: true
+          push: false
+          tags: aios-sandbox-dev:ci
+          cache-from: type=gha,scope=sandbox-dev-image
+      - name: Select local image (PR)
+        if: github.event_name == 'pull_request'
+        run: echo "DEV_IMAGE=aios-sandbox-dev:ci" >> "$GITHUB_ENV"
+
+      - name: Load legacy netfilter modules
+        # The base contract's runc lockdown sidecar uses iptables-legacy against
+        # the HOST kernel. See the script.
+        run: ./scripts/ci-load-legacy-netfilter.sh
+
+      - name: Base sandbox contract against the dev image
+        # The unchanged base suite with the image swapped in. The only
+        # deselected test is the amd64+arm64 manifest check: this image is
+        # amd64-only by design, and the dev suite's
+        # test_manifest_includes_amd64 replaces it.
+        run: >
+          uv run pytest tests/e2e/test_sandbox_image_contract.py -v
+          --deselect tests/e2e/test_sandbox_image_contract.py::TestArchitecture::test_manifest_includes_amd64_and_arm64
+        env:
+          AIOS_DOCKER_IMAGE: ${{ env.DEV_IMAGE }}
+
+      - name: Dev image contract
+        run: uv run pytest tests/e2e/test_sandbox_dev_image_contract.py -v
+        env:
+          AIOS_SANDBOX_DEV_IMAGE: ${{ env.DEV_IMAGE }}
+
+      - name: Negative control - dev additions must FAIL against the base image
+        # Run TestDevAdditions against the exact base digest this image was
+        # built FROM. Every test must fail, and none may pass or skip. A test
+        # that passes on the base is not testing what the dev image adds.
+        run: |
+          docker pull "$BASE_REF"
+          set +e
+          AIOS_SANDBOX_DEV_IMAGE="$BASE_REF" uv run pytest \
+            "tests/e2e/test_sandbox_dev_image_contract.py::TestDevAdditions" \
+            -v -p no:cacheprovider --junitxml=negative-control.xml
+          rc=$?
+          set -e
+          [ "$rc" -eq 1 ] || { echo "::error::expected pytest exit 1 (failures), got $rc"; exit 1; }
+          python3 - <<'EOF'
+          import sys
+          import xml.etree.ElementTree as ET
+          suite = ET.parse("negative-control.xml").getroot().find("testsuite")
+          tests, failures, errors, skipped = (int(suite.get(k, 0)) for k in ("tests", "failures", "errors", "skipped"))
+          print(f"negative control: tests={tests} failures={failures} errors={errors} skipped={skipped}")
+          if tests == 0 or skipped or failures + errors != tests:
+              print("::error::every TestDevAdditions test must FAIL against the base image")
+              sys.exit(1)
+          EOF
+
+      - name: Retag sha → :smoked
+        if: github.event_name != 'pull_request'
+        run: |
+          docker buildx imagetools create \
+            -t "${DEV_REPO}:smoked" \
+            "${{ needs.build.outputs.sha_tag }}"

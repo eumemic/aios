@@ -1,0 +1,150 @@
+# aios sandbox DEV image: the base sandbox contract with a browser toolchain
+# baked in, for e2e-capable build lanes (aios#2585).
+#
+# Why this exists: UI repos (aios-console) put Playwright e2e in their
+# acceptance criteria, but the build lanes run in a LIMITED-networking
+# environment (github, pypi, astral and the package-manager registries only).
+# Chrome's download hosts (dl.google.com, storage.googleapis.com,
+# cdn.playwright.dev) are unreachable from there by design. So the browser is
+# baked in at build time (CI has full egress) instead of widening the lane's
+# egress. Pin it per-environment via ``EnvironmentConfig.image`` (#724); the
+# shared default ``aios-sandbox`` image is unchanged.
+#
+# What it adds on top of ``ghcr.io/eumemic/aios-sandbox``:
+#   - Google Chrome stable at /opt/google/chrome/chrome, which is the path
+#     Playwright's ``channel: "chrome"`` resolves on linux. aios-console uses
+#     that channel. It works with any repo Playwright version, because
+#     Playwright drives the installed Chrome over CDP.
+#   - The OS libraries Playwright's BUNDLED Chromium needs (the
+#     ``playwright install-deps chromium`` set). A repo on the default
+#     ``chromium`` channel can then run once its own browser binary is present.
+#   - Node 22 LTS from nodejs.org at /usr/local (shadows Debian's Node 18 at
+#     /usr/bin via PATH order), so the lane's in-band Node bootstrap
+#     (company#628, engines ">=20") is a no-op. The issue says "Node 20 LTS",
+#     but Node 20 reached end-of-life in 2026-04. 22 is the maintained LTS
+#     that satisfies ">=20", and aios-console's own CI pins 22.
+#   - playwright-core (the version aios-console uses) at
+#     /opt/aios-sandbox-dev/node_modules/playwright-core. It is used here to run
+#     ``install-deps``, and by the contract test to launch the chrome channel
+#     offline. It is NOT on any module path the lane's repos resolve, so it
+#     cannot shadow a repo's own Playwright.
+#
+# AMD64 ONLY. Google ships no linux-arm64 Chrome .deb, and prod (server-b) is
+# amd64. The build fails loudly on any other architecture (guard below), and
+# ``build-sandbox-dev.yml`` builds linux/amd64 only.
+#
+# Reproducibility: every download is a VERSIONED URL with ``ADD --checksum``
+# (the same pattern as Dockerfile.browser), so any byte substitution fails the
+# build. Google keeps versioned stable .debs in its pool
+# (pool/main/g/google-chrome-stable/google-chrome-stable_<ver>_amd64.deb). The
+# sha256 below is the one published in Google's signed apt ``Packages`` index
+# for that version, and was re-verified against the downloaded bytes. Google
+# eventually prunes old pool entries. When the pinned URL 404s, bump the pin.
+# To bump Chrome, take Version/SHA256 from
+#   https://dl.google.com/linux/chrome/deb/dists/stable/main/binary-amd64/Packages
+# (the ``Package: google-chrome-stable`` stanza) and update CHROME_VERSION plus
+# the checksum. The contract test asserts the installed version equals
+# CHROME_VERSION.
+#
+# After install, the .deb's postinst registers Google's apt repo
+# (/etc/apt/sources.list.d/google-chrome.*) plus a cron job that re-adds it.
+# Both are removed: the lane cannot reach dl.google.com, so a left-behind
+# source would make every in-lane ``apt-get update`` fail on it. It would also
+# let Chrome float off the pin.
+#
+# Local build (repo root context, matching the other images):
+#   docker build --platform linux/amd64 -t aios-sandbox-dev:dev \
+#     -f docker/Dockerfile.sandbox-dev .
+#   AIOS_DOCKER_IMAGE=aios-sandbox-dev:dev AIOS_SANDBOX_DEV_IMAGE=aios-sandbox-dev:dev \
+#     uv run pytest tests/e2e/test_sandbox_image_contract.py \
+#     tests/e2e/test_sandbox_dev_image_contract.py
+#
+# Runtime posture is inherited unchanged from the base: root, HOME=/root,
+# WORKDIR /workspace, CMD /usr/bin/tail -f /dev/null. Under the worker's
+# seccomp-sandbox.json, unprivileged user namespaces are denied, so Chrome's own
+# sandbox cannot start. Run it with --no-sandbox (Playwright already passes that
+# by default). The container is the isolation boundary.
+
+# The base contract this image extends. CI passes the digest of the base
+# ``:smoked`` tag (contract-tested) so the base is pinned per build and
+# recorded in the ``aios.sandbox_dev.base_image`` label.
+ARG BASE_IMAGE=ghcr.io/eumemic/aios-sandbox:smoked
+
+ARG CHROME_VERSION=157.0.8103.38-1
+ARG NODE_VERSION=22.23.4
+ARG PLAYWRIGHT_CORE_VERSION=1.60.0
+
+FROM scratch AS google-chrome-deb
+ARG CHROME_VERSION
+ADD --checksum=sha256:a62b277dc03da2cff50cc04589deb66f6875be339c066d46adb49b49eedb629d \
+    https://dl.google.com/linux/chrome/deb/pool/main/g/google-chrome-stable/google-chrome-stable_${CHROME_VERSION}_amd64.deb \
+    /google-chrome-stable.deb
+
+FROM scratch AS node-tarball
+ARG NODE_VERSION
+# sha256 from https://nodejs.org/dist/v${NODE_VERSION}/SHASUMS256.txt
+ADD --checksum=sha256:b8492284c76a54baf58d61668dd0e41ee0fc98adabf9503d30f05d08f55b4406 \
+    https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.gz \
+    /node.tar.gz
+
+FROM scratch AS playwright-core-tarball
+ARG PLAYWRIGHT_CORE_VERSION
+# sha256 of the registry tarball. It was cross-checked against the npm
+# registry's sha512 ``dist.integrity`` for playwright-core@1.60.0.
+ADD --checksum=sha256:8b1df81ba75e90a41eb5c996350ea7ecc1c915ea643ec55138f91c949c5a25bf \
+    https://registry.npmjs.org/playwright-core/-/playwright-core-${PLAYWRIGHT_CORE_VERSION}.tgz \
+    /playwright-core.tgz
+
+FROM ${BASE_IMAGE}
+ARG BASE_IMAGE
+ARG CHROME_VERSION
+ARG NODE_VERSION
+ARG PLAYWRIGHT_CORE_VERSION
+
+# amd64-only guard: fail the build rather than ship an image with no Chrome.
+RUN arch="$(dpkg --print-architecture)" \
+ && if [ "$arch" != "amd64" ]; then \
+        echo "aios-sandbox-dev is amd64-only (no linux-arm64 Chrome .deb); got $arch" >&2; \
+        exit 1; \
+    fi
+
+# Node 22 LTS at /usr/local. /usr/local/bin precedes /usr/bin in both the image
+# PATH and the worker's WORKSPACE_RUNTIME_ENV PATH, so ``node`` and ``npm``
+# resolve here.
+RUN --mount=type=bind,from=node-tarball,source=/node.tar.gz,target=/tmp/node.tar.gz \
+    tar -xzf /tmp/node.tar.gz -C /usr/local --strip-components=1 --no-same-owner \
+ && rm -f /usr/local/CHANGELOG.md /usr/local/LICENSE /usr/local/README.md \
+ && test "$(/usr/local/bin/node --version)" = "v${NODE_VERSION}"
+
+# playwright-core (pinned), extracted to a private prefix.
+RUN --mount=type=bind,from=playwright-core-tarball,source=/playwright-core.tgz,target=/tmp/playwright-core.tgz \
+    mkdir -p /opt/aios-sandbox-dev/node_modules/playwright-core \
+ && tar -xzf /tmp/playwright-core.tgz -C /opt/aios-sandbox-dev/node_modules/playwright-core \
+        --strip-components=1 --no-same-owner \
+ && chmod -R a+rX /opt/aios-sandbox-dev
+
+# Google Chrome stable from the pinned .deb. apt resolves its Depends (the GTK,
+# NSS, X11 and font libs) from Debian bookworm. Then drop the Google apt source
+# and the cron job that re-adds it (see header).
+RUN --mount=type=bind,from=google-chrome-deb,source=/google-chrome-stable.deb,target=/tmp/google-chrome-stable.deb \
+    apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        /tmp/google-chrome-stable.deb \
+ && rm -f /etc/apt/sources.list.d/google-chrome.list \
+          /etc/apt/sources.list.d/google-chrome.sources \
+          /etc/cron.daily/google-chrome \
+ && rm -rf /var/lib/apt/lists/* \
+ && test -x /opt/google/chrome/chrome
+
+# The bundled-Chromium OS dependency set: Playwright's own list (fonts, xvfb,
+# and a few libs Chrome's .deb does not pull), installed by Playwright's own
+# installer so it tracks that version's list exactly.
+RUN apt-get update \
+ && DEBIAN_FRONTEND=noninteractive \
+    node /opt/aios-sandbox-dev/node_modules/playwright-core/cli.js install-deps chromium \
+ && rm -rf /var/lib/apt/lists/*
+
+LABEL aios.sandbox_dev.base_image="${BASE_IMAGE}" \
+      aios.sandbox_dev.chrome_version="${CHROME_VERSION}" \
+      aios.sandbox_dev.node_version="${NODE_VERSION}" \
+      aios.sandbox_dev.playwright_core_version="${PLAYWRIGHT_CORE_VERSION}"
