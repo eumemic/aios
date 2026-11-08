@@ -101,6 +101,10 @@ jobs:
           [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::could not resolve $BASE_SMOKED digest"; exit 1; }
           echo "ref=ghcr.io/eumemic/aios-sandbox@${digest}" >> "$GITHUB_OUTPUT"
 
+      # NOTE for consumers: :latest and sha-* are pushed HERE, BEFORE the smoke
+      # job runs the contract and the negative control. Only :smoked is gated.
+      # Consumers (e.g. the dev-pipeline-real EnvironmentConfig.image) must pin
+      # aios-sandbox-dev:smoked or an @sha256 digest, never :latest.
       - name: Extract image metadata
         id: meta
         uses: docker/metadata-action@v5
@@ -221,8 +225,11 @@ jobs:
           suite = ET.parse("negative-control.xml").getroot().find("testsuite")
           tests, failures, errors, skipped = (int(suite.get(k, 0)) for k in ("tests", "failures", "errors", "skipped"))
           print(f"negative control: tests={tests} failures={failures} errors={errors} skipped={skipped}")
-          if tests == 0 or skipped or failures + errors != tests:
-              print("::error::every TestDevAdditions test must FAIL against the base image")
+          # errors must be 0: a setup/fixture error (a failed pull, an inspect
+          # timeout) proves nothing about the base lacking the dev additions,
+          # so it must not count as a discriminating failure.
+          if tests == 0 or skipped or errors or failures != tests:
+              print("::error::every TestDevAdditions test must FAIL (not error or skip) against the base image")
               sys.exit(1)
           EOF
 

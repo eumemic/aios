@@ -97,6 +97,36 @@ def _image_labels(image: str) -> dict[str, str]:
     return {str(k): str(v) for k, v in labels.items()}
 
 
+# Prints one line per leftover of the .deb's Google apt-repo registration, and
+# nothing when the image is clean. ``$1`` is an optional root prefix, so the
+# unit suite can run the same script against a filesystem fixture.
+#
+# The .deb ships ``/etc/cron.daily/google-chrome`` as a SYMLINK to
+# ``/opt/google/chrome/cron/google-chrome``. GNU ``grep -r`` does not follow
+# symlinks met during traversal, so the old ``grep -rIl`` scan could not see a
+# leftover cron job. The script therefore names each known path explicitly
+# (``-e`` or ``-L``, so a dangling link also counts) and scans with ``grep -R``.
+GOOGLE_REPO_HYGIENE_SCRIPT = r"""
+R="${1:-}"
+for p in /etc/cron.daily/google-chrome \
+         /etc/apt/sources.list.d/google-chrome.list \
+         /etc/apt/sources.list.d/google-chrome.sources; do
+  if [ -e "$R$p" ] || [ -L "$R$p" ]; then echo "present: $p"; fi
+done
+grep -RIl 'dl\.google\.com' "$R/etc/apt/" "$R/etc/cron.daily/" 2>/dev/null
+if grep -qs '^repo_add_once="true"' "$R/etc/default/google-chrome"; then
+  echo 'repo_add_once="true" in /etc/default/google-chrome'
+fi
+true
+"""
+
+
+def _is_registry_ref(image: str) -> bool:
+    """True when ``image`` names a registry host (``ghcr.io/...``, ``host:5000/...``)."""
+    first, sep, _ = image.partition("/")
+    return bool(sep) and ("." in first or ":" in first or first == "localhost")
+
+
 @pytest.fixture(scope="module")
 def dev_image() -> str:
     """Ensure IMAGE is present locally; pull only if absent (see the base suite)."""
@@ -223,13 +253,11 @@ class TestDevHygiene:
     def test_no_google_apt_source_left_behind(self, dev_image: str) -> None:
         """The .deb's postinst registers dl.google.com as an apt source and a cron
         job that re-adds it. The lane cannot reach dl.google.com, so a leftover
-        source would break every in-lane ``apt-get update``."""
-        r = _docker_run_offline(
-            dev_image,
-            "bash",
-            "-c",
-            "grep -rIl 'dl.google.com' /etc/apt/ /etc/cron.daily/ 2>/dev/null; true",
-        )
+        source would break every in-lane ``apt-get update``.
+
+        See :data:`GOOGLE_REPO_HYGIENE_SCRIPT`: the cron job is a SYMLINK, so a
+        plain ``grep -r`` cannot see it."""
+        r = _docker_run_offline(dev_image, "bash", "-c", GOOGLE_REPO_HYGIENE_SCRIPT)
         assert r.returncode == 0, r.stderr.strip()
         assert r.stdout.strip() == "", f"Google apt source/cron left behind: {r.stdout.strip()}"
 
@@ -247,8 +275,21 @@ class TestDevHygiene:
 
     def test_manifest_includes_amd64(self, dev_image: str) -> None:
         """Single-arch replacement for the base suite's amd64+arm64 check
-        (deselected for this image): amd64 must be present."""
-        r = _run(["docker", "buildx", "imagetools", "inspect", dev_image], timeout=30)
-        if r.returncode != 0:
-            pytest.skip(f"imagetools inspect unavailable for {dev_image}: {r.stderr.strip()}")
-        assert "linux/amd64" in r.stdout + r.stderr, (r.stdout + r.stderr)[:500]
+        (deselected for this image): amd64 must be present.
+
+        A registry ref (non-PR runs: the pushed ``sha-*`` tag) must have a
+        manifest that ``imagetools inspect`` can read, and a failure there is a
+        FAILURE, not a skip. A local-only tag (PR runs: ``aios-sandbox-dev:ci``,
+        never pushed) has no registry manifest, so the locally built image's
+        own architecture is checked instead. Nothing here skips."""
+        if _is_registry_ref(dev_image):
+            r = _run(["docker", "buildx", "imagetools", "inspect", dev_image], timeout=30)
+            assert r.returncode == 0, f"imagetools inspect {dev_image} failed: {r.stderr.strip()}"
+            assert "linux/amd64" in r.stdout + r.stderr, (r.stdout + r.stderr)[:500]
+        else:
+            r = _run(
+                ["docker", "image", "inspect", "--format", "{{.Os}}/{{.Architecture}}", dev_image],
+                timeout=30,
+            )
+            assert r.returncode == 0, f"docker image inspect failed: {r.stderr.strip()}"
+            assert r.stdout.strip() == "linux/amd64", r.stdout.strip()

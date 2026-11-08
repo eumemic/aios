@@ -33,9 +33,12 @@
 # amd64. The build fails loudly on any other architecture (guard below), and
 # ``build-sandbox-dev.yml`` builds linux/amd64 only.
 #
-# Reproducibility: every download is a VERSIONED URL with ``ADD --checksum``
-# (the same pattern as Dockerfile.browser), so any byte substitution fails the
-# build. Google keeps versioned stable .debs in its pool
+# Reproducibility: the three direct downloads (Chrome .deb, Node tarball,
+# playwright-core tarball) are VERSIONED URLs with ``ADD --checksum`` (the same
+# pattern as Dockerfile.browser), so a byte substitution in any of them fails
+# the build. The base is pinned by digest. The apt packages (Chrome's Depends
+# and the Playwright install-deps set) come from Debian bookworm via signed apt
+# but are NOT version-pinned, so they float with the Debian archive. Google keeps versioned stable .debs in its pool
 # (pool/main/g/google-chrome-stable/google-chrome-stable_<ver>_amd64.deb). The
 # sha256 below is the one published in Google's signed apt ``Packages`` index
 # for that version, and was re-verified against the downloaded bytes. Google

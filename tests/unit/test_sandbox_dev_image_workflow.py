@@ -16,10 +16,15 @@ BUILT image. These checks pin the wiring around it, which no e2e run can see:
 from __future__ import annotations
 
 import re
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
+import pytest
 import yaml
+
+from tests.e2e.test_sandbox_dev_image_contract import GOOGLE_REPO_HYGIENE_SCRIPT, _is_registry_ref
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _WORKFLOWS = _REPO_ROOT / ".github" / "workflows"
@@ -97,12 +102,30 @@ def test_smoke_runs_base_contract_dev_contract_and_negative_control() -> None:
 
 def test_every_download_is_checksum_pinned() -> None:
     text = _DOCKERFILE.read_text()
-    adds = re.findall(r"(?m)^ADD .*(?:\\\n.*)*", text)
+    adds = re.findall(r"(?m)^ADD (?:.*\\\n)*.*", text)
     assert len(adds) == 3, adds
     for add in adds:
         assert re.search(r"--checksum=sha256:[0-9a-f]{64}", add), add
     assert "google-chrome-stable_${CHROME_VERSION}_amd64.deb" in text
-    assert not re.search(r"(?m)^RUN .*\b(curl|wget)\b", text), "unpinned download in a RUN"
+    for run in _run_instructions(text):
+        assert not re.search(r"\b(curl|wget)\b", run), f"unpinned download in a RUN: {run}"
+
+
+def _run_instructions(dockerfile: str) -> list[str]:
+    """Every RUN instruction, INCLUDING its backslash-continuation lines."""
+    # ``(?:.*\\\n)*`` first: the obvious ``.*(?:\\\n.*)*`` lets the greedy
+    # ``.*`` eat the trailing backslash, the group then matches zero times, and
+    # the regex silently stops at the first line.
+    return re.findall(r"(?m)^RUN (?:.*\\\n)*.*", dockerfile)
+
+
+def test_run_scan_sees_continuation_lines() -> None:
+    """The download scan must catch a curl that is not on the RUN's first line."""
+    sample = "RUN apt-get update \\\n && curl -fsSL https://x/y | sh\nRUN true\n"
+    runs = _run_instructions(sample)
+    assert len(runs) == 2
+    assert re.search(r"\b(curl|wget)\b", runs[0])
+    assert len(_run_instructions(_DOCKERFILE.read_text())) == 5
 
 
 def test_base_sandbox_filter_ignores_dev_dockerfile() -> None:
@@ -111,3 +134,140 @@ def test_base_sandbox_filter_ignores_dev_dockerfile() -> None:
     assert m is not None
     assert not re.search(m.group(1), "docker/Dockerfile.sandbox-dev")
     assert re.search(m.group(1), "docker/Dockerfile.sandbox")
+
+
+# --- Google apt-repo hygiene script (aios#2586 review finding A) -------------
+#
+# The e2e hygiene test runs GOOGLE_REPO_HYGIENE_SCRIPT inside the image. These
+# run the SAME script against a filesystem fixture laid out like the .deb's
+# install, so its discrimination is proven without docker. The crux: the .deb
+# ships /etc/cron.daily/google-chrome as a SYMLINK, which ``grep -r`` skips.
+
+
+def _hygiene(root: Path) -> str:
+    r = subprocess.run(
+        ["bash", "-c", GOOGLE_REPO_HYGIENE_SCRIPT, "hygiene", str(root)],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return r.stdout.strip()
+
+
+def _deb_layout(root: Path, *, cron: bool, sources: bool, repo_add_once: str) -> None:
+    """The .deb + postinst layout, minus whatever the Dockerfile's ``rm`` removed."""
+    cron_target = root / "opt/google/chrome/cron/google-chrome"
+    cron_target.parent.mkdir(parents=True)
+    cron_target.write_text("REPOCONFIG=deb [arch=amd64] https://dl.google.com/linux/chrome/deb/\n")
+    (root / "etc/cron.daily").mkdir(parents=True)
+    (root / "etc/apt/sources.list.d").mkdir(parents=True)
+    (root / "etc/apt/sources.list.d/debian.sources").write_text("URIs: http://deb.debian.org/\n")
+    (root / "etc/default").mkdir(parents=True)
+    (root / "etc/default/google-chrome").write_text(f'repo_add_once="{repo_add_once}"\n')
+    if cron:
+        (root / "etc/cron.daily/google-chrome").symlink_to(cron_target)
+    if sources:
+        (root / "etc/apt/sources.list.d/google-chrome.sources").write_text(
+            "URIs: https://dl.google.com/linux/chrome/deb/\n"
+        )
+
+
+def test_hygiene_clean_layout_passes(tmp_path: Path) -> None:
+    _deb_layout(tmp_path, cron=False, sources=False, repo_add_once="false")
+    assert _hygiene(tmp_path) == ""
+
+
+def test_hygiene_catches_leftover_cron_symlink(tmp_path: Path) -> None:
+    """The regression the old ``grep -rIl`` scan missed: drop the cron ``rm``."""
+    _deb_layout(tmp_path, cron=True, sources=False, repo_add_once="false")
+    old_scan = subprocess.run(
+        ["grep", "-rIl", "dl.google.com", f"{tmp_path}/etc/apt/", f"{tmp_path}/etc/cron.daily/"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert old_scan.stdout.strip() == "", "fixture no longer reproduces the grep -r blind spot"
+    assert "present: /etc/cron.daily/google-chrome" in _hygiene(tmp_path)
+
+
+def test_hygiene_catches_dangling_cron_symlink(tmp_path: Path) -> None:
+    _deb_layout(tmp_path, cron=True, sources=False, repo_add_once="false")
+    (tmp_path / "opt/google/chrome/cron/google-chrome").unlink()
+    assert "present: /etc/cron.daily/google-chrome" in _hygiene(tmp_path)
+
+
+def test_hygiene_catches_leftover_apt_source(tmp_path: Path) -> None:
+    _deb_layout(tmp_path, cron=False, sources=True, repo_add_once="false")
+    assert "present: /etc/apt/sources.list.d/google-chrome.sources" in _hygiene(tmp_path)
+
+
+def test_hygiene_catches_repo_add_once_true(tmp_path: Path) -> None:
+    _deb_layout(tmp_path, cron=False, sources=False, repo_add_once="true")
+    assert 'repo_add_once="true"' in _hygiene(tmp_path)
+
+
+def test_dockerfile_removes_every_path_the_hygiene_script_checks() -> None:
+    text = _DOCKERFILE.read_text()
+    paths = re.findall(
+        r"(/etc/(?:cron\.daily|apt/sources\.list\.d)/google-chrome\S*?)(?=[\s\\;])",
+        GOOGLE_REPO_HYGIENE_SCRIPT,
+    )
+    assert len(paths) == 3, paths
+    for path in paths:
+        assert path in text, f"Dockerfile.sandbox-dev does not rm {path}"
+
+
+# --- Negative-control verdict (aios#2586 review finding B) -------------------
+#
+# Extract the exact JUnit-verdict script from the workflow step and run it on
+# synthetic reports. An ERRORED control run must fail the step.
+
+
+def _negative_control_verdict_script() -> str:
+    steps = _load(_DEV_WORKFLOW)["jobs"]["smoke"]["steps"]
+    run = next(s["run"] for s in steps if s.get("name", "").startswith("Negative control"))
+    m = re.search(r"python3 - <<'EOF'\n(.*?)\nEOF", run, re.DOTALL)
+    assert m is not None, "negative-control JUnit verdict heredoc not found"
+    return m.group(1)
+
+
+@pytest.mark.parametrize(
+    ("tests", "failures", "errors", "skipped", "ok"),
+    [
+        (8, 8, 0, 0, True),
+        (8, 0, 8, 0, False),  # every test ERRORED (e.g. fixture pytest.fail)
+        (8, 7, 1, 0, False),  # one errored, the rest failed
+        (8, 7, 0, 0, False),  # one passed against the base
+        (8, 7, 0, 1, False),  # one skipped
+        (0, 0, 0, 0, False),  # nothing collected
+    ],
+)
+def test_negative_control_verdict(
+    tmp_path: Path, tests: int, failures: int, errors: int, skipped: int, ok: bool
+) -> None:
+    (tmp_path / "negative-control.xml").write_text(
+        f'<testsuites><testsuite name="pytest" tests="{tests}" failures="{failures}"'
+        f' errors="{errors}" skipped="{skipped}"/></testsuites>'
+    )
+    r = subprocess.run(
+        [sys.executable, "-c", _negative_control_verdict_script()],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert (r.returncode == 0) is ok, r.stdout + r.stderr
+
+
+@pytest.mark.parametrize(
+    ("image", "registry"),
+    [
+        ("ghcr.io/eumemic/aios-sandbox-dev:sha-abc1234", True),
+        ("localhost:5000/aios-sandbox-dev:ci", True),
+        ("aios-sandbox-dev:ci", False),
+        ("eumemic/aios-sandbox-dev:ci", False),
+    ],
+)
+def test_manifest_check_is_strict_for_registry_refs(image: str, registry: bool) -> None:
+    """The amd64 manifest check must FAIL (not skip) for a pushed ref (finding C)."""
+    assert _is_registry_ref(image) is registry
