@@ -522,7 +522,7 @@ def test_missing_artifact_heading_is_fatal(
 def test_pin_checkout_rejects_a_tree_that_is_not_the_pr_head(monkeypatch: Any) -> None:
     monkeypatch.setattr(reviewer, "_git", lambda *args: _ok("deadbeefotherhead\n"))
     with pytest.raises(SystemExit):
-        reviewer._pin_checkout("abc123", "base456")
+        reviewer._pin_checkout("abc1234", "base456")
 
 
 def test_pin_checkout_fetches_a_missing_base(monkeypatch: Any) -> None:
@@ -531,7 +531,7 @@ def test_pin_checkout_fetches_a_missing_base(monkeypatch: Any) -> None:
     def git(*args: str) -> subprocess.CompletedProcess[str]:
         calls.append(args)
         if args[0] == "rev-parse":
-            return _ok("abc123full\n")
+            return _ok("abc1234full\n")
         if args[0] == "cat-file":
             # Absent before the fetch, present after it.
             missing = not any(call[0] == "fetch" for call in calls)
@@ -539,19 +539,19 @@ def test_pin_checkout_fetches_a_missing_base(monkeypatch: Any) -> None:
         return _ok()
 
     monkeypatch.setattr(reviewer, "_git", git)
-    reviewer._pin_checkout("abc123", "base456")
+    reviewer._pin_checkout("abc1234", "base456")
     assert ("fetch", "--no-tags", "--quiet", "origin", "base456") in calls
 
 
 def test_pin_checkout_fails_when_the_base_cannot_be_fetched(monkeypatch: Any) -> None:
     def git(*args: str) -> subprocess.CompletedProcess[str]:
         if args[0] == "rev-parse":
-            return _ok("abc123full\n")
+            return _ok("abc1234full\n")
         return subprocess.CompletedProcess([], 1, "", "no such object")
 
     monkeypatch.setattr(reviewer, "_git", git)
     with pytest.raises(SystemExit):
-        reviewer._pin_checkout("abc123", "base456")
+        reviewer._pin_checkout("abc1234", "base456")
 
 
 def test_persisted_push_credential_is_unset_before_the_agent_runs(monkeypatch: Any) -> None:
@@ -592,7 +592,7 @@ def test_main_scrubs_the_git_credential_before_handing_the_tree_to_the_agent(
 
     def agent(*args: Any, **kwargs: Any) -> str:
         order.append("agent")
-        return _good_artifact("Pass.")
+        return _good_artifact("Pass. Reviewed at `abc1234`.")
 
     monkeypatch.setattr(reviewer, "_drop_persisted_git_credentials", scrub)
     monkeypatch.setattr(reviewer, "_require_agent_user", boundary)
@@ -607,14 +607,14 @@ def _agent_env(monkeypatch: Any, tmp_path: Path) -> Path:
     for key, value in {
         "REPO": "eumemic/aios",
         "PR_NUMBER": "1",
-        "HEAD_SHA": "abc123",
+        "HEAD_SHA": "abc1234",
         "BASE_SHA": "base456",
         "REVIEW_MODEL": "gpt-5.6-sol",
         "REVIEW_ARTIFACT_PATH": str(artifact),
     }.items():
         monkeypatch.setenv(key, value)
     monkeypatch.setattr(
-        reviewer, "_git", lambda *args: _ok("abc123full\n" if args[0] == "rev-parse" else "")
+        reviewer, "_git", lambda *args: _ok("abc1234full\n" if args[0] == "rev-parse" else "")
     )
     monkeypatch.setattr(reviewer, "_seal_process", lambda: None)
     monkeypatch.setattr(reviewer, "_require_agent_user", lambda: "eumemic-review")
@@ -624,12 +624,12 @@ def _agent_env(monkeypatch: Any, tmp_path: Path) -> Path:
 
 def _publish_env(monkeypatch: Any, tmp_path: Path) -> Path:
     artifact = tmp_path / "review.md"
-    artifact.write_text("### Code review\n\nPass.\n")
+    artifact.write_text("### Code review\n\nPass. Reviewed at `abc1234`.\n")
     for key, value in {
         "GH_TOKEN": "token",
         "REPO": "eumemic/aios",
         "PR_NUMBER": "1",
-        "HEAD_SHA": "abc123",
+        "HEAD_SHA": "abc1234",
         "REVIEW_ARTIFACT_PATH": str(artifact),
     }.items():
         monkeypatch.setenv(key, value)
@@ -651,11 +651,11 @@ def test_agent_phase_writes_artifact_after_agent_returns(monkeypatch: Any, tmp_p
 
     def agent(*args: Any, **kwargs: Any) -> str:
         assert not artifact.exists()
-        return _good_artifact("Pass.")
+        return _good_artifact("Pass. Reviewed at `abc1234`.")
 
     monkeypatch.setattr(reviewer, "run_agent", agent)
     reviewer.run_agent_phase()
-    assert artifact.read_text() == _good_artifact("Pass.") + "\n"
+    assert artifact.read_text() == _good_artifact("Pass. Reviewed at `abc1234`.") + "\n"
 
 
 def test_publish_phase_posts_and_verifies_marker(
@@ -671,7 +671,7 @@ def test_publish_phase_posts_and_verifies_marker(
 
     monkeypatch.setattr(reviewer, "_github_request", github)
     reviewer.run_publish_phase()
-    assert "<!-- eumemic-bot-review:abc123 -->" in posted["body"]
+    assert "<!-- eumemic-bot-review:abc1234 -->" in posted["body"]
     assert "posted and verified" in capsys.readouterr().out
 
 
@@ -1116,11 +1116,11 @@ def test_diff_evidence_is_computed_from_the_real_diff(monkeypatch: Any) -> None:
 
     def run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
         assert command[:3] == ["git", "--no-pager", "diff"]
-        assert command[3] == "base456...abc123"
+        assert command[3] == "base456...abc1234"
         return subprocess.CompletedProcess(command, 0, payload, b"")
 
     monkeypatch.setattr(reviewer.subprocess, "run", run)
-    lines, digest = reviewer.diff_evidence("base456", "abc123")
+    lines, digest = reviewer.diff_evidence("base456", "abc1234")
     assert lines == 3
     assert digest == hashlib.sha256(payload).hexdigest()
 
@@ -1132,7 +1132,7 @@ def test_diff_evidence_refuses_an_empty_diff(monkeypatch: Any) -> None:
         lambda *a, **k: subprocess.CompletedProcess([], 0, b"   \n", b""),
     )
     with pytest.raises(SystemExit):
-        reviewer.diff_evidence("base456", "abc123")
+        reviewer.diff_evidence("base456", "abc1234")
 
 
 def test_workflow_pins_head_and_base_and_keeps_no_aios_session_config() -> None:
@@ -1368,3 +1368,208 @@ def test_agent_job_reaps_processes_the_agent_left_behind() -> None:
     assert reap["if"] == "always()"
     assert f"-u {reviewer.AGENT_USER}" in reap["run"]
     assert reap_index == ids.index("agent") + 1
+
+
+# --- aios#2345: the record cites exactly the SHA it was launched for ----------------------------
+
+_FULL_HEAD = "a0d638db" + "1" * 32
+_PARENT = "31bba8df" + "2" * 32
+
+
+def test_prompt_requires_the_agent_to_cite_and_verify_the_given_head() -> None:
+    prompt = reviewer._prompt("eumemic/aios", "7", _FULL_HEAD, "basesha")
+    assert f"Reviewed at `{_FULL_HEAD}`" in prompt
+    assert "git rev-parse HEAD" in prompt
+
+
+def test_head_citation_accepts_the_given_sha_verbatim() -> None:
+    reviewer.require_head_citation(_good_artifact(f"Reviewed at `{_FULL_HEAD}`."), _FULL_HEAD)
+
+
+def test_head_citation_rejects_a_record_that_cites_no_sha() -> None:
+    with pytest.raises(SystemExit):
+        reviewer.require_head_citation(_good_artifact("No findings."), _FULL_HEAD)
+
+
+def test_head_citation_rejects_a_record_that_cites_the_parent() -> None:
+    """The aios#2208 shape: launched for a0d638db, the record says 31bba8df."""
+    with pytest.raises(SystemExit):
+        reviewer.require_head_citation(_good_artifact(f"Reviewed at `{_PARENT}`."), _FULL_HEAD)
+
+
+def test_head_citation_rejects_a_second_conflicting_carrier() -> None:
+    body = f"Reviewed at `{_FULL_HEAD}`.\n\nActually reviewed at `{_PARENT}`."
+    with pytest.raises(SystemExit):
+        reviewer.require_head_citation(_good_artifact(body), _FULL_HEAD)
+
+
+def test_head_citation_rejects_a_short_prefix() -> None:
+    with pytest.raises(SystemExit):
+        reviewer.require_head_citation(
+            _good_artifact(f"Reviewed at `{_FULL_HEAD[:8]}`."), _FULL_HEAD
+        )
+
+
+def test_agent_phase_refuses_an_artifact_citing_another_head(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    artifact = _agent_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        reviewer,
+        "run_agent",
+        lambda *a, **k: _good_artifact(f"Reviewed at `{_PARENT}`."),
+    )
+    with pytest.raises(SystemExit):
+        reviewer.run_agent_phase()
+    assert not artifact.exists()
+
+
+def test_agent_phase_refuses_when_the_checkout_moved_during_the_review(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    """The mount is pinned at start AND re-checked before the artifact is written."""
+    artifact = _agent_env(monkeypatch, tmp_path)
+    heads = iter(["abc1234full\n", "deadbeefother\n"])
+
+    def git(*args: str) -> subprocess.CompletedProcess[str]:
+        return _ok(next(heads) if args[0] == "rev-parse" else "")
+
+    monkeypatch.setattr(reviewer, "_git", git)
+    monkeypatch.setattr(
+        reviewer, "run_agent", lambda *a, **k: _good_artifact("Reviewed at `abc1234`.")
+    )
+    with pytest.raises(SystemExit):
+        reviewer.run_agent_phase()
+    assert not artifact.exists()
+
+
+def test_publish_phase_refuses_an_artifact_without_the_head_citation(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    _publish_env(monkeypatch, tmp_path).write_text("### Code review\n\nNo findings.\n")
+    monkeypatch.setattr(reviewer, "_github_request", lambda *a, **k: pytest.fail("must not post"))
+    with pytest.raises(SystemExit):
+        reviewer.run_publish_phase()
+
+
+def test_workflow_publish_requires_the_head_citation_and_skips_a_superseded_head() -> None:
+    jobs = yaml.safe_load(_WORKFLOW.read_text())["jobs"]
+    publish = next(step for step in jobs["publish"]["steps"] if step.get("id") == "publish")
+    run = publish["run"]
+    # The record must carry the launched SHA verbatim (company#383 `at `<sha>`` grammar).
+    assert "at \\`${HEAD_SHA}\\`" in run
+    # A newer push makes this review stale by construction: never post it.
+    assert "pulls/$PR_NUMBER" in run and ".head.sha" in run
+    assert run.index("pulls/$PR_NUMBER") < run.index("issues/$PR_NUMBER/comments")
+    workflow = yaml.safe_load(_WORKFLOW.read_text())
+    assert workflow["concurrency"]["cancel-in-progress"] is True
+
+
+def _publish_citation_guard() -> str:
+    """The workflow's publish-step citation guard, up to the live-head API call."""
+    steps = yaml.safe_load(_WORKFLOW.read_text())["jobs"]["publish"]["steps"]
+    (run,) = [step["run"] for step in steps if step.get("id") == "publish"]
+    assert isinstance(run, str)
+    guard, sep, _ = run.partition("live_head=")
+    assert sep, "publish step no longer checks the live head"
+    return guard
+
+
+_PROSE_AT_LITERALS = f"Reviewed at `{_FULL_HEAD}`.\n\n- foo.py:12: the counter starts at `0` but should start at `1`."
+
+_CITATION_CORPUS = [
+    f"Reviewed at `{_FULL_HEAD}`.",
+    f"Reviewed at `{_FULL_HEAD.upper()}`.",
+    f"Reviewed at `{_FULL_HEAD}`.\n\nNote that `0` is returned on error.",
+    f"Reviewed at `{_FULL_HEAD}`.\n\nThe format `ff` is flat `add`; what `dead`, beat `beef`.",
+    f"Reviewed at `{_FULL_HEAD}`.\n\nAlso_at `{_PARENT}` and 9at `{_PARENT}`.",
+    f"Reviewed at\t`{_FULL_HEAD}`.",
+    f"Reviewed at `{_FULL_HEAD}`.\n\nActually reviewed at `{_PARENT}`.",
+    f"Reviewed at `{_FULL_HEAD}`.\n\nSee (at `{_PARENT}`).",
+    f"Reviewed at `{_FULL_HEAD}`.\n\nIt's éat `{_PARENT}`.",
+    f"Reviewed at `{_PARENT}`.",
+    f"Reviewed at `{_FULL_HEAD[:8]}`.",
+    "No findings.",
+    _PROSE_AT_LITERALS,
+    f"Reviewed at `{_FULL_HEAD}`.\n\nfoo.py:3 fails at `1`; the mask is set at `ff`.",
+    f"Reviewed at `{_FULL_HEAD}`.\n\nThe offset at `deadbe` is six hex chars, not a SHA.",
+    f"Reviewed at `{_FULL_HEAD}`.\n\nRegressed at `{_PARENT[:7]}`.",
+    f"Reviewed at `{_FULL_HEAD}`.\n\nThe counter starts at `0`. Actually reviewed at `{_PARENT}`.",
+    "The counter starts at `0` but should start at `1`.",
+]
+
+
+@pytest.mark.parametrize("body", _CITATION_CORPUS)
+def test_publish_guard_and_launcher_agree_on_head_citation(body: str, tmp_path: Path) -> None:
+    """The workflow posts exactly what require_head_citation lets the launcher write."""
+    artifact = tmp_path / "review.md"
+    artifact.write_text(_good_artifact(body))
+    try:
+        reviewer.require_head_citation(artifact.read_text(), _FULL_HEAD)
+        python_accepts = True
+    except SystemExit:
+        python_accepts = False
+    result = subprocess.run(
+        ["bash", "-e", "-c", _publish_citation_guard()],
+        env={
+            "PATH": os.environ["PATH"],
+            "HEAD_SHA": _FULL_HEAD,
+            "REVIEW_ARTIFACT_PATH": str(artifact),
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert (result.returncode == 0) == python_accepts, (python_accepts, result.stderr)
+
+
+def test_publish_guard_accepts_prose_ending_in_at_before_a_hex_token(tmp_path: Path) -> None:
+    body = f"Reviewed at `{_FULL_HEAD}`.\n\nNote that `0` is returned on error."
+    reviewer.require_head_citation(_good_artifact(body), _FULL_HEAD)
+    artifact = tmp_path / "review.md"
+    artifact.write_text(_good_artifact(body))
+    result = subprocess.run(
+        ["bash", "-e", "-c", _publish_citation_guard()],
+        env={
+            "PATH": os.environ["PATH"],
+            "HEAD_SHA": _FULL_HEAD,
+            "REVIEW_ARTIFACT_PATH": str(artifact),
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_head_citation_accepts_prose_literal_after_bare_at() -> None:
+    body = f"Reviewed at `{_FULL_HEAD}`.\n\n- foo.py:12: the counter starts at `0` but should start at `1`."
+    reviewer.require_head_citation(_good_artifact(body), _FULL_HEAD)
+
+
+def test_head_citation_still_rejects_a_conflicting_abbreviated_sha_carrier() -> None:
+    body = f"Reviewed at `{_FULL_HEAD}`.\n\nRegressed at `{_PARENT[:7]}`."
+    with pytest.raises(SystemExit):
+        reviewer.require_head_citation(_good_artifact(body), _FULL_HEAD)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        _PROSE_AT_LITERALS,
+        f"Reviewed at `{_FULL_HEAD}`.\n\nfoo.py:3 fails at `1`; the mask is set at `ff`.",
+    ],
+)
+def test_publish_guard_accepts_prose_literal_after_bare_at(body: str, tmp_path: Path) -> None:
+    reviewer.require_head_citation(_good_artifact(body), _FULL_HEAD)
+    artifact = tmp_path / "review.md"
+    artifact.write_text(_good_artifact(body))
+    result = subprocess.run(
+        ["bash", "-e", "-c", _publish_citation_guard()],
+        env={
+            "PATH": os.environ["PATH"],
+            "HEAD_SHA": _FULL_HEAD,
+            "REVIEW_ARTIFACT_PATH": str(artifact),
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
