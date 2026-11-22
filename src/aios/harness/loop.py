@@ -743,6 +743,15 @@ async def run_session_step(
         # ``wake_deferred`` span ``defer_wake`` appends. ``defer_wake`` re-derives
         # the foreground/background priority tier, so fairness never re-tiers a
         # wake. See :mod:`aios.harness.account_fairness`.
+        #
+        # A waiter keeps its FIFO place for as long as it is durably waiting —
+        # never lapsed by wall-clock (under saturation no waiter can re-arrive).
+        # Only when a free slot is being withheld from this wake for waiters not
+        # seen recently do we check durable state and drop the ones that are gone.
+        unconfirmed = account_gate.unconfirmed_waiters_ahead(account_id, session_id)
+        if unconfirmed:
+            live = await sessions_service.sessions_with_pending_wake(pool, unconfirmed)
+            account_gate.reconcile_waiters(account_id, checked=unconfirmed, live=live)
         if not account_gate.try_admit(account_id, session_id):
             log.debug(
                 "step.account_fairness_deferred",

@@ -16,6 +16,7 @@ Three layers:
 
 from __future__ import annotations
 
+import contextlib
 import heapq
 import itertools
 from collections.abc import Iterator
@@ -68,13 +69,60 @@ def test_gate_reserves_freed_slot_for_oldest_waiter() -> None:
     assert gate.waiting("A") == ["a3", "a_new"]
 
 
-def test_gate_stale_waiter_lapses() -> None:
+def test_waiter_keeps_place_while_no_slot_frees() -> None:
+    """#418 acceptance (b) / #2485 F1: waiting past ``stale_after_seconds``
+    because every slot is busy must not cost a live waiter its turn."""
+    clock = _Clock()
+    gate = AccountStepGate(1, stale_after_seconds=30, clock=clock)
+    assert gate.try_admit("A", "a1")
+    assert not gate.try_admit("A", "a2")  # refused at t=0; no re-arrival while saturated
+    clock.t = 45
+    gate.release("A")
+    assert not gate.try_admit("A", "a_new")
+    assert not gate.try_admit("A", "a_new")  # re-arrival does not help it either
+    assert gate.try_admit("A", "a2")
+
+
+def test_unconfirmed_waiters_only_reported_when_a_free_slot_is_withheld() -> None:
+    clock = _Clock()
+    gate = AccountStepGate(1, stale_after_seconds=10, clock=clock)
+    assert gate.try_admit("A", "a1")
+    assert not gate.try_admit("A", "ghost")
+    clock.t = 11
+    # At cap: nothing is being withheld, so no durable check is needed.
+    assert gate.unconfirmed_waiters_ahead("A", "a2") == []
+    gate.release("A")
+    assert gate.unconfirmed_waiters_ahead("A", "a2") == ["ghost"]
+    # The ghost itself has nobody ahead of it.
+    assert gate.unconfirmed_waiters_ahead("A", "ghost") == []
+
+
+def test_gone_waiter_dropped_only_by_durable_check() -> None:
     clock = _Clock()
     gate = AccountStepGate(1, stale_after_seconds=10, clock=clock)
     assert gate.try_admit("A", "a1")
     assert not gate.try_admit("A", "ghost")  # never comes back (archived)
     gate.release("A")
-    clock.t = 11
+    clock.t = 11_000
+    # Elapsed time alone never frees the reservation.
+    assert not gate.try_admit("A", "a2")
+    gate.reconcile_waiters("A", checked=["ghost"], live=[])
+    assert gate.try_admit("A", "a2")
+
+
+def test_live_waiter_confirmed_by_durable_check_keeps_place() -> None:
+    clock = _Clock()
+    gate = AccountStepGate(1, stale_after_seconds=10, clock=clock)
+    assert gate.try_admit("A", "a1")
+    assert not gate.try_admit("A", "a2")
+    clock.t = 100
+    gate.release("A")
+    unconfirmed = gate.unconfirmed_waiters_ahead("A", "a_new")
+    assert unconfirmed == ["a2"]
+    gate.reconcile_waiters("A", checked=unconfirmed, live=["a2"])
+    # Confirmed now → not re-checked until another window passes.
+    assert gate.unconfirmed_waiters_ahead("A", "a_new") == []
+    assert not gate.try_admit("A", "a_new")
     assert gate.try_admit("A", "a2")
 
 
@@ -132,9 +180,21 @@ class _Sim:
     slot immediately — exactly what ``run_session_step`` does via ``defer_wake``.
     """
 
-    def __init__(self, *, concurrency: int, cap: int, step: float, backoff: float) -> None:
+    def __init__(
+        self,
+        *,
+        concurrency: int,
+        cap: int,
+        step: float,
+        backoff: float,
+        stale: float | None = None,
+    ) -> None:
         self.clock = _Clock()
-        self.gate = AccountStepGate(cap, stale_after_seconds=10 * backoff, clock=self.clock)
+        self.gate = AccountStepGate(
+            cap,
+            stale_after_seconds=10 * backoff if stale is None else stale,
+            clock=self.clock,
+        )
         self.concurrency = concurrency
         self.step = step
         self.backoff = backoff
@@ -155,6 +215,16 @@ class _Sim:
                 return
             job = min(ready, key=lambda j: j.id)
             self.jobs.remove(job)
+            # Mirror run_session_step: durably re-check unconfirmed waiters that
+            # are withholding a free slot. "Live" = still has a queued job.
+            unconfirmed = self.gate.unconfirmed_waiters_ahead(job.account_id, job.session_id)
+            if unconfirmed:
+                queued = {j.session_id for j in self.jobs}
+                self.gate.reconcile_waiters(
+                    job.account_id,
+                    checked=unconfirmed,
+                    live=[s for s in unconfirmed if s in queued],
+                )
             if self.gate.try_admit(job.account_id, job.session_id):
                 heapq.heappush(
                     self.running,
@@ -231,6 +301,53 @@ def test_no_starvation_within_bursting_account_under_continued_submission() -> N
     # every fresh wake that completed did so no earlier than the burst's head.
     first_original = min(sim.completed[s] for s in originals)
     assert all(t >= first_original for s, t in sim.completed.items() if s.startswith("fresh"))
+
+
+@pytest.mark.parametrize("step", [1.0, 20.0, 45.0, 90.0])
+def test_no_starvation_when_steps_outlast_the_stale_window(step: float) -> None:
+    """Acceptance (b) under SATURATION: steps longer than the stale window (LLM
+    steps routinely are) mean no waiter is fetched for longer than the window.
+    Every original A wake must still complete in bounded time, and no fresh wake
+    may overtake an original."""
+    sim = _Sim(concurrency=4, cap=2, step=step, backoff=2.0, stale=30.0)
+    fresh = itertools.count()
+
+    def _resubmit(_sid: str, acc: str) -> None:
+        if acc == "A":
+            sim.submit(f"fresh{next(fresh)}", "A")
+            sim.submit(f"fresh{next(fresh)}", "A")
+
+    sim.on_complete = _resubmit
+    for i in range(10):
+        sim.submit(f"a{i}", "A")
+    # B's standing backlog keeps its cap's worth of slots busy the whole time,
+    # so all worker slots are occupied and A's waiters cannot be re-fetched.
+    for i in range(2_000):
+        sim.submit(f"b{i}", "B")
+    originals = {f"a{i}" for i in range(10)}
+    sim.run_until(lambda: originals <= sim.completed.keys(), horizon=20_000)
+
+    starved = sorted(originals - sim.completed.keys())
+    assert not starved, f"starved: {starved}"
+    # cap=2 → 5 rounds of A capacity; one backoff of hand-off slack per round.
+    assert max(sim.completed[s] for s in originals) <= 5 * (step + sim.backoff) + sim.backoff
+    last_original = max(sim.completed[s] for s in originals)
+    overtook = [s for s, t in sim.completed.items() if s.startswith("fresh") and t < last_original]
+    assert not overtook, f"fresh wakes overtook originals: {overtook}"
+
+
+def test_gone_waiter_does_not_wedge_account_in_sim() -> None:
+    """A waiter whose job disappears (session archived) is dropped by the durable
+    check, so the account's other wakes still run."""
+    sim = _Sim(concurrency=2, cap=1, step=5.0, backoff=2.0, stale=10.0)
+    sim.submit("a0", "A")
+    sim.submit("ghost", "A")
+    sim.submit("a1", "A")
+    sim._fill()  # a0 admitted; ghost and a1 refused and re-deferred
+    sim.jobs = [j for j in sim.jobs if j.session_id != "ghost"]  # archived: job gone
+    sim.run_until(lambda: "a1" in sim.completed, horizon=1_000)
+    assert "a1" in sim.completed
+    assert sim.gate.waiting("A") == []
 
 
 # ── run_session_step wiring ─────────────────────────────────────────────────
@@ -319,3 +436,56 @@ async def test_admitted_step_releases_slot_even_on_error(_gate: AccountStepGate)
 
     assert seen_active == [1]  # held while the body ran
     assert _gate.active("acc_A") == 0  # released on the error path
+
+
+async def test_stale_waiter_checked_durably_before_withholding_slot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A free slot withheld for a waiter not seen within the window triggers the
+    durable check; a gone waiter is dropped and this wake runs, a live one keeps
+    its place and this wake bounces."""
+    from aios.harness.loop import run_session_step
+
+    for live, expect_ran in (([], True), (["ses_ghost"], False)):
+        clock = _Clock()
+        gate = AccountStepGate(1, stale_after_seconds=10, clock=clock)
+        monkeypatch.setattr(runtime, "_account_step_gate", gate)
+        assert gate.try_admit("acc_A", "ses_other")
+        assert not gate.try_admit("acc_A", "ses_ghost")
+        gate.release("acc_A")
+        clock.t = 1_000
+
+        append_event = AsyncMock(return_value=MagicMock(id="evt", seq=1))
+        defer = AsyncMock()
+        body = AsyncMock()
+        check = AsyncMock(return_value=set(live))
+        pool, patches = _patched_step(append_event, defer, body)
+        prev = runtime.pool
+        runtime.pool = pool
+        try:
+            with (
+                patches[0],
+                patches[1],
+                patches[2],
+                patches[3],
+                patches[4],
+                mock.patch("aios.services.sessions.sessions_with_pending_wake", new=check),
+                mock.patch(
+                    "aios.harness.loop._apply_retry_or_failure", new=AsyncMock(return_value=None)
+                ),
+                contextlib.suppress(Exception),  # post-body plumbing is irrelevant here
+            ):
+                await run_session_step("ses_1", cause="message")
+        finally:
+            runtime.pool = prev
+
+        check.assert_awaited_once()
+        assert check.await_args is not None
+        assert check.await_args.args[1] == ["ses_ghost"]
+        if expect_ran:
+            body.assert_awaited_once()
+            assert gate.waiting("acc_A") == []
+        else:
+            body.assert_not_awaited()
+            defer.assert_awaited_once()
+            assert gate.waiting("acc_A") == ["ses_ghost", "ses_1"]

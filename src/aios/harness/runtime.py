@@ -66,9 +66,10 @@ def get_account_step_gate() -> AccountStepGate:
         backoff = settings.account_fairness_backoff_seconds
         _account_step_gate = AccountStepGate(
             settings.effective_account_step_concurrency_max,
-            # A waiter re-arrives every ``backoff`` seconds while it waits; one that
-            # misses many re-arrivals is gone (archived / job lost) and must not
-            # keep reserving a slot.
+            # How long a waiter's liveness stays "confirmed" before a withheld free
+            # slot triggers a DURABLE re-check (session live + wake job queued). It
+            # is never an expiry: a waiter stuck behind a saturated worker keeps
+            # its place however long it waits (#418 acceptance (b)).
             stale_after_seconds=max(30.0, 10 * backoff),
         )
     return _account_step_gate

@@ -118,6 +118,13 @@ async def load_live_session_account_id(pool: asyncpg.Pool[Any], session_id: str)
         return await queries.unscoped_live_session_account_id(conn, session_id)
 
 
+async def sessions_with_pending_wake(pool: asyncpg.Pool[Any], session_ids: list[str]) -> set[str]:
+    """Of ``session_ids``, those still live with a queued/running wake job — the
+    durable liveness test the per-account step gate uses for waiters (#418)."""
+    async with pool.acquire() as conn:
+        return await queries.unscoped_sessions_with_pending_wake(conn, session_ids)
+
+
 async def load_session_workspace_path(
     pool: asyncpg.Pool[Any], session_id: str, *, account_id: str
 ) -> Path:

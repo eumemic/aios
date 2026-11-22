@@ -392,6 +392,38 @@ async def unscoped_live_session_account_id(
     return account_id
 
 
+async def unscoped_sessions_with_pending_wake(
+    conn: asyncpg.Connection[Any], session_ids: list[str]
+) -> set[str]:
+    """Of ``session_ids``, those that are live (not archived) AND still hold a
+    queued (``todo``) or running (``doing``) ``harness.wake_session`` job.
+
+    The per-account step gate (issue #418) uses this as the DURABLE liveness
+    test for a waiter it has not seen re-arrive recently: a waiter stuck behind
+    a saturated worker still has its re-deferred ``todo`` job and keeps its
+    place; one whose session was archived or whose job is gone is dropped.
+    Matches on ``queueing_lock`` / ``lock`` (both set to the session id by
+    ``defer_wake``) so procrastinate's partial indexes on those columns apply.
+    """
+    if not session_ids:
+        return set()
+    rows = await conn.fetch(
+        """
+        SELECT s.id FROM sessions s
+        WHERE s.id = ANY($1::text[])
+          AND s.archived_at IS NULL
+          AND EXISTS (
+            SELECT 1 FROM procrastinate_jobs j
+            WHERE j.task_name = 'harness.wake_session'
+              AND ((j.status = 'todo' AND j.queueing_lock = s.id)
+                OR (j.status = 'doing' AND j.lock = s.id))
+          )
+        """,
+        session_ids,
+    )
+    return {r["id"] for r in rows}
+
+
 async def unscoped_get_session_spec_version(conn: asyncpg.Connection[Any], session_id: str) -> int:
     """Return the session's current ``spec_version`` (issue #713).
 

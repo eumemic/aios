@@ -8,7 +8,11 @@
   A wake whose account is at its cap re-defers itself with
   `AIOS_ACCOUNT_FAIRNESS_BACKOFF_SECONDS` (default 2s) of delay and frees its
   worker slot at once. Inside an account, sessions are admitted FIFO, so new
-  wakes from the same account cannot starve older ones. The cap is
+  wakes from the same account cannot starve older ones. A waiting session keeps
+  its place for as long as it is waiting, even when every worker slot is busy
+  and steps run longer than any timeout window. A waiter is dropped only when
+  the database shows it is gone: its session is archived, or it has no queued
+  or running wake. Elapsed time alone never drops a waiter. The cap is
   `AIOS_ACCOUNT_STEP_CONCURRENCY_MAX`; it defaults to half of
   `AIOS_WORKER_CONCURRENCY`, and a value at or above `AIOS_WORKER_CONCURRENCY`
   is rejected at startup. The gate is process-local, which is exact under the
