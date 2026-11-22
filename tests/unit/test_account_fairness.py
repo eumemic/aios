@@ -104,9 +104,12 @@ def test_default_cap_is_half_worker_concurrency() -> None:
 def test_cap_at_or_above_worker_concurrency_rejected() -> None:
     with pytest.raises(ValueError, match="ACCOUNT_STEP_CONCURRENCY_MAX"):
         Settings(worker_concurrency=4, account_step_concurrency_max=4)
-    assert Settings(
-        worker_concurrency=4, account_step_concurrency_max=3
-    ).effective_account_step_concurrency_max == 3
+    assert (
+        Settings(
+            worker_concurrency=4, account_step_concurrency_max=3
+        ).effective_account_step_concurrency_max
+        == 3
+    )
 
 
 # ── procrastinate fetch-loop simulation ─────────────────────────────────────
@@ -202,7 +205,10 @@ def test_no_starvation_within_bursting_account_under_continued_submission() -> N
     """Acceptance (b), the #2485 F1 property: A keeps submitting fresh wakes
     forever, yet every one of A's original 50 wakes completes, in bounded time,
     and none is overtaken indefinitely by later submissions."""
-    sim = _Sim(concurrency=4, cap=2, step=1.0, backoff=2.0)
+    # Non-commensurate backoff: a re-deferred wake is never ready at the instant
+    # a slot frees, so a plain counting semaphore would hand every freed slot to
+    # the fresh wakes submitted at that instant and starve the originals forever.
+    sim = _Sim(concurrency=4, cap=2, step=1.0, backoff=1.7)
     fresh = itertools.count()
 
     def _resubmit(_sid: str, acc: str) -> None:
@@ -242,7 +248,10 @@ def _patched_step(append_event: AsyncMock, defer_wake: AsyncMock, body: Any) -> 
     conn.fetchval = AsyncMock(return_value="acc_A")
     pool = fake_pool_yielding_conn(conn)
     return pool, (
-        mock.patch("aios.services.sessions.load_live_session_account_id", new=AsyncMock(return_value="acc_A")),
+        mock.patch(
+            "aios.services.sessions.load_live_session_account_id",
+            new=AsyncMock(return_value="acc_A"),
+        ),
         mock.patch("aios.harness.loop._run_session_step_body", new=body),
         mock.patch("aios.services.sessions.append_event", new=append_event),
         mock.patch("aios.harness.loop.defer_wake", new=defer_wake),
@@ -269,6 +278,7 @@ async def test_refused_wake_redefers_without_step_start(_gate: AccountStepGate) 
     body.assert_not_awaited()
     append_event.assert_not_awaited()  # no step_start for a bounce
     defer.assert_awaited_once()
+    assert defer.await_args is not None
     kwargs = defer.await_args.kwargs
     assert kwargs["cause"] == "reschedule"
     assert kwargs["delay_seconds"] == get_settings().account_fairness_backoff_seconds

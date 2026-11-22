@@ -38,7 +38,7 @@ is exact under the ratified deployment shape — one worker per database
 (advisory-lock singleton in ``harness/worker.py``, shard-by-DB per #921) — so
 the per-account cap is a per-database cap. If several workers ever share one
 database, each enforces the cap independently and the effective per-account cap
-becomes ``N × account_step_concurrency_max``; fairness weakens but nothing
+becomes ``N * account_step_concurrency_max``; fairness weakens but nothing
 deadlocks. The migration path is local: replace this class's body with a
 Postgres-backed counter and leave the call site in ``loop.py`` alone. No schema
 change is involved.
