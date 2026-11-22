@@ -939,17 +939,23 @@ class ToolsetSpec(BaseModel):
                     f"{self.name!r} version {self.version}"
                 )
             if cfg.name in overrides:
-                raise ValueError(f"duplicate configs[] entry {cfg.name!r} for toolset {self.name!r}")
+                raise ValueError(
+                    f"duplicate configs[] entry {cfg.name!r} for toolset {self.name!r}"
+                )
             overrides[cfg.name] = cfg
         default = self.default_config or ToolsetMemberDefaults()
         out: list[ToolSpec] = []
         for member in catalog:
-            cfg = overrides.get(member)
-            enabled = cfg.enabled if cfg and cfg.enabled is not None else default.enabled
+            override = overrides.get(member)
+            enabled = (
+                override.enabled if override and override.enabled is not None else default.enabled
+            )
             if not enabled:
                 continue
-            permission = cfg.permission if cfg and cfg.permission else default.permission
-            transport = cfg.transport if cfg and cfg.transport else default.transport
+            permission = (
+                override.permission if override and override.permission else default.permission
+            )
+            transport = override.transport if override and override.transport else default.transport
             out.append(ToolSpec(type=member, permission=permission, transport=transport))
         return out
 
