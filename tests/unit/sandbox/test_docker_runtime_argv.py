@@ -86,14 +86,15 @@ async def test_create_omits_runtime_by_default(monkeypatch: pytest.MonkeyPatch) 
 
     await DockerBackend().create(_spec())
 
-    assert _runtime_values(calls[0]) == []
+    run = _run_argv(calls)
+    assert _runtime_values(run) == []
     # The operator-image mount is runsc-only: it costs a read-only image mount
     # per sandbox and needs Docker's containerd image store, neither of which
     # the runc path (the production default) has any use for.
-    assert "--mount" not in calls[0]
+    assert "--mount" not in run
     # runc reaches ``aios-worker`` through Docker's embedded DNS, so the runc
     # path neither looks the alias up nor bakes it into /etc/hosts.
-    assert "--add-host" not in calls[0]
+    assert "--add-host" not in run
     assert not any(c[1] == "ps" for c in calls)
 
 
@@ -586,5 +587,58 @@ async def test_create_runc_keeps_the_authored_seccomp_path(
 
     await DockerBackend().create(_spec(seccomp_profile=str(_SECCOMP_SANDBOX)))
 
-    seccomp = next(v for v in _seccomp_values(calls[0]) if v.startswith("seccomp="))
+    seccomp = next(v for v in _seccomp_values(_run_argv(calls)) if v.startswith("seccomp="))
     assert seccomp == f"seccomp={_SECCOMP_SANDBOX}"
+
+
+async def test_create_cold_start_stamps_resolved_base_image_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#390: a cold start from a mutable registry tag pulls it and records the
+    resolved image ID, so a later resume can detect the tag advancing."""
+    from aios.sandbox.backends.base import BASE_IMAGE_ID_LABEL_KEY
+
+    calls: list[list[str]] = []
+
+    async def fake_run(
+        argv: list[str], *, timeout_s: float = 30.0, snapshot_timeout: bool = False
+    ) -> tuple[int, bytes, bytes]:
+        del timeout_s
+        calls.append(list(argv))
+        if argv[1:3] == ["image", "inspect"]:
+            return 0, b"sha256:resolved\t1\t1\t{}\n", b""
+        return 0, b"deadbeefcafe\n", b""
+
+    monkeypatch.setattr(docker_backend, "run_docker_cli", fake_run)
+
+    await DockerBackend().create(_spec(image="ghcr.io/eumemic/aios-sandbox:stable"))
+
+    assert ["docker", "pull", "ghcr.io/eumemic/aios-sandbox:stable"] in calls
+    assert f"{BASE_IMAGE_ID_LABEL_KEY}=sha256:resolved" in _run_argv(calls)
+
+
+async def test_create_resume_does_not_restamp_base_image_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A resume keeps the snapshot's inherited ID label — no pull, no restamp."""
+    from aios.sandbox.backends.base import BASE_IMAGE_ID_LABEL_KEY
+
+    calls: list[list[str]] = []
+
+    async def fake_run(
+        argv: list[str], *, timeout_s: float = 30.0, snapshot_timeout: bool = False
+    ) -> tuple[int, bytes, bytes]:
+        del timeout_s
+        calls.append(list(argv))
+        return 0, b"deadbeefcafe\n", b""
+
+    monkeypatch.setattr(docker_backend, "run_docker_cli", fake_run)
+
+    spec = replace(
+        _spec(image="ghcr.io/eumemic/aios-sandbox:stable"),
+        snapshot_image="aios-sbx-inst-sess_runtime:latest",
+    )
+    await DockerBackend().create(spec)
+
+    assert not any(c[1] == "pull" for c in calls)
+    assert not any(a.startswith(f"{BASE_IMAGE_ID_LABEL_KEY}=") for a in _run_argv(calls))
