@@ -190,8 +190,24 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           REVIEW_ARTIFACT_PATH: ${{ github.workspace }}/review/.eumemic-bot-review.md
+        # Two guards against a record that names the wrong head (aios#2345):
+        #  1. the record must cite the launched SHA verbatim as `at \`<HEAD_SHA>\`` (the
+        #     company#383 grammar the fix driver binds on) and no other `at` SHA carrier;
+        #  2. if a newer push has moved the PR head, this review is stale by construction —
+        #     cancel-in-progress only cancels this Action, so skip posting here instead. A
+        #     superseded review exits 0: it was replaced, not missed.
         run: |
           grep -q '^### Code review$' "$REVIEW_ARTIFACT_PATH"
+          cited="$(grep -oE 'at[[:space:]]+`[0-9a-fA-F]+`' "$REVIEW_ARTIFACT_PATH" | sed -E 's/^at[[:space:]]+//' | tr 'A-F' 'a-f' | sort -u)"
+          if [ "$cited" != "\`${HEAD_SHA}\`" ]; then
+            echo "review does not cite at \`${HEAD_SHA}\` verbatim (cites: ${cited:-nothing}); refusing" >&2
+            exit 1
+          fi
+          live_head="$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq .head.sha)"
+          if [ "$live_head" != "$HEAD_SHA" ]; then
+            echo "PR head moved to $live_head after this review of $HEAD_SHA started; not posting a stale review"
+            exit 0
+          fi
           marker="<!-- eumemic-bot-review:${HEAD_SHA} -->"
           jq -Rs --arg marker "$marker" '{body: (. + "\n\n" + $marker)}' \
             "$REVIEW_ARTIFACT_PATH" > "$RUNNER_TEMP/review-request.json"

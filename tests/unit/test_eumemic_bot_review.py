@@ -1405,7 +1405,9 @@ def test_head_citation_rejects_a_second_conflicting_carrier() -> None:
 
 def test_head_citation_rejects_a_short_prefix() -> None:
     with pytest.raises(SystemExit):
-        reviewer.require_head_citation(_good_artifact(f"Reviewed at `{_FULL_HEAD[:8]}`."), _FULL_HEAD)
+        reviewer.require_head_citation(
+            _good_artifact(f"Reviewed at `{_FULL_HEAD[:8]}`."), _FULL_HEAD
+        )
 
 
 def test_agent_phase_refuses_an_artifact_citing_another_head(
@@ -1433,7 +1435,9 @@ def test_agent_phase_refuses_when_the_checkout_moved_during_the_review(
         return _ok(next(heads) if args[0] == "rev-parse" else "")
 
     monkeypatch.setattr(reviewer, "_git", git)
-    monkeypatch.setattr(reviewer, "run_agent", lambda *a, **k: _good_artifact("Reviewed at `abc123`."))
+    monkeypatch.setattr(
+        reviewer, "run_agent", lambda *a, **k: _good_artifact("Reviewed at `abc123`.")
+    )
     with pytest.raises(SystemExit):
         reviewer.run_agent_phase()
     assert not artifact.exists()
@@ -1443,9 +1447,7 @@ def test_publish_phase_refuses_an_artifact_without_the_head_citation(
     monkeypatch: Any, tmp_path: Path
 ) -> None:
     _publish_env(monkeypatch, tmp_path).write_text("### Code review\n\nNo findings.\n")
-    monkeypatch.setattr(
-        reviewer, "_github_request", lambda *a, **k: pytest.fail("must not post")
-    )
+    monkeypatch.setattr(reviewer, "_github_request", lambda *a, **k: pytest.fail("must not post"))
     with pytest.raises(SystemExit):
         reviewer.run_publish_phase()
 
