@@ -18,8 +18,8 @@
     caller.
   - An inbound channel message owes a reply (a connector tool on that channel
     whose result came back without an error) or a `no_response`. Each inbound
-    is judged once, at the first turn that closes a step after it: one nudge if
-    it is still unanswered, then at the next closing turn a `reply_lapsed` span
+    is judged once, at the first turn closing a step that saw it: one nudge if
+    it is still unanswered, then at the next such turn a `reply_lapsed` span
     and idle. Trigger wakes, operator messages and tool results owe nothing, and
     a session's history from before the change (every step closed on a line of
     text) owes nothing either.
