@@ -23,6 +23,7 @@ from aios.db import queries
 from aios.harness import runtime
 from aios.harness.loop import REFUSAL_FINISH_REASON
 from aios.harness.reply_obligation import (
+    CONNECTOR_CALLS_KEY,
     NO_RESPONSE_TOOL_NAME,
     REPLY_LAPSED_SPAN_EVENT,
     REPLY_NUDGE_METADATA_KEY,
@@ -151,6 +152,9 @@ class TestReplyOrDecline:
         nudges, lapses = await _nudges_and_lapses(harness, session.id)
         assert nudges == [] and lapses == []
         assert (await harness.session(session.id)).status == "idle"
+        # The send was classified when made, durably, on the turn itself.
+        send_turn = next(e for e in await harness.events(session.id) if e.data.get("tool_calls"))
+        assert send_turn.data[CONNECTOR_CALLS_KEY] == ["call_send"]
 
     async def test_trigger_style_wake_opens_nothing(self, harness: Harness) -> None:
         """A channel-less message (an operator post, a trigger wake) answered with

@@ -53,6 +53,26 @@ REPLY_NUDGE_METADATA_KEY: Final[str] = "reply_nudge"
 # after its nudge.
 REPLY_LAPSED_SPAN_EVENT: Final[str] = "reply_lapsed"
 
+# Key on a persisted assistant message: the ids of its tool calls that went to a
+# connector tool, as offered at the step that made them (a harness field like
+# ``reacting_to``; the render keeps only spec fields, so the model never sees it).
+# Classifying a past call against the tools offered NOW would un-credit a reply
+# whenever the connector set changes between the send and the judgment.
+CONNECTOR_CALLS_KEY: Final[str] = "connector_calls"
+
+
+def tag_connector_calls(assistant_msg: dict[str, Any], connector_tool_names: Set[str]) -> None:
+    """Record on ``assistant_msg`` which of its tool calls are connector calls."""
+    ids = [
+        tc["id"]
+        for tc in assistant_msg.get("tool_calls") or []
+        if isinstance(tc, dict)
+        and isinstance(tc.get("id"), str)
+        and (tc.get("function") or {}).get("name") in connector_tool_names
+    ]
+    if ids:
+        assistant_msg[CONNECTOR_CALLS_KEY] = ids
+
 
 @dataclass(frozen=True, slots=True)
 class ReplyOwed:
@@ -95,12 +115,15 @@ def _discharges(
     """``(declined_through, answered_through_by_channel)`` over the tool-calling
     turns: the watermarks up to which ``no_response`` declined everything, and a
     connector call replied on each channel. A call counts once its result is back
-    without an error — a failed send delivered nothing."""
+    without an error — a failed send delivered nothing. Whether a call went to a
+    connector is read from the turn's ``CONNECTOR_CALLS_KEY`` tag; a turn without
+    one (written before the tag existed) falls back to this step's tool set."""
     declined = 0
     answered: dict[str, int] = {}
     for turn in turns:
         raw_watermark = turn.data.get("reacting_to")
         watermark = raw_watermark if isinstance(raw_watermark, int) else turn.seq
+        tagged = turn.data.get(CONNECTOR_CALLS_KEY)
         replied = False
         switched_to: list[str] = []
         for tc in turn.data.get("tool_calls") or []:
@@ -111,9 +134,12 @@ def _discharges(
                 continue
             fn = tc.get("function")
             name = fn.get("name") if isinstance(fn, dict) else None
+            connector_call = (
+                tc.get("id") in tagged if isinstance(tagged, list) else name in connector_tool_names
+            )
             if name == NO_RESPONSE_TOOL_NAME:
                 declined = max(declined, watermark)
-            elif name in connector_tool_names:
+            elif connector_call:
                 replied = True
             metadata = result.get("metadata")
             marker = (

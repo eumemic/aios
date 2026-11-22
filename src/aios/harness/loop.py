@@ -59,7 +59,7 @@ from aios.harness.model_workflow import (
     launch_model_workflow_park,
     take_pending_harvest,
 )
-from aios.harness.reply_obligation import find_reply_due
+from aios.harness.reply_obligation import find_reply_due, tag_connector_calls
 from aios.harness.request_capture import capture_request, store_capture
 from aios.harness.step_context import (
     compose_step_context,
@@ -1916,19 +1916,21 @@ async def _run_session_step_body(
         reacting_to_override if reacting_to_override is not None else step_ctx.reacting_to
     )
 
-    # Reply-or-decline (#2092): a channel session's turn that calls no tools ends
-    # the step, so check whether it leaves an inbound with neither a reply nor a
-    # no_response. The guard below nudges (or records the lapse) only if the turn
-    # would actually idle the session.
-    reply_due = (
-        find_reply_due(
-            events,
-            reacting_to=assistant_msg["reacting_to"],
-            connector_tool_names=prelude.connector_tool_names,
-        )
-        if channels and not assistant_msg.get("tool_calls")
-        else None
-    )
+    # Reply-or-decline (#2092): record which calls of this turn are connector calls
+    # (so a later judgment doesn't depend on the tools offered then), and for a turn
+    # that calls no tools — it ends the step — check whether it leaves an inbound
+    # with neither a reply nor a no_response. The guard below nudges (or records the
+    # lapse) only if the turn would actually idle the session.
+    reply_due = None
+    if channels:
+        if assistant_msg.get("tool_calls"):
+            tag_connector_calls(assistant_msg, prelude.connector_tool_names)
+        else:
+            reply_due = find_reply_due(
+                events,
+                reacting_to=assistant_msg["reacting_to"],
+                connector_tool_names=prelude.connector_tool_names,
+            )
 
     # Append assistant message to the session log (unfenced — procrastinate lock
     # provides mutual exclusion) and, in the SAME transaction, enforce request

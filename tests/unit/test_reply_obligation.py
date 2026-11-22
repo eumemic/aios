@@ -15,12 +15,14 @@ from typing import Any
 from aios.harness.channels import SWITCH_CHANNEL_METADATA_KEY
 from aios.harness.reminders import reminder_event_data
 from aios.harness.reply_obligation import (
+    CONNECTOR_CALLS_KEY,
     NO_RESPONSE_TOOL_NAME,
     REPLY_NUDGE_METADATA_KEY,
     ReplyDue,
     ReplyOwed,
     find_reply_due,
     reply_nudge_content,
+    tag_connector_calls,
 )
 from aios.models.events import Event
 
@@ -186,6 +188,36 @@ class TestDischarges:
             _result(5, send_id),
         ]
         assert _due(events, reacting_to=5) is None
+
+
+class TestConnectorCallsAreClassifiedWhenMade:
+    """A turn records which of its calls went to a connector, so a reply made
+    while ``signal_send`` was offered still counts after the connector set changes
+    (a connection detached, swapped, or attenuated before the judgment)."""
+
+    def _tagged_send(self, seq: int, *, reacting_to: int, tagged: list[str]) -> list[Event]:
+        turn, (tcid,) = _calls(seq, "signal_send", reacting_to=reacting_to)
+        turn.data[CONNECTOR_CALLS_KEY] = [tcid] if tagged == ["self"] else tagged
+        return [turn, _result(seq + 1, tcid)]
+
+    def test_a_tagged_reply_counts_whatever_is_offered_now(self) -> None:
+        events = [_inbound(1), *self._tagged_send(2, reacting_to=1, tagged=["self"])]
+        assert find_reply_due(events, reacting_to=3, connector_tool_names=frozenset()) is None
+
+    def test_the_tag_is_authoritative_over_this_steps_tool_set(self) -> None:
+        # Not a connector call when it was made, whatever the name means now.
+        events = [_inbound(1), *self._tagged_send(2, reacting_to=1, tagged=[])]
+        assert _due(events, reacting_to=3) == _nudge_due(1)
+
+    def test_tagging_marks_only_connector_calls(self) -> None:
+        turn, ids = _calls(1, "bash", "signal_send", NO_RESPONSE_TOOL_NAME, reacting_to=0)
+        tag_connector_calls(turn.data, CONNECTOR_TOOLS)
+        assert turn.data[CONNECTOR_CALLS_KEY] == [ids[1]]
+
+    def test_a_turn_without_connector_calls_gets_no_tag(self) -> None:
+        turn, _ids = _calls(1, "bash", reacting_to=0)
+        tag_connector_calls(turn.data, CONNECTOR_TOOLS)
+        assert CONNECTOR_CALLS_KEY not in turn.data
 
 
 class TestOpensNothing:
