@@ -374,3 +374,67 @@ class TestCanonicalOrder:
         )
         assert _sections(plan) == ["obligations", "concise", "trailing_stimulus"]
         assert plan.skipped == 1
+
+
+class TestOversizedTaskAfterTheAskScrollsOut:
+    """#2353: a >8,192-char task, delivered intact, the session works on it for
+    many turns, then the original ask scrolls out of the window. The listing
+    that replaces it must be a neutral pointer — never a refuse-order the model
+    obeys mid-task (company#210 parked twice on exactly that).
+
+    ``_obligation_summary`` persists the request verbatim on the trusted edge,
+    so a non-``None`` summary means the task is never "missing": it is in the
+    log (``search_events``), the session's own turns and its workspace. Only a
+    frame with NO summary (pre-#1413) fails loud (#2080).
+    """
+
+    _TASK = "BUILD TASK — implement the widget end to end. " * 220  # ~10k chars
+    _REFUSE_PHRASES = ("return an error", "TASK TRUNCATED", "do not act on or infer")
+
+    def _assert_neutral_pointer(self, content: str) -> None:
+        assert "TASK ABRIDGED IN THIS REMINDER" in content
+        assert str(len(self._TASK)) in content
+        for phrase in self._REFUSE_PHRASES:
+            assert phrase not in content, phrase
+        assert "BUILD TASK" not in content  # no improvisable prefix (#2080)
+
+    def test_a_ask_in_window_writes_nothing(self) -> None:
+        assert len(self._TASK) > 8192
+        events = [
+            _evt(1, "user", self._TASK, metadata={"request": {"request_id": "req_big"}}),
+            _evt(2, "assistant", "cloning", reacting_to=1),
+        ]
+        plan = _plan(events, obligations=[_ob("req_big", summary=self._TASK)])
+        assert plan == ReminderPlan(writes=(), skipped=1)
+
+    def test_b_ask_scrolled_after_many_turns_renders_neutral_pointer(self) -> None:
+        # seq 1 (the ask) has slid out; the slate is the child's own work.
+        events: list[Event] = []
+        for i in range(25):
+            events.append(_evt(600 + 2 * i, "assistant", f"step {i}"))
+            events.append(_evt(601 + 2 * i, "user", f"tool output {i}"))
+        assert "req_big" not in present_request_ids(events)
+        plan = _plan(events, obligations=[_ob("req_big", summary=self._TASK)])
+        assert _sections(plan) == ["obligations"]
+        self._assert_neutral_pointer(plan.writes[0].content)
+
+    def test_c_ask_absent_with_zero_turns_still_no_refusal_when_task_persisted(self) -> None:
+        # Even with nothing acted on, an oversized-but-persisted task is
+        # recoverable from the log: a refuse-order is never true here.
+        plan = _plan([], obligations=[_ob("req_big", summary=self._TASK)])
+        assert _sections(plan) == ["obligations"]
+        self._assert_neutral_pointer(plan.writes[0].content)
+
+    def test_c_genuinely_missing_task_still_fails_loud(self) -> None:
+        # #2080 preserved: no content was ever persisted on the frame.
+        ob = Obligation(
+            request_id="req_gone",
+            caller_kind="run",
+            caller_id=None,
+            opened_at=datetime(2026, 9, 5, 12, 0, tzinfo=UTC),
+            summary=None,
+            output_schema=None,
+        )
+        plan = _plan([], obligations=[ob])
+        assert _sections(plan) == ["obligations"]
+        assert "TASK CONTENT UNAVAILABLE" in plan.writes[0].content
