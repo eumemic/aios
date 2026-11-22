@@ -1365,6 +1365,7 @@ class DockerBackend:
             SESSION_LABEL_KEY,
             ENV_KEYS_LABEL_KEY,
             BASE_IMAGE_LABEL_KEY,
+            BASE_IMAGE_ID_LABEL_KEY,
         ):
             value = labels.get(key)
             if value is not None:
