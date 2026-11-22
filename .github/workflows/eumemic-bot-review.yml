@@ -194,14 +194,14 @@ jobs:
         #  1. the record must cite the launched SHA verbatim as `at \`<HEAD_SHA>\`` (the
         #     company#383 grammar the fix driver binds on) and no other `at` SHA carrier;
         #     the pattern is the shell twin of `_AT_SHA_RE` in scripts/eumemic_bot_review.py
-        #     (word-boundary `at`, ASCII word chars, space/tab only) — a test runs both on
+        #     (word-boundary `at`, ASCII word chars, space/tab only, 7-40 hex token) — a test runs both on
         #     one corpus, so the launcher and this guard accept and refuse the same records;
         #  2. if a newer push has moved the PR head, this review is stale by construction —
         #     cancel-in-progress only cancels this Action, so skip posting here instead. A
         #     superseded review exits 0: it was replaced, not missed.
         run: |
           grep -q '^### Code review$' "$REVIEW_ARTIFACT_PATH"
-          cited="$(LC_ALL=C grep -oE '\bat[[:blank:]]+`[0-9a-fA-F]+`' "$REVIEW_ARTIFACT_PATH" | LC_ALL=C sed -E 's/^at[[:blank:]]+//' | LC_ALL=C tr 'A-F' 'a-f' | LC_ALL=C sort -u)"
+          cited="$(LC_ALL=C grep -oE '\bat[[:blank:]]+`[0-9a-fA-F]{7,40}`' "$REVIEW_ARTIFACT_PATH" | LC_ALL=C sed -E 's/^at[[:blank:]]+//' | LC_ALL=C tr 'A-F' 'a-f' | LC_ALL=C sort -u)"
           if [ "$cited" != "\`${HEAD_SHA}\`" ]; then
             echo "review does not cite at \`${HEAD_SHA}\` verbatim (cites: ${cited:-nothing}); refusing" >&2
             exit 1

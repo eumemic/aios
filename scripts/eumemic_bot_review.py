@@ -715,8 +715,11 @@ def require_inspection_evidence(artifact: str, expected: tuple[int, str]) -> Non
 # refuses any artifact that does not cite exactly the SHA it was launched for.
 HEAD_CITATION_TEMPLATE = "Reviewed at `{sha}`."
 # Must accept exactly what the workflow's publish guard accepts (LC_ALL=C grep -oE
-# '\\bat[[:blank:]]+`hex`'): ASCII word boundary, space/tab separator. Parity is tested.
-_AT_SHA_RE = re.compile(r"\bat[ \t]+`([0-9a-fA-F]+)`", re.ASCII)
+# '\\bat[[:blank:]]+`[0-9a-fA-F]{7,40}`'): ASCII word boundary, space/tab separator. Parity is
+# tested. Only a backticked token that could actually be a commit SHA — 7 (git's default
+# abbreviation) to 40 hex characters — is a carrier; prose literals such as "starts at `0`" or
+# "set at `ff`" are not, so a correct review that quotes values is not refused.
+_AT_SHA_RE = re.compile(r"\bat[ \t]+`([0-9a-fA-F]{7,40})`", re.ASCII)
 
 
 def require_head_citation(artifact: str, head_sha: str) -> None:
@@ -1017,7 +1020,8 @@ def _prompt(repo: str, pr_number: str, head_sha: str, base_sha: str) -> str:
         f"there are none, say so briefly. Your final response must start exactly with "
         f"`{ARTIFACT_HEADING}`, and its body must contain the line\n"
         f"  {HEAD_CITATION_TEMPLATE.format(sha=head_sha)}\n"
-        f"citing exactly that SHA, verbatim and in full, and no other `at` SHA carrier. A record "
+        f"citing exactly that SHA, verbatim and in full, and no other `at` SHA carrier (the word "
+        f"`at` followed by a backticked 7-40 character hex token). A record "
         f"without it, or citing any other commit, is refused.\n\n"
         f"MANDATORY PROOF OF INSPECTION. Run exactly:\n"
         f"  git --no-pager diff {base_sha}...{head_sha} | wc -l\n"
