@@ -37,6 +37,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 import threading
 from bisect import bisect_right
 from collections import OrderedDict
@@ -47,7 +48,7 @@ from pathlib import Path
 from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
-from aios.harness.channels import channel_display_name
+from aios.harness.channels import LEGACY_MONOLOGUE_STAMP, channel_display_name
 from aios.harness.image_resize import (
     ImageDownsampleError,
     _blocking_downsample,
@@ -1344,6 +1345,98 @@ def _strip_to_spec(
     return out
 
 
+# ─── legacy transcript markers (#2092) ───────────────────────────────────────
+#
+# Two strings older harness behavior left in transcripts. The render drops them;
+# the event log keeps them.
+#
+# * The monologue stamp. Channel sessions once prefixed every assistant text with
+#   it, and models wrote it themselves too (doubled, mid-text, without the space).
+#   On claude-opus-5-5 a history carrying it trips the provider's
+#   ``reasoning_extraction`` refusal, and one tool result quoting it was enough on
+#   its own, so it is dropped from every rendered message whatever the role.
+# * LiteLLM's empty-text placeholder. LiteLLM's Anthropic adapter rewrites an
+#   empty text to it on the wire, so every tool-call turn without text replayed as
+#   that sentence and models copied it into their own turns. Dropped from
+#   assistant text, and :func:`_without_empty_text` keeps the wire from adding it
+#   back.
+_LEGACY_MONOLOGUE_RE = re.compile(re.escape(LEGACY_MONOLOGUE_STAMP) + r"[ \t]*")
+LITELLM_EMPTY_TEXT_PLACEHOLDER = "[System: Empty message content sanitised to satisfy protocol]"
+
+
+def _scrub_legacy_text(text: str, *, placeholder: bool) -> str:
+    """``text`` without the legacy markers, trimmed; the same object when it
+    carries none (so callers can tell an untouched text by identity)."""
+    has_stamp = LEGACY_MONOLOGUE_STAMP in text
+    has_placeholder = placeholder and LITELLM_EMPTY_TEXT_PLACEHOLDER in text
+    if not (has_stamp or has_placeholder):
+        return text
+    if has_stamp:
+        text = _LEGACY_MONOLOGUE_RE.sub("", text)
+    if has_placeholder:
+        text = text.replace(LITELLM_EMPTY_TEXT_PLACEHOLDER, "")
+    return text.strip()
+
+
+def _scrub_legacy_markers(msg: dict[str, Any]) -> dict[str, Any]:
+    """A copy of a rendered message with the legacy markers removed from its text,
+    or ``msg`` itself when there are none. A text block left empty is dropped
+    (Anthropic rejects empty text blocks). An assistant turn left with no text
+    is then either a tool-call turn (kept, see :func:`_without_empty_text`) or a
+    degenerate empty turn the filter in :func:`build_messages` drops."""
+    role = msg.get("role")
+    if role == "system":
+        return msg
+    placeholder = role == "assistant"
+    content = msg.get("content")
+    if isinstance(content, str):
+        scrubbed = _scrub_legacy_text(content, placeholder=placeholder)
+        return msg if scrubbed is content else {**msg, "content": scrubbed}
+    if not isinstance(content, list):
+        return msg
+    blocks: list[Any] = []
+    changed = False
+    for block in content:
+        text = (
+            block.get("text") if isinstance(block, dict) and block.get("type") == "text" else None
+        )
+        if isinstance(text, str):
+            scrubbed = _scrub_legacy_text(text, placeholder=placeholder)
+            if scrubbed is not text:
+                changed = True
+                if not scrubbed:
+                    continue
+                block = {**block, "text": scrubbed}
+        blocks.append(block)
+    if not changed:
+        return msg
+    return {**msg, "content": blocks or ""}
+
+
+def _without_empty_text(msg: dict[str, Any]) -> dict[str, Any]:
+    """An assistant tool-call turn whose text is empty, rendered with ``content: None``.
+
+    For an Anthropic route only. LiteLLM's Anthropic adapter rewrites an empty
+    string (or an empty text block) to :data:`LITELLM_EMPTY_TEXT_PLACEHOLDER`, but
+    passes a ``None`` content through as a turn of ``tool_use`` blocks alone, which
+    is what the model produced. Other routes keep ``""``: some (MiniMax, Gemma)
+    reject a null content on replay (see ``completion._normalize_message``).
+    """
+    if msg.get("role") != "assistant" or not msg.get("tool_calls"):
+        return msg
+    content = msg.get("content")
+    if isinstance(content, str):
+        empty = not content.strip()
+    elif isinstance(content, list):
+        empty = all(
+            isinstance(b, dict) and b.get("type") == "text" and not (b.get("text") or "").strip()
+            for b in content
+        )
+    else:
+        return msg
+    return {**msg, "content": None} if empty else msg
+
+
 # ─── build_messages ──────────────────────────────────────────────────────────
 
 
@@ -1911,12 +2004,20 @@ def build_messages(
     #
     # ``bool(model) and …`` preserves the empty-model short-circuit: the resolver
     # is not called for an empty model string.
-    from aios.harness.completion import model_descriptor
+    from aios.harness.completion import CacheChannel, model_descriptor
 
-    target_supports_thinking = bool(model) and model_descriptor(model).supports_thinking
+    descriptor = model_descriptor(model) if model else None
+    target_supports_thinking = descriptor is not None and descriptor.supports_thinking
+    anthropic_route = descriptor is not None and descriptor.cache_channel is CacheChannel.ANTHROPIC
+    # Index-preserving maps (the survivor walk below looks the pre-strip dicts up by
+    # index): spec whitelist, then the legacy-marker scrub (#2092), then, for an
+    # Anthropic route, ``None`` content on text-less tool-call turns.
     stripped = [
-        _strip_to_spec(m, target_supports_thinking=target_supports_thinking) for m in messages
+        _scrub_legacy_markers(_strip_to_spec(m, target_supports_thinking=target_supports_thinking))
+        for m in messages
     ]
+    if anthropic_route:
+        stripped = [_without_empty_text(m) for m in stripped]
     # Drop degenerate empty assistant turns (no content, no tool_calls, no
     # thinking) before replay. They carry zero information, and replaying them
     # teaches literal-minded models — claude-fable-5 in particular — to imitate
@@ -1926,7 +2027,9 @@ def build_messages(
     # LiteLLM also rewrites their empty content to a "[System: Empty message
     # content sanitised…]" marker on the wire, so the model literally sees a wall
     # of its own malfunction markers. Excluding them is safe for every model
-    # (nothing is lost) and breaks the imitation loop at the source.
+    # (nothing is lost) and breaks the imitation loop at the source. Runs after
+    # the legacy-marker scrub, so a turn that held nothing but the monologue
+    # stamp and that marker is dropped here too.
     survivors = [i for i, m in enumerate(stripped) if not _is_degenerate_empty_assistant(m)]
     # The tail is classified AFTER the prune / strip / degenerate filter — the
     # walk's last append is not the tail when those drop it (a pruned orphan

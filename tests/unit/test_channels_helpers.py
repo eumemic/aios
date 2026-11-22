@@ -14,7 +14,6 @@ import pytest
 
 from aios.harness.channels import (
     CHANNEL_NAME_MAX_CHARS,
-    apply_monologue_prefix,
     augment_with_focal_paradigm,
     build_focal_paradigm_block,
     channel_display_name,
@@ -73,21 +72,24 @@ class TestBuildFocalParadigmBlock:
         assert "▸" in block
         assert "○" in block
 
-    def test_contains_monologue_reminder(self) -> None:
+    def test_bare_text_is_unlabeled_and_not_sent(self) -> None:
+        """#2092: the block says bare text is not sent and names the tools that
+        reply and decline. It no longer asks the model to label its own text: a
+        history of labeled "private" text trips Anthropic's reasoning_extraction
+        refusal on claude-opus-5-5."""
         block = build_focal_paradigm_block(["signal/alice/chat-1"])
-        assert "INTERNAL_MONOLOGUE" in block
+        assert "not sent" in block
+        assert "no_response(reason)" in block
+        assert "INTERNAL_MONOLOGUE" not in block
+        assert "private thinking" not in block
+        assert "monologue" not in block.lower()
 
-    def test_timing_prose_requires_output_every_step(self) -> None:
-        """The ``### Timing`` prose was inverted as part of the empty-turn
-        cascade fix: it no longer tells the model that silence/no-response
-        is acceptable (literal-minded models took that as license to emit
-        empty turns). It now requires output on every step, even when
-        nothing is posted to a channel."""
+    def test_timing_prose_still_forbids_empty_output(self) -> None:
+        """The empty-turn cascade fix still holds: the prose never licenses an
+        empty step. A step with nothing to send ends with ``no_response`` — an
+        explicit act — rather than with silence."""
         block = build_focal_paradigm_block(["signal/alice/chat-1"])
-        # New wording present.
-        assert "Never end a step with empty output" in block
-        assert "every step must still" in block
-        # Old wording gone — its presence would re-license the empty turn.
+        assert "rather than with empty output" in block
         assert "silence is the right choice" not in block
         assert "no obligation to respond" not in block
 
@@ -376,84 +378,3 @@ class TestMaxChannelsReminderLocal:
             ]
         )
         assert priced <= max_channels_reminder_local(channels), (preview[:20], priced)
-
-
-# ── apply_monologue_prefix ─────────────────────────────────────────────────
-
-
-class TestApplyMonologuePrefix:
-    def test_string_content_prefixed(self) -> None:
-        msg: dict[str, Any] = {"role": "assistant", "content": "thinking out loud"}
-        out = apply_monologue_prefix(msg)
-        assert out["content"] == "INTERNAL_MONOLOGUE_NOT_SEEN_BY_USER: thinking out loud"
-
-    def test_already_prefixed_string_unchanged(self) -> None:
-        msg: dict[str, Any] = {
-            "role": "assistant",
-            "content": "INTERNAL_MONOLOGUE_NOT_SEEN_BY_USER: hi",
-        }
-        out = apply_monologue_prefix(msg)
-        assert out["content"] == "INTERNAL_MONOLOGUE_NOT_SEEN_BY_USER: hi"
-
-    def test_empty_string_left_alone(self) -> None:
-        msg: dict[str, Any] = {"role": "assistant", "content": ""}
-        out = apply_monologue_prefix(msg)
-        assert out["content"] == ""
-
-    def test_none_content_left_alone(self) -> None:
-        msg: dict[str, Any] = {"role": "assistant", "content": None, "tool_calls": []}
-        out = apply_monologue_prefix(msg)
-        assert out.get("content") is None
-
-    def test_missing_content_left_alone(self) -> None:
-        msg: dict[str, Any] = {"role": "assistant", "tool_calls": []}
-        out = apply_monologue_prefix(msg)
-        assert "content" not in out
-
-    def test_list_content_only_first_text_block_prefixed(self) -> None:
-        msg: dict[str, Any] = {
-            "role": "assistant",
-            "content": [
-                {"type": "text", "text": "first"},
-                {"type": "tool_use", "id": "x", "name": "y", "input": {}},
-                {"type": "text", "text": "second"},
-            ],
-        }
-        out = apply_monologue_prefix(msg)
-        blocks = out["content"]
-        assert blocks[0] == {"type": "text", "text": "INTERNAL_MONOLOGUE_NOT_SEEN_BY_USER: first"}
-        assert blocks[1] == {"type": "tool_use", "id": "x", "name": "y", "input": {}}
-        assert blocks[2] == {"type": "text", "text": "second"}
-
-    def test_list_content_tool_use_only_left_alone(self) -> None:
-        msg: dict[str, Any] = {
-            "role": "assistant",
-            "content": [{"type": "tool_use", "id": "x", "name": "y", "input": {}}],
-        }
-        out = apply_monologue_prefix(msg)
-        assert out["content"] == [{"type": "tool_use", "id": "x", "name": "y", "input": {}}]
-
-    def test_list_content_first_block_already_prefixed_is_idempotent(self) -> None:
-        msg: dict[str, Any] = {
-            "role": "assistant",
-            "content": [
-                {"type": "text", "text": "INTERNAL_MONOLOGUE_NOT_SEEN_BY_USER: first"},
-                {"type": "text", "text": "second"},
-            ],
-        }
-        out = apply_monologue_prefix(msg)
-        assert out["content"][0]["text"] == "INTERNAL_MONOLOGUE_NOT_SEEN_BY_USER: first"
-        assert out["content"][1]["text"] == "second"
-
-    def test_returns_new_dict_preserving_other_fields(self) -> None:
-        msg: dict[str, Any] = {
-            "role": "assistant",
-            "content": "hi",
-            "tool_calls": [{"id": "x"}],
-            "reacting_to": 42,
-        }
-        out = apply_monologue_prefix(msg)
-        assert out["role"] == "assistant"
-        assert out["tool_calls"] == [{"id": "x"}]
-        assert out["reacting_to"] == 42
-        assert msg["content"] == "hi"

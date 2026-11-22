@@ -47,7 +47,7 @@ from aios.harness.auto_review import (
 from aios.harness.inflight_tool_registry import InflightToolRegistry
 from aios.jobs.app import defer_wake
 from aios.logging import get_logger
-from aios.models.events import REMINDER_EXCLUDE_SQL
+from aios.models.events import NON_STIMULUS_EXCLUDE_SQL
 from aios.services import sessions as sessions_service
 
 log = get_logger("aios.harness.sweep")
@@ -389,11 +389,12 @@ CONFIRMED_ROWS_FLOORED_SQL = f"""
 # Every unreacted tool result counts (matching the scalar gate's ``is_stimulus``
 # in ``append_event``): a session with any tool result past its reaction
 # watermark is a wake candidate.
-# Durable reminder rows are ``role='user'`` but NOT stimuli (``append_event``
-# leaves ``last_stimulus_seq`` alone for them — the SAME predicate, single-
-# sourced from ``REMINDER_EXCLUDE_SQL``, NULL-safe by its definition); exclude
-# them here too or a reminder past the watermark would defeat the
-# incomplete-batch filter below.
+# Durable reminder rows (``role='user'``) and quiet tool results (#2092) are NOT
+# stimuli (``append_event`` leaves ``last_stimulus_seq`` alone for them — the SAME
+# predicate, single-sourced from ``NON_STIMULUS_EXCLUDE_SQL``, NULL-safe by its
+# definition); exclude them here too or a reminder past the watermark would
+# defeat the incomplete-batch filter below, and a quiet result would wake the
+# session it was written to leave idle.
 _UNREACTED_ROWS_TEMPLATE = f"""
     SELECT e.session_id, e.role, e.data->>'tool_call_id' AS tool_call_id
       FROM events e
@@ -401,7 +402,7 @@ _UNREACTED_ROWS_TEMPLATE = f"""
      WHERE e.session_id = ANY($1::text[])
        AND e.kind = 'message'
        AND e.role <> 'assistant'
-       AND {REMINDER_EXCLUDE_SQL.format(col="e.data")}
+       AND {NON_STIMULUS_EXCLUDE_SQL.format(col="e.data")}
        AND e.seq > {{watermark_expr}}
 """
 

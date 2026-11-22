@@ -35,6 +35,7 @@ from aios.models.events import (
     Event,
     EventKind,
     is_errored_lifecycle_event,
+    is_non_stimulus_event,
     is_reminder_event,
 )
 
@@ -1621,10 +1622,15 @@ async def append_event(
     # (the error latch) — an unreacted tool result keeps the session active, but
     # must NOT clear an error. See ``_SESSION_ACTIVE_EXPR``.
     #
-    # Every tool result is a stimulus: the session wakes and the model gets a
+    # Every tool result is a stimulus — the session wakes and the model gets a
     # turn to react to any tool completion (including a ``signal_send`` delivery
-    # ack), restoring the standard agentic loop (tool call → result → continue).
-    is_stimulus = kind == "message" and role != "assistant" and not is_reminder
+    # ack), restoring the standard agentic loop (tool call → result → continue) —
+    # except a QUIET result (``no_response``, #2092): it closes its call (the
+    # ``open_tool_call_count`` decrement below still applies) but asks for no
+    # reaction, so a step that only declined to reply leaves the session idle.
+    is_stimulus = (
+        kind == "message" and role != "assistant" and not is_non_stimulus_event(kind, data)
+    )
     # ``is_errored_lifecycle_event`` reads the SAME constant the error latch
     # writes (``harness/loop.py:_latch_errored_turn``). The read is off the JSONB
     # ``data`` (type ``Any``), which cannot bind to the write literal — see the

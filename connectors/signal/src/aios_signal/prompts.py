@@ -136,7 +136,7 @@ header's ``timestamp_ms`` and ``sender_uuid``).
 ## Sending messages — `signal_send`
 
 **Your text responses are NOT sent automatically.** Bare assistant text
-is internal monologue; nobody on Signal sees it.  To deliver a message
+is not delivered; nobody on Signal sees it.  To deliver a message
 you MUST call:
 
     signal_send(text="your message here")

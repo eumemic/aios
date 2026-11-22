@@ -67,7 +67,7 @@ Pass it verbatim from the channel path — do not decode or modify it.
 ## Sending messages — `telegram_send`
 
 **Your text responses are NOT sent automatically.** Bare assistant text
-is internal monologue; nobody on Telegram sees it. To deliver a message
+is not delivered; nobody on Telegram sees it. To deliver a message
 you MUST call:
 
     telegram_send(text="your message here")

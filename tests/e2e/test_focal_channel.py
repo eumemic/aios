@@ -17,8 +17,9 @@ Coverage:
   whenever the session has any bound channel; the channels listing row
   appears as a user-role message and renders unread counts off the
   event log.
-* Bare assistant text is auto-prefixed with the monologue marker once
-  the session has bound channels.
+
+Bare assistant text and the reply-or-decline obligation are covered by
+``test_reply_or_decline.py``.
 """
 
 from __future__ import annotations
@@ -29,10 +30,7 @@ import pytest
 
 from aios.crypto.vault import CryptoBox
 from aios.db import queries
-from aios.harness.channels import (
-    MONOLOGUE_PREFIX,
-    SWITCH_CHANNEL_METADATA_KEY,
-)
+from aios.harness.channels import SWITCH_CHANNEL_METADATA_KEY
 from aios.services import sessions as sessions_service
 from tests.conftest import needs_docker
 from tests.e2e.harness import Harness, assistant, msg_text, tool_call
@@ -221,26 +219,3 @@ class TestFocalChannelE2E:
         )
         assert tail is not None, f"channels listing not found: {msgs!r}"
         assert "channel_id=signal/+1/chat-a" in msg_text(tail)
-
-    async def test_bare_assistant_text_gets_monologue_prefix(self, harness: Harness) -> None:
-        """Bare assistant text on a channel-bearing session is monologue
-        (the connector tools, not the text, deliver to the peer).  The
-        loop applies ``MONOLOGUE_PREFIX`` so the log is uniform on replay.
-        """
-        account_id = "acc_test_stub"  # PR 3 scaffolding
-        harness.script_model([assistant("thinking out loud")])
-        session = await harness.start("hi")
-        await sessions_service.append_user_message(
-            harness._pool,
-            session.id,
-            "channel inbound",
-            metadata={"channel": "signal/+1/chat-a"},
-            account_id=account_id,
-        )
-        await harness.run_until_idle(session.id)
-
-        events = await harness.events(session.id)
-        asst = next(e for e in events if e.data.get("role") == "assistant")
-        content = asst.data.get("content")
-        assert isinstance(content, str)
-        assert content.startswith(MONOLOGUE_PREFIX), content

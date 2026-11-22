@@ -42,9 +42,11 @@ import asyncpg
 
 from aios.errors import AiosError, NotFoundError
 from aios.harness import runtime
+from aios.jobs.app import defer_run_wake, defer_wake
 from aios.logging import get_logger
 from aios.mcp.schema import mcp_origin_for
 from aios.models.agents import McpServerSpec
+from aios.models.events import is_non_stimulus_event
 from aios.services import sessions as sessions_service
 from aios.tools.invoke import ToolBail, invoke_builtin, parse_arguments, prepare_builtin
 from aios.tools.registry import ToolResult, tool_parallel_safe
@@ -894,6 +896,7 @@ async def _append_tool_result_event(
             token_delta_v2=token_delta_v2,
         )
 
+    totality: sessions_service.RequestTotality | None = None
     async with pool.acquire() as conn, conn.transaction():
         await conn.execute(
             "SELECT 1 FROM sessions WHERE id = $1 AND account_id = $2 FOR UPDATE",
@@ -915,6 +918,13 @@ async def _append_tool_result_event(
                 account_id=account_id,
                 precomputed=precomputed,
             )
+            if is_non_stimulus_event("message", event_data):
+                # A quiet result (``no_response``) can end a step with no closing
+                # assistant turn, so enforce request totality here, atomically with
+                # the append that may idle the session (#2092).
+                totality = await sessions_service.guard_quiet_result_quiescence(
+                    conn, session_id, account_id=account_id
+                )
         except asyncpg.UniqueViolationError:
             # Structural floor (#1082): the partial UNIQUE index
             # ``events_tool_result_idx`` forbids a second tool-role row for
@@ -932,6 +942,26 @@ async def _append_tool_result_event(
             )
             assert existing is not None  # the UniqueViolation proves a row exists
             await _dedup_skip(conn, session_id, tool_call_id, existing, event_data, account_id)
+    if totality is not None:
+        await _defer_totality_wakes(pool, session_id, totality, account_id=account_id)
+
+
+async def _defer_totality_wakes(
+    pool: asyncpg.Pool[Any],
+    session_id: str,
+    totality: sessions_service.RequestTotality,
+    *,
+    account_id: str,
+) -> None:
+    """The post-commit wakes of :func:`services.sessions.guard_quiet_result_quiescence`,
+    as the step loop fires them for the closing-turn guard: the nudged session, and
+    the callers of any request auto-errored past its budget."""
+    if totality.nudged:
+        await defer_wake(pool, session_id, cause="request_nudge", account_id=account_id)
+    if totality.autoerror_caller_run_id is not None:
+        await defer_run_wake(totality.autoerror_caller_run_id, batch=True)
+    for caller_session_id in totality.autoerror_caller_session_ids:
+        await defer_wake(pool, caller_session_id, cause="invoke_response", account_id=account_id)
 
 
 async def _dedup_skip(

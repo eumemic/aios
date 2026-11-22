@@ -1,6 +1,6 @@
-"""Channel helpers: prompt augmentation, monologue prefix, focal-channel
-unread derivation, and the ``_meta.aios.focal_channel_path`` injection
-helper for outbound MCP requests.
+"""Channel helpers: prompt augmentation, focal-channel unread derivation,
+and the ``_meta.aios.focal_channel_path`` injection helper for outbound MCP
+requests.
 
 The "set of channels a session is bound to" is derived from the event
 log: any distinct ``channel`` address the session has interacted with.
@@ -17,7 +17,10 @@ from aios.harness._text import join_blocks
 from aios.harness.chat_type import chat_type_of
 from aios.models.events import Event
 
-MONOLOGUE_PREFIX = "INTERNAL_MONOLOGUE_NOT_SEEN_BY_USER: "
+# What channel sessions used to prefix onto every assistant text, before bare
+# text became plain unsent text (#2092). Nothing writes it any more; it stays so
+# the renderer can scrub it from history (``context._scrub_legacy_markers``).
+LEGACY_MONOLOGUE_STAMP = "INTERNAL_MONOLOGUE_NOT_SEEN_BY_USER:"
 
 # Key under a switch_channel tool_result's ``data["metadata"]`` that
 # records the target and outcome — ``{"target": str | None, "success": bool}``.
@@ -119,25 +122,23 @@ def build_focal_paradigm_block(channels: list[str]) -> str:
         "\n"
         "### Responding\n"
         "\n"
-        "When focused on a channel, the connector's response tools "
-        "(e.g. `signal_send`, `signal_react`) operate on your focal "
-        "channel implicitly — no channel/chat-id argument required. "
-        "Bare assistant text is NOT delivered to any channel — it is "
-        "private thinking no human sees. Prefix any such thinking with "
-        f"{MONOLOGUE_PREFIX.strip()!r} so it is unambiguous in your "
-        "history that you understood it was internal.\n"
+        "Your text output is not sent to any channel. To reply, call the "
+        "connector's response tools (e.g. `signal_send`, `signal_react`); "
+        "they act on your focal channel implicitly — no channel/chat-id "
+        "argument required. A reaction counts as a reply.\n"
+        "\n"
+        "Every inbound message gets either a reply or a deliberate decision "
+        "not to reply. When the latest messages need nothing from you (a "
+        "group conversation that doesn't involve you, an acknowledgement "
+        "that closes a thread), call `no_response(reason)`: it sends nothing "
+        "and ends the step. A message left with neither gets one reminder.\n"
         "\n"
         "### Timing\n"
         "\n"
         "Tools run asynchronously — new user messages can arrive while "
         "a tool is in flight, and you will see them on your next step. "
-        "Not every step needs a channel post — when nothing new requires "
-        "a reply, the right move is to NOT post. But every step must still "
-        "produce output: say so in one line prefixed "
-        f"{MONOLOGUE_PREFIX.strip()!r} (it stays private — no human sees "
-        "it). Never end a step with empty output: an empty step is "
-        "indistinguishable from a malfunction, and a run of them derails "
-        "the conversation."
+        "If a step has nothing to send, end it with `no_response(reason)` "
+        "rather than with empty output."
     )
 
 
@@ -401,39 +402,3 @@ def derive_unread_counts(events: Iterable[Event], channels: Iterable[str]) -> di
         if seq > last_seen[orig]:
             counts[orig] += 1
     return counts
-
-
-def _prefix_text(s: str) -> str:
-    return s if s.startswith(MONOLOGUE_PREFIX) else MONOLOGUE_PREFIX + s
-
-
-def apply_monologue_prefix(assistant_msg: dict[str, Any]) -> dict[str, Any]:
-    """Prefix the *start* of an assistant message's text content.
-
-    Safety net: the paradigm prose instructs the model to open its bare
-    text with the prefix; this fills in the prefix when it forgets, so
-    the log is uniform on replay. Idempotent — see :func:`_prefix_text`.
-
-    For list-shaped content (providers that emit a reasoning block first
-    or interleave text with tool_use blocks), the prefix is stamped on
-    the *first* text block only — the message is one logical turn, and
-    stamping every text segment produced double/triple prefixes in the
-    log (observed on Gemma, which emits a ``thought\\n...`` text block
-    followed by the actual response).
-    """
-    content = assistant_msg.get("content")
-    if not content:
-        return assistant_msg
-    if isinstance(content, str):
-        return {**assistant_msg, "content": _prefix_text(content)}
-    if isinstance(content, list):
-        new_blocks: list[Any] = []
-        prefixed = False
-        for block in content:
-            if not prefixed and isinstance(block, dict) and block.get("type") == "text":
-                new_blocks.append({**block, "text": _prefix_text(block.get("text", ""))})
-                prefixed = True
-            else:
-                new_blocks.append(block)
-        return {**assistant_msg, "content": new_blocks}
-    return assistant_msg

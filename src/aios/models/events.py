@@ -161,6 +161,46 @@ def reminder_section(kind: str, data: dict[str, Any]) -> str | None:
     return section if isinstance(section, str) else None
 
 
+# ── Quiet tool results ────────────────────────────────────────────────────────
+#
+# A tool result whose ``metadata`` object carries :data:`QUIET_RESULT_METADATA_KEY`
+# is persisted, priced and replayed like any tool result, but it is NOT a
+# stimulus: it never bumps ``last_stimulus_seq``, so its arrival cannot wake the
+# session or count as something the assistant has yet to react to. It still
+# closes its tool call (``open_tool_call_count`` drops), so a step whose only call
+# returned quietly leaves the session idle. ``no_response`` is the writer (#2092):
+# its whole purpose is to end a step without a reply, and a waking result would
+# feed every decline back as another inference. A built-in sets the key through
+# ``ToolResult.metadata``; MCP results and externally-posted custom results carry
+# no metadata, so nothing outside the harness can mark a row quiet.
+#
+# Reminder rows and quiet results are the two non-stimulus message kinds.
+# :func:`is_non_stimulus_event` (``append_event``'s stimulus test) and
+# :data:`NON_STIMULUS_EXCLUDE_SQL` (the sweep's unreacted-rows gate) are the same
+# predicate over both markers, as the reminder pair above is for reminders.
+QUIET_RESULT_METADATA_KEY: Final[str] = "aios_quiet"
+NON_STIMULUS_EXCLUDE_SQL: Final[str] = (
+    "NOT COALESCE(jsonb_typeof({col}->'metadata') = 'object' "
+    "AND {col}->'metadata' ?| array['"
+    + REMINDER_METADATA_KEY
+    + "', '"
+    + QUIET_RESULT_METADATA_KEY
+    + "'], false)"
+)
+
+
+def is_non_stimulus_event(kind: str, data: dict[str, Any]) -> bool:
+    """A message the model reads but never has to react to: a reminder row or
+    a quiet tool result. The Python twin of :data:`NON_STIMULUS_EXCLUDE_SQL`
+    (like it, no role term)."""
+    if kind != "message":
+        return False
+    metadata = data.get("metadata")
+    return isinstance(metadata, dict) and (
+        REMINDER_METADATA_KEY in metadata or QUIET_RESULT_METADATA_KEY in metadata
+    )
+
+
 class Event(BaseModel):
     """Read view of a single event from the session log.
 
