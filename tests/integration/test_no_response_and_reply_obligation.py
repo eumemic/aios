@@ -191,6 +191,13 @@ class TestReplyNudge:
         async with pool.acquire() as conn:
             assert await queries.derive_session_status(conn, sid, account_id=_ACCOUNT) == "idle"
 
+        # Judged once: a later wake (operator, trigger) closing on bare text records
+        # no second lapse for the same inbound.
+        await sessions_service.append_user_message(pool, sid, "cron tick", account_id=_ACCOUNT)
+        third = await self._bare_text_turn(pool, sid)
+        assert third.nudged is False
+        assert await self._rows(pool, sid) == (nudges, lapses)
+
     async def test_a_new_inbound_after_the_lapse_gets_its_own_nudge(
         self, pool_session: tuple[asyncpg.Pool[Any], str]
     ) -> None:
@@ -223,6 +230,95 @@ class TestReplyNudge:
         assert result.nudged is False
         nudges, lapses = await self._rows(pool, sid)
         assert nudges == [] and lapses == []
+
+
+class TestNoResponseWhileOwingARequest:
+    """A quiet result can end a step with no closing assistant turn, so the request
+    totality guard runs on it: a session that owes an awaited request and only
+    declines draws the request nudge (counted against the budget), then the
+    ``no_return`` auto-error — never idles with its caller waiting."""
+
+    async def test_declining_cannot_strand_the_caller(
+        self, pool_session: tuple[asyncpg.Pool[Any], str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from aios.harness import tool_dispatch
+        from aios.services.sessions import REQUEST_NUDGE_BUDGET
+
+        pool, sid = pool_session
+        _agent, env, caller = await seed_agent_env_session(
+            pool, account_id=_ACCOUNT, prefix="no-response-caller"
+        )
+        async with pool.acquire() as conn, conn.transaction():
+            await queries.append_request_opened(
+                conn,
+                session_id=sid,
+                account_id=_ACCOUNT,
+                request_id="req_owed",
+                caller={"kind": "session", "id": caller.id},
+                depth=1,
+                environment_id=env.id,
+                frozen_surface={"tools": [], "mcp_servers": [], "http_servers": []},
+                vault_ids=[],
+            )
+        wakes: list[tuple[str, str | None]] = []
+
+        async def fake_defer_wake(_pool: Any, session_id: str, *, cause: str, **_k: Any) -> None:
+            wakes.append((session_id, cause))
+
+        async def fake_defer_run_wake(run_id: str, **_k: Any) -> None:
+            wakes.append((run_id, None))  # pragma: no cover - session caller here
+
+        monkeypatch.setattr(tool_dispatch, "defer_wake", fake_defer_wake)
+        monkeypatch.setattr(tool_dispatch, "defer_run_wake", fake_defer_run_wake)
+
+        for i in range(REQUEST_NUDGE_BUDGET + 1):
+            tcid = f"t_decline_{i}"
+            async with pool.acquire() as conn:
+                reacting_to = (await _scalars(conn, sid))["last_stimulus_seq"]
+            await sessions_service.append_assistant_and_guard_quiescence(
+                pool,
+                sid,
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "reacting_to": reacting_to,
+                    "tool_calls": [
+                        {
+                            "id": tcid,
+                            "type": "function",
+                            "function": {"name": NO_RESPONSE_TOOL_NAME, "arguments": "{}"},
+                        }
+                    ],
+                },
+                account_id=_ACCOUNT,
+            )
+            await tool_dispatch._append_tool_result_event(
+                pool,
+                sid,
+                tcid,
+                {
+                    "role": "tool",
+                    "tool_call_id": tcid,
+                    "name": NO_RESPONSE_TOOL_NAME,
+                    "content": "Nothing sent.",
+                    "metadata": {QUIET_RESULT_METADATA_KEY: {"tool": NO_RESPONSE_TOOL_NAME}},
+                },
+                account_id=_ACCOUNT,
+                tool_parent_channel=None,
+            )
+
+        async with pool.acquire() as conn:
+            nudges = await queries.count_request_nudges(
+                conn, sid, account_id=_ACCOUNT, request_id="req_owed"
+            )
+            open_ids = await queries.get_open_request_ids(conn, sid, account_id=_ACCOUNT)
+            status = await queries.derive_session_status(conn, sid, account_id=_ACCOUNT)
+        assert nudges == REQUEST_NUDGE_BUDGET
+        assert open_ids == [], "the request is answered (no_return) once the budget is spent"
+        assert status == "idle"
+        assert wakes == [(sid, "request_nudge")] * REQUEST_NUDGE_BUDGET + [
+            (caller.id, "invoke_response")
+        ]
 
 
 class TestReservedMetadata:

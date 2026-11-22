@@ -2136,14 +2136,14 @@ async def append_assistant_and_guard_quiescence(
     """Append the model's assistant message and, **atomically**, enforce the
     request-totality invariant: a session may not go idle while it owes a response.
 
-    **Reply-or-decline (#2092).** ``reply_due`` is the channel session's open
-    reply obligation as of this turn (:func:`aios.harness.reply_obligation.find_reply_due`,
+    **Reply-or-decline (#2092).** ``reply_due`` is what this closing turn owes a
+    channel session's inbound (:func:`aios.harness.reply_obligation.find_reply_due`,
     computed by the loop from the step's slate; ``None`` when nothing is owed). If
-    this turn would idle the session, the guard appends one nudge naming the open
-    channel(s) — a stimulus, so the session takes another step — unless that inbound
-    already had its nudge, in which case the session idles and a ``reply_lapsed``
-    span records it. Unlike a request, a reply has no caller to fail, so the budget
-    is one nudge per inbound and then idle.
+    the turn would idle the session, inbound reaching their first closing turn
+    unanswered get one nudge naming their channel(s) — a stimulus, so the session
+    takes another step — and inbound still unanswered after their nudge lapse: a
+    ``reply_lapsed`` span records them and the session idles. Unlike a request, a
+    reply has no caller to fail, so the budget is one nudge per inbound.
 
     Any session that owns an open request edge (#1123) can owe a response — a
     workflow child (run caller) OR a session-caller ``invoke`` target (#1127). A
@@ -2179,9 +2179,6 @@ async def append_assistant_and_guard_quiescence(
     assistant event's locked focal stamp, threaded into the live tool-result append
     so ``append_event`` skips the in-lock tool-parent lookup (issue #862).
     """
-    nudged = False
-    autoerror_caller_run_id: str | None = None
-    autoerror_caller_session_ids: list[str] = []
     async with pool.acquire() as conn, conn.transaction():
         assistant_event = await queries.append_event(
             conn, session_id=session_id, kind="message", data=assistant_msg, account_id=account_id
@@ -2205,68 +2202,120 @@ async def append_assistant_and_guard_quiescence(
             return AssistantAppendResult(False, None, focal)  # nothing owed (or all answered)
         if await queries.derive_session_status(conn, session_id, account_id=account_id) != "idle":
             return AssistantAppendResult(False, None, focal)
-        to_nudge: list[str] = []
-        for request_id in open_ids:
-            nudges = await queries.count_request_nudges(
-                conn, session_id, account_id=account_id, request_id=request_id
+        totality = await _enforce_request_totality(
+            conn, session_id, open_ids, account_id=account_id
+        )
+        nudged = totality.nudged
+        if reply_due is not None and reply_due.lapse is not None:
+            await queries.append_event(
+                conn,
+                session_id=session_id,
+                kind="span",
+                data={"event": REPLY_LAPSED_SPAN_EVENT, **reply_due.lapse.detail()},
+                account_id=account_id,
             )
-            if nudges >= REQUEST_NUDGE_BUDGET:
-                # Auto-error past budget through the one conn-level response writer
-                # (run caller → fused child_done marker; session/api → plain edge),
-                # collecting the post-commit caller-wake the harness loop fires.
-                write = await respond_to_request_conn(
-                    conn,
-                    session_id,
-                    request_id=request_id,
-                    outcome=Err(error={"kind": "no_return"}),
-                )
-                if write.wake_run_id is not None:
-                    autoerror_caller_run_id = write.wake_run_id
-                elif write.wake_session_id is not None:
-                    autoerror_caller_session_ids.append(write.wake_session_id)
-            else:
-                to_nudge.append(request_id)
-        if to_nudge:
+        if reply_due is not None and reply_due.nudge is not None:
             await queries.append_event(
                 conn,
                 session_id=session_id,
                 kind="message",
                 data={
                     "role": "user",
-                    "content": await _quiescence_owed_surfacing(
-                        conn, session_id, account_id=account_id, nudged_ids=to_nudge
-                    ),
-                    "metadata": {"nudged_request_ids": to_nudge},
+                    "content": reply_nudge_content(reply_due.nudge),
+                    "metadata": {REPLY_NUDGE_METADATA_KEY: reply_due.nudge.detail()},
                 },
                 account_id=account_id,
             )
             nudged = True
-        if reply_due is not None:
-            detail = {"through_seq": reply_due.through_seq, "channels": list(reply_due.channels)}
-            if reply_due.nudged:
-                await queries.append_event(
-                    conn,
-                    session_id=session_id,
-                    kind="span",
-                    data={"event": REPLY_LAPSED_SPAN_EVENT, **detail},
-                    account_id=account_id,
-                )
-            else:
-                await queries.append_event(
-                    conn,
-                    session_id=session_id,
-                    kind="message",
-                    data={
-                        "role": "user",
-                        "content": reply_nudge_content(reply_due),
-                        "metadata": {REPLY_NUDGE_METADATA_KEY: detail},
-                    },
-                    account_id=account_id,
-                )
-                nudged = True
     return AssistantAppendResult(
-        nudged, autoerror_caller_run_id, focal, tuple(autoerror_caller_session_ids)
+        nudged,
+        totality.autoerror_caller_run_id,
+        focal,
+        totality.autoerror_caller_session_ids,
     )
+
+
+class RequestTotality(NamedTuple):
+    """What enforcing request totality at quiescence wrote, and the wakes it owes
+    after commit: the session itself when ``nudged``, and the callers of the
+    requests it auto-errored past their nudge budget."""
+
+    nudged: bool
+    autoerror_caller_run_id: str | None
+    autoerror_caller_session_ids: tuple[str, ...]
+
+
+async def _enforce_request_totality(
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    open_ids: list[str],
+    *,
+    account_id: str,
+) -> RequestTotality:
+    """For a session about to idle: nudge each open request under its budget, write
+    the ``no_return`` error for each one past it. The caller has checked the session
+    would be idle and holds the transaction the idling event was written in."""
+    autoerror_caller_run_id: str | None = None
+    autoerror_caller_session_ids: list[str] = []
+    to_nudge: list[str] = []
+    for request_id in open_ids:
+        nudges = await queries.count_request_nudges(
+            conn, session_id, account_id=account_id, request_id=request_id
+        )
+        if nudges >= REQUEST_NUDGE_BUDGET:
+            # Auto-error past budget through the one conn-level response writer
+            # (run caller → fused child_done marker; session/api → plain edge),
+            # collecting the post-commit caller-wake.
+            write = await respond_to_request_conn(
+                conn,
+                session_id,
+                request_id=request_id,
+                outcome=Err(error={"kind": "no_return"}),
+            )
+            if write.wake_run_id is not None:
+                autoerror_caller_run_id = write.wake_run_id
+            elif write.wake_session_id is not None:
+                autoerror_caller_session_ids.append(write.wake_session_id)
+        else:
+            to_nudge.append(request_id)
+    if to_nudge:
+        await queries.append_event(
+            conn,
+            session_id=session_id,
+            kind="message",
+            data={
+                "role": "user",
+                "content": await _quiescence_owed_surfacing(
+                    conn, session_id, account_id=account_id, nudged_ids=to_nudge
+                ),
+                "metadata": {"nudged_request_ids": to_nudge},
+            },
+            account_id=account_id,
+        )
+    return RequestTotality(
+        bool(to_nudge), autoerror_caller_run_id, tuple(autoerror_caller_session_ids)
+    )
+
+
+async def guard_quiet_result_quiescence(
+    conn: asyncpg.Connection[Any], session_id: str, *, account_id: str
+) -> RequestTotality:
+    """Request totality for a session a quiet tool result just idled (#2092).
+
+    A quiet result (``no_response``) closes its call without waking the session,
+    so a step can end with no closing assistant turn — the point where
+    :func:`append_assistant_and_guard_quiescence` enforces totality. Run the same
+    enforcement here, in the transaction that appended the result: a session that
+    declined a channel reply but owes an awaited request gets the request nudge
+    (counted against the same budget, so repeated declines end in ``no_return``)
+    instead of idling with its caller waiting.
+    """
+    open_ids = await queries.get_open_request_ids(conn, session_id, account_id=account_id)
+    if not open_ids:
+        return RequestTotality(False, None, ())
+    if await queries.derive_session_status(conn, session_id, account_id=account_id) != "idle":
+        return RequestTotality(False, None, ())
+    return await _enforce_request_totality(conn, session_id, open_ids, account_id=account_id)
 
 
 async def append_tool_result(

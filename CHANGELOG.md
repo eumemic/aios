@@ -11,13 +11,18 @@
   each once the label was gone. Bare text is now plain unsent text, and:
   - `no_response(reason)`, injected beside `switch_channel`, is how a step
     declines to reply. Its result is quiet: it closes the call but is not a
-    stimulus, so declining never wakes the session again.
-  - An inbound channel message owes a reply (a connector tool on that channel)
-    or a `no_response`. A turn that would idle the session with one unanswered
-    gets one nudge per inbound; after that the session idles and a
-    `reply_lapsed` span records it. Trigger wakes, operator messages and tool
-    results owe nothing, and an old step's stamped closing line still reads as
-    the decline it was.
+    stimulus, so declining never wakes the session again. A quiet result that
+    idles a session owing an awaited request runs the request-totality guard,
+    and a decline-only turn no longer resets the request nudge budget, so a
+    session that only declines reaches `no_return` instead of stranding its
+    caller.
+  - An inbound channel message owes a reply (a connector tool on that channel
+    whose result came back without an error) or a `no_response`. Each inbound
+    is judged once, at the first turn that closes a step after it: one nudge if
+    it is still unanswered, then at the next closing turn a `reply_lapsed` span
+    and idle. Trigger wakes, operator messages and tool results owe nothing, and
+    a session's history from before the change (every step closed on a line of
+    text) owes nothing either.
   - The renderer drops the old stamp from every message, and LiteLLM's
     empty-text placeholder from assistant text (`RENDER_VERSION` 3; the event
     log is unchanged). On an Anthropic route a text-less tool-call turn renders

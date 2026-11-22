@@ -19,9 +19,7 @@ from aios.models.events import Event
 
 # What channel sessions used to prefix onto every assistant text, before bare
 # text became plain unsent text (#2092). Nothing writes it any more; it stays so
-# the renderer can scrub it from history (``context._scrub_legacy_markers``) and
-# the reply-or-decline obligation can read an old step's stamped closing line as
-# the decline it was (``reply_obligation.find_reply_due``).
+# the renderer can scrub it from history (``context._scrub_legacy_markers``).
 LEGACY_MONOLOGUE_STAMP = "INTERNAL_MONOLOGUE_NOT_SEEN_BY_USER:"
 
 # Key under a switch_channel tool_result's ``data["metadata"]`` that

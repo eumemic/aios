@@ -31,6 +31,8 @@ from functools import cache
 from typing import TYPE_CHECKING, Any
 
 import litellm
+from litellm.llms.anthropic.chat import handler as _anthropic_stream_handler
+from litellm.llms.anthropic.chat import transformation as _anthropic_response_transformation
 
 from aios.config import get_settings
 from aios.harness.context import _USER_MESSAGE_SEPARATOR_CONTENT
@@ -97,49 +99,51 @@ except (ImportError, AttributeError):  # pragma: no cover - litellm layout drift
 # key), leaving a refusal recorded as a bare ``finish_reason: content_filter``. The
 # cause of the reasoning_extraction refusals then took request replays to find
 # (#2092). Carry it through ``provider_specific_fields``, LiteLLM's own channel for
-# provider extras; :func:`_stop_details_of` reads it back. Pinned against the
-# installed LiteLLM by ``tests/unit/test_completion_stop_details.py``, so an upgrade
-# that moves these internals fails a test instead of silently losing the field.
+# provider extras; :func:`_stop_details_of` reads it back. No fallback: if a LiteLLM
+# upgrade moves these internals, importing this module fails, and
+# ``tests/unit/test_completion_stop_details.py`` fails first in CI.
 STOP_DETAILS_FIELD = "stop_details"
-try:  # defensive: private module paths, may move across litellm versions
-    from litellm.llms.anthropic.chat import handler as _anthropic_handler
+_anthropic_chunk_parser = _anthropic_stream_handler.ModelResponseIterator.chunk_parser
+_anthropic_transform_parsed_response = (
+    _anthropic_response_transformation.AnthropicConfig.transform_parsed_response
+)
 
-    _chunk_parser = _anthropic_handler.ModelResponseIterator.chunk_parser
 
-    def _chunk_parser_keeping_stop_details(self: Any, chunk: dict[str, Any]) -> Any:
-        parsed = _chunk_parser(self, chunk)
-        if chunk.get("type") == "message_delta" and parsed.choices:
-            details = (chunk.get("delta") or {}).get(STOP_DETAILS_FIELD)
-            if details:
-                delta = parsed.choices[0].delta
-                delta.provider_specific_fields = {
-                    **(delta.provider_specific_fields or {}),
-                    STOP_DETAILS_FIELD: details,
-                }
-        return parsed
-
-    _anthropic_handler.ModelResponseIterator.chunk_parser = _chunk_parser_keeping_stop_details  # type: ignore[method-assign]
-
-    _transform_parsed_response = _anthropic_transformation.AnthropicConfig.transform_parsed_response
-
-    def _transform_keeping_stop_details(
-        self: Any, completion_response: dict[str, Any], *args: Any, **kwargs: Any
-    ) -> Any:
-        model_response = _transform_parsed_response(self, completion_response, *args, **kwargs)
-        details = completion_response.get(STOP_DETAILS_FIELD)
+def _chunk_parser_keeping_stop_details(self: Any, chunk: dict[str, Any]) -> Any:
+    parsed = _anthropic_chunk_parser(self, chunk)
+    if chunk.get("type") == "message_delta" and parsed.choices:
+        details = (chunk.get("delta") or {}).get(STOP_DETAILS_FIELD)
         if details:
-            message = model_response.choices[0].message
-            message.provider_specific_fields = {
-                **(message.provider_specific_fields or {}),
+            delta = parsed.choices[0].delta
+            delta.provider_specific_fields = {
+                **(delta.provider_specific_fields or {}),
                 STOP_DETAILS_FIELD: details,
             }
-        return model_response
+    return parsed
 
-    _anthropic_transformation.AnthropicConfig.transform_parsed_response = (  # type: ignore[method-assign]
-        _transform_keeping_stop_details
+
+def _transform_keeping_stop_details(
+    self: Any, completion_response: dict[str, Any], *args: Any, **kwargs: Any
+) -> Any:
+    model_response = _anthropic_transform_parsed_response(
+        self, completion_response, *args, **kwargs
     )
-except (ImportError, AttributeError, NameError):  # pragma: no cover - litellm layout drift
-    pass
+    details = completion_response.get(STOP_DETAILS_FIELD)
+    if details:
+        message = model_response.choices[0].message
+        message.provider_specific_fields = {
+            **(message.provider_specific_fields or {}),
+            STOP_DETAILS_FIELD: details,
+        }
+    return model_response
+
+
+_anthropic_stream_handler.ModelResponseIterator.chunk_parser = (  # type: ignore[method-assign]
+    _chunk_parser_keeping_stop_details
+)
+_anthropic_response_transformation.AnthropicConfig.transform_parsed_response = (  # type: ignore[method-assign]
+    _transform_keeping_stop_details
+)
 
 # Default per-call bounds. Kept here so they're visible at the wrapper boundary
 # rather than buried in defaults that drift between LiteLLM versions. Agents

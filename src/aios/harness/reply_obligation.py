@@ -10,74 +10,124 @@ obligation the quiescence guard checks
   ``orig_channel``, not a reminder — that the step saw (``seq <= reacting_to``).
   Trigger and cron wakes, tool results, and channel-less operator messages open
   nothing.
-* **Discharged by** a later assistant turn that called a connector tool while
-  focused on that channel (a send, a reaction, …), or that called ``no_response``,
-  which declines on every channel. A discharge covers every inbound up to that
-  turn's ``reacting_to``: one reply answers a burst of messages. Under the old
-  protocol a step declined by closing on stamped text (``LEGACY_MONOLOGUE_STAMP``);
-  such a turn still reads as the decline it was, so history from before the change
-  owes nothing.
-* **Enforced** when a tool-call-free turn would idle the session: the guard
-  appends one nudge naming the open channel(s). If the newest open inbound has
-  already had its nudge, the session idles and a ``reply_lapsed`` span records it.
-  A newer inbound gets its own nudge, so a nudge can't recur without new input.
+* **Discharged by** a later assistant turn that called ``no_response`` (which
+  declines on every channel), or a connector tool on that channel (a send, a
+  reaction, …) whose result came back without an error. The channel is the one
+  the turn was focused on, or the target of a successful ``switch_channel`` in
+  the same turn. A discharge covers every inbound up to that turn's
+  ``reacting_to``: one reply answers a burst of messages.
+* **Judged once**, at the first *closing* turn after it — an assistant turn
+  without tool calls, which ends a step. If the inbound is still undischarged
+  there, the guard appends one nudge naming its channel. At the first closing
+  turn after that nudge it lapses: the session idles and a ``reply_lapsed`` span
+  records it. After that it is closed. A closing turn that drew no nudge closes
+  the inbound too — which is what makes a session's history from before this
+  protocol (when every step closed on a line of text) owe nothing.
 
-Computed from the step's windowed slate: an open inbound is newer than every
-discharge after it, and the window always keeps the tail.
+Computed from the step's windowed slate: an inbound's judgment points all follow
+it, and the window always keeps the tail. When a closing turn can't idle the
+session (a new stimulus arrived during inference) the guard writes nothing, so
+the inbound it would have judged closes without a nudge: the safety net errs
+toward silence, never toward a second reply.
 """
 
 from __future__ import annotations
 
+from bisect import bisect_right
 from collections.abc import Iterable, Set
 from dataclasses import dataclass
 from typing import Any, Final
 
-from aios.harness.channels import LEGACY_MONOLOGUE_STAMP
+from aios.harness.channels import SWITCH_CHANNEL_METADATA_KEY
 from aios.models.events import Event, is_reminder_event
 
 NO_RESPONSE_TOOL_NAME: Final[str] = "no_response"
 
 # ``metadata`` key on the nudge row: ``{"through_seq": int, "channels": [str, ...]}``.
-# ``through_seq`` is the newest inbound the nudge covered; a later quiescence that
-# finds nothing newer open lapses instead of nudging again.
+# ``through_seq`` is the newest inbound the nudge covered.
 REPLY_NUDGE_METADATA_KEY: Final[str] = "reply_nudge"
 
-# Span recorded when an inbound is still unanswered after its nudge.
+# Span recorded when an inbound is still unanswered at the first closing turn
+# after its nudge.
 REPLY_LAPSED_SPAN_EVENT: Final[str] = "reply_lapsed"
 
 
 @dataclass(frozen=True, slots=True)
-class ReplyDue:
-    """The open part of the obligation at the end of a step."""
+class ReplyOwed:
+    """Unanswered inbound at one stage of the obligation."""
 
     through_seq: int
-    """The newest unanswered inbound the step saw."""
+    """The newest of them."""
     channels: tuple[str, ...]
-    """Channels with an unanswered inbound, oldest first."""
-    nudged: bool
-    """A nudge already covered ``through_seq``: lapse, don't nudge again."""
+    """Their channels, oldest inbound first."""
+
+    def detail(self) -> dict[str, Any]:
+        """The nudge marker / lapse span payload."""
+        return {"through_seq": self.through_seq, "channels": list(self.channels)}
 
 
-def _called_names(data: dict[str, Any]) -> set[str]:
-    names: set[str] = set()
-    for tc in data.get("tool_calls") or []:
-        if isinstance(tc, dict):
+@dataclass(frozen=True, slots=True)
+class ReplyDue:
+    """What a step ending now owes: inbound reaching their first closing turn
+    unanswered (``nudge``), and inbound unanswered at the first closing turn after
+    their nudge (``lapse``)."""
+
+    nudge: ReplyOwed | None
+    lapse: ReplyOwed | None
+
+
+def _owed(inbound: list[tuple[int, str]]) -> ReplyOwed | None:
+    if not inbound:
+        return None
+    return ReplyOwed(
+        through_seq=max(seq for seq, _ in inbound),
+        channels=tuple(dict.fromkeys(channel for _, channel in inbound)),
+    )
+
+
+def _discharges(
+    turns: list[Event],
+    results: dict[str, dict[str, Any]],
+    connector_tool_names: Set[str],
+) -> tuple[int, dict[str, int]]:
+    """``(declined_through, answered_through_by_channel)`` over the tool-calling
+    turns: the watermarks up to which ``no_response`` declined everything, and a
+    connector call replied on each channel. A call counts once its result is back
+    without an error — a failed send delivered nothing."""
+    declined = 0
+    answered: dict[str, int] = {}
+    for turn in turns:
+        raw_watermark = turn.data.get("reacting_to")
+        watermark = raw_watermark if isinstance(raw_watermark, int) else turn.seq
+        replied = False
+        switched_to: list[str] = []
+        for tc in turn.data.get("tool_calls") or []:
+            if not isinstance(tc, dict):
+                continue
+            result = results.get(str(tc.get("id")))
+            if result is None or result.get("is_error"):
+                continue
             fn = tc.get("function")
             name = fn.get("name") if isinstance(fn, dict) else None
-            if isinstance(name, str):
-                names.add(name)
-    return names
-
-
-def _is_legacy_decline(data: dict[str, Any]) -> bool:
-    """A tool-call-free turn from before #2092 that closed its step on stamped
-    text: the old protocol's way of saying "no reply"."""
-    content = data.get("content")
-    if isinstance(content, list):
-        content = " ".join(
-            b.get("text") or "" for b in content if isinstance(b, dict) and b.get("type") == "text"
-        )
-    return isinstance(content, str) and LEGACY_MONOLOGUE_STAMP in content
+            if name == NO_RESPONSE_TOOL_NAME:
+                declined = max(declined, watermark)
+            elif name in connector_tool_names:
+                replied = True
+            metadata = result.get("metadata")
+            marker = (
+                metadata.get(SWITCH_CHANNEL_METADATA_KEY) if isinstance(metadata, dict) else None
+            )
+            if isinstance(marker, dict) and marker.get("success") is True:
+                target = marker.get("target")
+                if isinstance(target, str):
+                    switched_to.append(target)
+        if replied:
+            # Focal is read when the connector picks the call up, so a send beside a
+            # switch_channel may land on either channel: credit both.
+            for channel in (turn.channel, *switched_to):
+                if channel is not None:
+                    answered[channel] = max(answered.get(channel, 0), watermark)
+    return declined, answered
 
 
 def find_reply_due(
@@ -86,60 +136,67 @@ def find_reply_due(
     reacting_to: int,
     connector_tool_names: Set[str],
 ) -> ReplyDue | None:
-    """The unanswered inbound a step ending now would leave behind, or ``None``.
+    """What the closing turn being appended owes, or ``None``.
 
-    ``events`` is the step's windowed slate in seq order and ``reacting_to`` the
-    watermark of the assistant turn being appended (which carries no tool calls:
-    the guard only acts on a turn that would idle the session).
+    ``events`` is the step's windowed slate in seq order, ``reacting_to`` the
+    watermark of the turn being appended (a turn without tool calls: the guard
+    only acts on a turn that ends the step), ``connector_tool_names`` the
+    connector tools offered this step.
     """
-    declined = 0
-    answered: dict[str, int] = {}
-    nudged_through = 0
+    results: dict[str, dict[str, Any]] = {}
+    turns: list[Event] = []
+    closing: list[int] = []
+    nudges: list[tuple[int, int]] = []
     inbound: list[tuple[int, str]] = []
     for e in events:
         if e.kind != "message":
             continue
         role = e.data.get("role")
-        if role == "user":
-            if is_reminder_event(e.kind, e.data):
-                continue
+        if role == "tool":
+            tcid = e.data.get("tool_call_id")
+            if isinstance(tcid, str):
+                results[tcid] = e.data
+        elif role == "assistant":
+            if e.data.get("tool_calls"):
+                turns.append(e)
+            else:
+                closing.append(e.seq)
+        elif role == "user" and not is_reminder_event(e.kind, e.data):
             metadata = e.data.get("metadata")
             nudge = metadata.get(REPLY_NUDGE_METADATA_KEY) if isinstance(metadata, dict) else None
             if isinstance(nudge, dict):
                 through = nudge.get("through_seq")
                 if isinstance(through, int):
-                    nudged_through = max(nudged_through, through)
-                continue
-            if e.orig_channel is not None and e.seq <= reacting_to:
+                    nudges.append((e.seq, through))
+            elif e.orig_channel is not None and e.seq <= reacting_to:
                 inbound.append((e.seq, e.orig_channel))
-        elif role == "assistant":
-            names = _called_names(e.data)
-            raw_watermark = e.data.get("reacting_to")
-            watermark = raw_watermark if isinstance(raw_watermark, int) else e.seq
-            if not names:
-                if _is_legacy_decline(e.data):
-                    declined = max(declined, watermark)
-                continue
-            if NO_RESPONSE_TOOL_NAME in names:
-                declined = max(declined, watermark)
-            if e.channel is not None and not names.isdisjoint(connector_tool_names):
-                answered[e.channel] = max(answered.get(e.channel, 0), watermark)
-    unanswered = [
-        (seq, channel) for seq, channel in inbound if seq > max(declined, answered.get(channel, 0))
-    ]
-    if not unanswered:
-        return None
-    through_seq = max(seq for seq, _ in unanswered)
-    return ReplyDue(
-        through_seq=through_seq,
-        channels=tuple(dict.fromkeys(channel for _, channel in unanswered)),
-        nudged=nudged_through >= through_seq,
-    )
+
+    declined, answered = _discharges(turns, results, connector_tool_names)
+    to_nudge: list[tuple[int, str]] = []
+    to_lapse: list[tuple[int, str]] = []
+    for seq, channel in inbound:
+        if seq <= max(declined, answered.get(channel, 0)):
+            continue
+        i = bisect_right(closing, seq)
+        if i == len(closing):
+            to_nudge.append((seq, channel))  # this turn is its first closing turn
+            continue
+        # Its nudge, if it drew one, is the first nudge row after its first closing
+        # turn: the guard writes it in the same transaction as that turn.
+        nudge_seq = next((n for n, through in nudges if n > closing[i] and through >= seq), None)
+        next_closing = closing[i + 1] if i + 1 < len(closing) else None
+        if nudge_seq is None or (next_closing is not None and next_closing < nudge_seq):
+            continue  # judged without a nudge: closed
+        if bisect_right(closing, nudge_seq) == len(closing):
+            to_lapse.append((seq, channel))  # this turn is the first closing turn after it
+
+    due = ReplyDue(nudge=_owed(to_nudge), lapse=_owed(to_lapse))
+    return due if due.nudge or due.lapse else None
 
 
-def reply_nudge_content(due: ReplyDue) -> str:
+def reply_nudge_content(owed: ReplyOwed) -> str:
     """The nudge row's text: which channel(s) are owed, and the two ways out."""
-    where = ", ".join(f"channel_id={channel}" for channel in due.channels)
+    where = ", ".join(f"channel_id={channel}" for channel in owed.channels)
     return (
         f"<system-reminder>The latest message on {where} has no reply. Your text "
         "is not sent. Reply with the connector's send tool (switch_channel first if "

@@ -39,6 +39,7 @@ from aios.errors import (
     NotFoundError,
     RateLimitedError,
 )
+from aios.harness.reply_obligation import NO_RESPONSE_TOOL_NAME
 from aios.harness.tokens import TOKEN_BASELINE_CURRENT
 from aios.ids import (
     EVENT,
@@ -1105,6 +1106,12 @@ async def count_request_nudges(
     no tool-call turn exists (a tool-call-free session), where the anchor would
     otherwise be 0 and the count would scan every user message in the session's
     history instead of just those since the request opened.
+
+    A turn whose only calls are ``no_response`` (#2092) is not activity: it ends
+    the step without doing anything, and its quiet result runs this same guard
+    (``guard_quiet_result_quiescence``). Were it an anchor, every decline would
+    reset the count and a session that only ever declines would be nudged
+    forever instead of reaching ``no_return``.
     """
     n: int | None = await conn.fetchval(
         "SELECT count(*) FROM events WHERE session_id = $1 AND account_id = $2 "
@@ -1116,7 +1123,9 @@ async def count_request_nudges(
         "         WHERE session_id = $1 AND account_id = $2 "
         "         AND kind = 'message' AND role = 'assistant' "
         "         AND data ? 'tool_calls' "
-        "         AND jsonb_array_length(data->'tool_calls') > 0), 0),"
+        "         AND jsonb_array_length(data->'tool_calls') > 0 "
+        "         AND EXISTS (SELECT 1 FROM jsonb_array_elements(data->'tool_calls') tc "
+        "                     WHERE tc->'function'->>'name' IS DISTINCT FROM $4)), 0),"
         "    COALESCE("
         "        (SELECT req.seq FROM events req "
         "         WHERE req.session_id = $1 AND req.account_id = $2 "
@@ -1127,6 +1136,7 @@ async def count_request_nudges(
         session_id,
         account_id,
         request_id,
+        NO_RESPONSE_TOOL_NAME,
     )
     return n or 0
 
