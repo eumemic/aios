@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- Per-account wake fairness (#418). One account's burst of session wakes can no
+  longer fill every worker slot and hold back other accounts. Before a step
+  starts, `run_session_step` checks a non-blocking per-account admission gate.
+  A wake whose account is at its cap re-defers itself with
+  `AIOS_ACCOUNT_FAIRNESS_BACKOFF_SECONDS` (default 2s) of delay and frees its
+  worker slot at once. Inside an account, sessions are admitted FIFO, so new
+  wakes from the same account cannot starve older ones. The cap is
+  `AIOS_ACCOUNT_STEP_CONCURRENCY_MAX`; it defaults to half of
+  `AIOS_WORKER_CONCURRENCY`, and a value at or above `AIOS_WORKER_CONCURRENCY`
+  is rejected at startup. The gate is process-local, which is exact under the
+  current one-worker-per-database deployment. If N workers ever share one
+  database, the cap becomes N times larger. Priority tiers are not changed, and
+  no schema migration is needed.
+
 - Channel sessions no longer stamp their own text (#2092). The harness used to
   prefix every assistant text on a channel-bound session with
   `INTERNAL_MONOLOGUE_NOT_SEEN_BY_USER:` and told the model bare text was
