@@ -59,6 +59,7 @@ from aios.harness.model_workflow import (
     launch_model_workflow_park,
     take_pending_harvest,
 )
+from aios.harness.reply_obligation import find_reply_due
 from aios.harness.request_capture import capture_request, store_capture
 from aios.harness.step_context import (
     compose_step_context,
@@ -1890,6 +1891,7 @@ async def _run_session_step_body(
             session_id,
             assistant_msg,
             finish_reason=finish_reason,
+            stop_details=llm_response.stop_details,
             account_id=account_id,
         )
         await _charge_usage()
@@ -1897,16 +1899,12 @@ async def _run_session_step_body(
             "step.model_refusal",
             session_id=session_id,
             finish_reason=finish_reason,
+            refusal_category=(llm_response.stop_details or {}).get("category"),
             had_tool_calls=bool(assistant_msg.get("tool_calls")),
         )
         # Human-facing sessions remain parked for recovery. Self-owned workflow /
         # background sessions have no caller left to recover them, so reclaim them.
         return _model_error_step_result(None, archive_when_idle=session.archive_when_idle)
-
-    if channels:
-        from aios.harness.channels import apply_monologue_prefix
-
-        assistant_msg = apply_monologue_prefix(assistant_msg)
 
     # Record the seq of the latest user/tool event in the context this
     # response was based on; events after this seq are "new" on the next
@@ -1916,6 +1914,20 @@ async def _run_session_step_body(
     # deliberation, and must not retroactively widen what this turn "reacted to".
     assistant_msg["reacting_to"] = (
         reacting_to_override if reacting_to_override is not None else step_ctx.reacting_to
+    )
+
+    # Reply-or-decline (#2092): a channel session's turn that calls no tools ends
+    # the step, so check whether it leaves an inbound with neither a reply nor a
+    # no_response. The guard below nudges (or records the lapse) only if the turn
+    # would actually idle the session.
+    reply_due = (
+        find_reply_due(
+            events,
+            reacting_to=assistant_msg["reacting_to"],
+            connector_tool_names=prelude.connector_tool_names,
+        )
+        if channels and not assistant_msg.get("tool_calls")
+        else None
     )
 
     # Append assistant message to the session log (unfenced — procrastinate lock
@@ -1934,6 +1946,7 @@ async def _run_session_step_body(
         session_id,
         assistant_msg,
         account_id=account_id,
+        reply_due=reply_due,
     )
     # Charge now that the assistant message is durably persisted (see _charge_usage).
     new_spent_microusd = await _charge_usage()
@@ -2170,18 +2183,26 @@ async def _run_session_step_body(
     )
 
 
-def _switch_channel_tool_spec() -> dict[str, Any]:
-    """Build the chat-completions tool entry for the ``switch_channel`` built-in.
+def _channel_tool_specs() -> list[dict[str, Any]]:
+    """Chat-completions tool entries for the channel built-ins: ``switch_channel``
+    and ``no_response``.
 
     Injected unconditionally into the tool list when the session has
-    any bound channels (see ``run_session_step``).  Agents don't need
-    to list it in their ``tools`` declaration — it's focal-machinery
-    scope, not agent scope.
+    any bound channels (see ``compute_step_prelude``).  Agents don't need
+    to list them in their ``tools`` declaration — they're focal-machinery
+    scope, not agent scope: ``switch_channel`` is the only way to move focal
+    attention, ``no_response`` the only way to end a step on purpose without
+    replying (#2092).
     """
+    from aios.harness.reply_obligation import NO_RESPONSE_TOOL_NAME
     from aios.tools.registry import openai_tool_entry
     from aios.tools.registry import registry as tool_registry
+    from aios.tools.switch_channel import SWITCH_CHANNEL_TOOL_NAME
 
-    return openai_tool_entry(tool_registry.get("switch_channel"))
+    return [
+        openai_tool_entry(tool_registry.get(SWITCH_CHANNEL_TOOL_NAME)),
+        openai_tool_entry(tool_registry.get(NO_RESPONSE_TOOL_NAME)),
+    ]
 
 
 def _tc_name(tc: dict[str, Any]) -> str:
@@ -2984,12 +3005,24 @@ async def _handle_provider_configuration_error(
     )
 
 
+def _refusal_stop_message(stop_details: dict[str, Any] | None) -> str:
+    """The errored stop_reason / ``turn_ended`` message for a refusal, naming the
+    provider's refusal category when it gave one (#2092)."""
+    category = (stop_details or {}).get("category")
+    if not isinstance(category, str) or not category:
+        return _REFUSAL_STOP_REASON_MESSAGE
+    explanation = (stop_details or {}).get("explanation")
+    because = f": {explanation}" if isinstance(explanation, str) and explanation else ""
+    return f"Refusal category {category!r}{because}. {_REFUSAL_STOP_REASON_MESSAGE}"
+
+
 async def _handle_refusal(
     pool: Any,
     session_id: str,
     assistant_msg: dict[str, Any],
     *,
     finish_reason: str,
+    stop_details: dict[str, Any] | None = None,
     account_id: str,
 ) -> None:
     """Latch a model refusal (``finish_reason == content_filter``) as an errored turn.
@@ -3005,6 +3038,10 @@ async def _handle_refusal(
     the console "Errored" pill), and the error lifecycle event bumps
     ``last_error_seq`` so the sweep parks the session until a user message
     recovers it.
+
+    ``stop_details`` is the provider's account of the refusal (Anthropic's
+    ``{"type", "category", "explanation"}``), recorded on the span and named in
+    the stop message so the cause is readable without replaying the request.
     """
     await sessions_service.append_event(
         pool,
@@ -3014,6 +3051,7 @@ async def _handle_refusal(
             "event": "model_refusal",
             "is_error": True,
             "finish_reason": finish_reason,
+            "stop_details": stop_details,
             # Kept for debugging only — a span is never replayed by build_messages.
             "partial_content": assistant_msg.get("content") or "",
             "partial_tool_calls": assistant_msg.get("tool_calls") or [],
@@ -3024,7 +3062,7 @@ async def _handle_refusal(
         pool,
         session_id,
         error_kind="model_refusal",
-        stop_message=_REFUSAL_STOP_REASON_MESSAGE,
+        stop_message=_refusal_stop_message(stop_details),
         finish_reason=finish_reason,
         account_id=account_id,
     )

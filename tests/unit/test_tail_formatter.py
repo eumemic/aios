@@ -54,14 +54,6 @@ class TestAssistantEvents:
         e = _msg(150, "assistant", content="hello world")
         assert format_event(e) == "#150 AGENT(bare): hello world"
 
-    def test_monologue_assistant(self) -> None:
-        e = _msg(
-            151,
-            "assistant",
-            content="INTERNAL_MONOLOGUE_NOT_SEEN_BY_USER: thinking...",
-        )
-        assert format_event(e) == "#151 AGENT(mono): thinking..."
-
     def test_tool_call_assistant(self) -> None:
         e = _msg(
             147,

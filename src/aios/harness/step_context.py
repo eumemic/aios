@@ -180,6 +180,11 @@ class StepPrelude:
     skill_versions: list[SkillVersion]
     obligations: list[Obligation]
     reminders_upper_bound_local: int
+    # Names of the connector tools offered this step (``signal_send``,
+    # ``signal_react``, ...). A call to one of them while focused on a channel is
+    # how the agent replies there — the reply-or-decline obligation reads it
+    # (:mod:`aios.harness.reply_obligation`, #2092).
+    connector_tool_names: frozenset[str] = frozenset()
 
 
 class PreludeOverheadSplit(NamedTuple):
@@ -337,7 +342,7 @@ async def compute_step_prelude(
     )
     from aios.harness.concise import augment_with_concise_style
     from aios.harness.loop import (
-        _switch_channel_tool_spec,
+        _channel_tool_specs,
         discover_session_mcp_tools,
     )
     from aios.harness.memory_stores import augment_with_memory_stores
@@ -346,10 +351,11 @@ async def compute_step_prelude(
     from aios.services import skills as skills_service
 
     tools = to_openai_tools(agent.tools)
-    # The switch_channel built-in is the agent's only path to mutate
-    # focal attention; inject it whenever the session has bound channels.
+    # The channel built-ins — switch_channel (the agent's only path to mutate
+    # focal attention) and no_response (its only way to decline a reply on
+    # purpose, #2092) — are injected whenever the session has bound channels.
     if channels:
-        tools.append(_switch_channel_tool_spec())
+        tools.extend(_channel_tool_specs())
     # #2294: the workflow script contract is no longer inlined in the authoring
     # tools' schemas (~69KB → ~5KB across the trio) — it is read on demand. Inject
     # the reader whenever an authoring tool is offered, so the manual stays
@@ -422,6 +428,7 @@ async def compute_step_prelude(
     connection_tool_dicts = await harness_runtime.require_tool_provider().list_tools_for_session(
         pool, session_id
     )
+    connector_tool_names: frozenset[str] = frozenset()
     if connection_tool_dicts:
         connection_tools = [ToolSpec.model_validate(d) for d in connection_tool_dicts]
         if session.parent_run_id is not None:
@@ -436,7 +443,9 @@ async def compute_step_prelude(
             from aios.services.attenuation import admit_provider
 
             connection_tools = admit_provider(connection_tools, surface_of(agent))
-        tools.extend(to_openai_tools(connection_tools))
+        connection_entries = to_openai_tools(connection_tools)
+        tools.extend(connection_entries)
+        connector_tool_names = frozenset(e["function"]["name"] for e in connection_entries)
 
     skill_versions = (
         await skills_service.resolve_skill_refs(pool, agent.skills, account_id=account_id)
@@ -462,6 +471,7 @@ async def compute_step_prelude(
         skill_versions=skill_versions,
         obligations=obligations,
         reminders_upper_bound_local=max_reminders_local(channels, obligations),
+        connector_tool_names=connector_tool_names,
     )
 
 

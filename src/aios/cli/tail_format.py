@@ -17,7 +17,6 @@ from typing import Any
 from aios.models.events import is_reminder_event, reminder_section
 from aios_sdk.streaming import SseMessage
 
-MONOLOGUE_PREFIX = "INTERNAL_MONOLOGUE_NOT_SEEN_BY_USER: "
 CONTENT_PREVIEW_MAX = 240
 
 
@@ -84,8 +83,6 @@ def _format_message(seq: Any, event: dict[str, Any]) -> str | None:
         text = _as_text(data.get("content"))
         if not text:
             return f"#{seq} AGENT(silent) ⚠ no tool, no text"
-        if text.startswith(MONOLOGUE_PREFIX):
-            return f"#{seq} AGENT(mono): {_preview(text[len(MONOLOGUE_PREFIX) :])}"
         return f"#{seq} AGENT(bare): {_preview(text)}"
 
     if role == "tool":

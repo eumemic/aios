@@ -32,6 +32,12 @@ from aios.errors import (
     ValidationError,
 )
 from aios.harness.chat_type import ChatType
+from aios.harness.reply_obligation import (
+    REPLY_LAPSED_SPAN_EVENT,
+    REPLY_NUDGE_METADATA_KEY,
+    ReplyDue,
+    reply_nudge_content,
+)
 from aios.harness.window import WindowedEvents
 from aios.ids import GITHUB_REPOSITORY, MEMORY_STORE, REQUEST, make_id, split_id
 from aios.jobs.app import defer_run_wake, defer_wake
@@ -43,7 +49,12 @@ from aios.models.agents import (
     is_mcp_tool_name,
 )
 from aios.models.attenuation import Surface, surface_of
-from aios.models.events import REMINDER_METADATA_KEY, Event, EventKind
+from aios.models.events import (
+    QUIET_RESULT_METADATA_KEY,
+    REMINDER_METADATA_KEY,
+    Event,
+    EventKind,
+)
 from aios.models.memory_stores import MemoryStoreResource
 from aios.models.sessions import (
     MAX_USER_MESSAGE_CHARS,
@@ -81,6 +92,11 @@ from aios.services.await_completion import await_completion
 from aios.services.vaults import env_var_credential_containment_error
 
 log = get_logger(__name__)
+
+# Metadata keys only the harness writes (see ``append_user_message``).
+_HARNESS_METADATA_KEYS = frozenset(
+    {REMINDER_METADATA_KEY, QUIET_RESULT_METADATA_KEY, REPLY_NUDGE_METADATA_KEY}
+)
 
 
 async def load_session_account_id(pool: asyncpg.Pool[Any], session_id: str) -> str:
@@ -1501,15 +1517,19 @@ async def append_user_message(
             f"(got {len(content):,}); split into multiple messages",
             detail={"max_chars": MAX_USER_MESSAGE_CHARS, "got_chars": len(content)},
         )
-    if metadata is not None and REMINDER_METADATA_KEY in metadata:
-        # Reserved for harness-authored reminder rows, which ``append_event``
-        # treats as non-stimulus: a caller-minted one would be a user message
-        # that never wakes the session. Enforced here — the one writer behind
-        # every externally-sourced user message (POST /messages, the initial
-        # message on create, invoke/tell, the connector inbound) — rather than
-        # per ingress. Harness reminders go through ``append_event`` directly.
+    reserved = sorted(_HARNESS_METADATA_KEYS.intersection(metadata or ()))
+    if reserved:
+        # Reserved for harness-authored rows. The reminder and quiet markers make
+        # ``append_event`` treat a row as non-stimulus — a caller-minted one would
+        # be a user message that never wakes the session — and a forged
+        # reply-nudge marker would suppress the reply-or-decline nudge. Enforced
+        # here — the one writer behind every externally-sourced user message (POST
+        # /messages, the initial message on create, invoke/tell, the connector
+        # inbound) — rather than per ingress. Harness rows go through
+        # ``append_event`` directly.
         raise ValidationError(
-            f"metadata.{REMINDER_METADATA_KEY} is reserved for harness-authored reminder rows"
+            f"metadata.{reserved[0]} is reserved for harness-authored rows",
+            detail={"reserved_keys": reserved},
         )
     data: dict[str, Any] = {"role": "user", "content": content}
     if metadata:
@@ -2111,9 +2131,19 @@ async def append_assistant_and_guard_quiescence(
     assistant_msg: dict[str, Any],
     *,
     account_id: str,
+    reply_due: ReplyDue | None = None,
 ) -> AssistantAppendResult:
     """Append the model's assistant message and, **atomically**, enforce the
     request-totality invariant: a session may not go idle while it owes a response.
+
+    **Reply-or-decline (#2092).** ``reply_due`` is the channel session's open
+    reply obligation as of this turn (:func:`aios.harness.reply_obligation.find_reply_due`,
+    computed by the loop from the step's slate; ``None`` when nothing is owed). If
+    this turn would idle the session, the guard appends one nudge naming the open
+    channel(s) — a stimulus, so the session takes another step — unless that inbound
+    already had its nudge, in which case the session idles and a ``reply_lapsed``
+    span records it. Unlike a request, a reply has no caller to fail, so the budget
+    is one nudge per inbound and then idle.
 
     Any session that owns an open request edge (#1123) can owe a response — a
     workflow child (run caller) OR a session-caller ``invoke`` target (#1127). A
@@ -2171,7 +2201,7 @@ async def append_assistant_and_guard_quiescence(
         if assistant_msg.get("tool_calls"):
             return AssistantAppendResult(False, None, focal)
         open_ids = await queries.get_open_request_ids(conn, session_id, account_id=account_id)
-        if not open_ids:
+        if not open_ids and reply_due is None:
             return AssistantAppendResult(False, None, focal)  # nothing owed (or all answered)
         if await queries.derive_session_status(conn, session_id, account_id=account_id) != "idle":
             return AssistantAppendResult(False, None, focal)
@@ -2211,6 +2241,29 @@ async def append_assistant_and_guard_quiescence(
                 account_id=account_id,
             )
             nudged = True
+        if reply_due is not None:
+            detail = {"through_seq": reply_due.through_seq, "channels": list(reply_due.channels)}
+            if reply_due.nudged:
+                await queries.append_event(
+                    conn,
+                    session_id=session_id,
+                    kind="span",
+                    data={"event": REPLY_LAPSED_SPAN_EVENT, **detail},
+                    account_id=account_id,
+                )
+            else:
+                await queries.append_event(
+                    conn,
+                    session_id=session_id,
+                    kind="message",
+                    data={
+                        "role": "user",
+                        "content": reply_nudge_content(reply_due),
+                        "metadata": {REPLY_NUDGE_METADATA_KEY: detail},
+                    },
+                    account_id=account_id,
+                )
+                nudged = True
     return AssistantAppendResult(
         nudged, autoerror_caller_run_id, focal, tuple(autoerror_caller_session_ids)
     )

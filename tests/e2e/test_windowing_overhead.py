@@ -22,7 +22,7 @@ from aios.models.agents import ToolSpec
 from aios.services import agents as agents_service
 from aios.services import environments as environments_service
 from aios.services import sessions as sessions_service
-from tests.e2e.harness import Harness, assistant
+from tests.e2e.harness import Harness, assistant, tool_call
 
 
 class TestWindowingOverhead:
@@ -183,7 +183,11 @@ class TestWindowingOverhead:
                     account_id=account_id,
                 )
 
-        harness.script_model([assistant("ack")])
+        # Decline rather than answer in bare text: bare text owes the channels a
+        # reply and would draw a reply-or-decline nudge (#2092), a second call.
+        harness.script_model(
+            [assistant(tool_calls=[tool_call("no_response", {"reason": "not addressed"})])]
+        )
         await harness.run_until_idle(session.id)
 
         assert len(harness.model_calls) == 1

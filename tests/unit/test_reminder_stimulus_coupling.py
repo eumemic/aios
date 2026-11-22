@@ -26,6 +26,7 @@ from aios.db.queries import events as events_mod
 from aios.harness.reminders import reminder_event_data
 from aios.harness.sweep import UNREACTED_ROWS_FLOORED_SQL, UNREACTED_ROWS_SQL
 from aios.models.events import (
+    NON_STIMULUS_EXCLUDE_SQL,
     REMINDER_EXCLUDE_SQL,
     REMINDER_METADATA_KEY,
     ReminderSection,
@@ -91,14 +92,21 @@ class TestSqlForm:
         assert "e.data->'metadata'" in sql
 
     def test_every_log_derived_reader_excludes_reminders(self) -> None:
-        for name, sql, col in (
-            ("UNREACTED_ROWS_SQL", UNREACTED_ROWS_SQL, "e.data"),
-            ("UNREACTED_ROWS_FLOORED_SQL", UNREACTED_ROWS_FLOORED_SQL, "e.data"),
-            ("_SESSION_INFERENCE_BEARING_PREDICATE", _SESSION_INFERENCE_BEARING_PREDICATE, "data"),
+        # The sweep's unreacted-rows gate reads user AND tool rows, so it excludes
+        # every non-stimulus kind — reminders and quiet tool results (#2092) —
+        # through the combined predicate; the inbound budget counts user rows
+        # only, so the reminder predicate is the whole of its exclusion.
+        for name, sql in (
+            ("UNREACTED_ROWS_SQL", UNREACTED_ROWS_SQL),
+            ("UNREACTED_ROWS_FLOORED_SQL", UNREACTED_ROWS_FLOORED_SQL),
         ):
-            assert REMINDER_EXCLUDE_SQL.format(col=col) in sql, (
-                f"{name} must exclude reminder rows via REMINDER_EXCLUDE_SQL"
+            assert NON_STIMULUS_EXCLUDE_SQL.format(col="e.data") in sql, (
+                f"{name} must exclude non-stimulus rows via NON_STIMULUS_EXCLUDE_SQL"
             )
+            assert f"'{REMINDER_METADATA_KEY}'" in NON_STIMULUS_EXCLUDE_SQL
+        assert REMINDER_EXCLUDE_SQL.format(col="data") in _SESSION_INFERENCE_BEARING_PREDICATE, (
+            "_SESSION_INFERENCE_BEARING_PREDICATE must exclude reminder rows via REMINDER_EXCLUDE_SQL"
+        )
         # The per-counterparty counter keys on ``orig_channel = $2`` and
         # reminder rows carry no origin channel, so it deliberately stays on
         # the 0128 index-only predicate (see inbound_budget.py).

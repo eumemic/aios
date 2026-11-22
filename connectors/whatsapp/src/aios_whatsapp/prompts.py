@@ -139,7 +139,7 @@ awareness only; never a tool argument.
 ## Sending messages — `whatsapp_send`
 
 **Your text responses are NOT sent automatically.**  Bare assistant
-text is internal monologue; nobody on WhatsApp sees it.  To deliver
+text is not delivered; nobody on WhatsApp sees it.  To deliver
 a message you MUST call:
 
     whatsapp_send(text="your message here")

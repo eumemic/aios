@@ -11,8 +11,10 @@ mislabeled MIME type, resolved, blind-spot, in-flight and external tool calls,
 a model-visible lifecycle notice, inlined and missing attachments, a non-focal
 channel notification carrying a chat name and sender, a persisted reminder row
 and this step's reminder rows.
-It renders for three gate models: an unknown model (vision allowed, no
-thinking), a thinking model and a model without vision.
+It renders for four gate models: an unknown model (vision allowed, no
+thinking), a thinking model, a model without vision, and an Anthropic-routed
+model (text-less tool-call turns render with ``content: None``). The log also
+carries the legacy transcript markers the renderer scrubs (#2092).
 """
 
 from __future__ import annotations
@@ -47,9 +49,10 @@ _PNG = valid_png_bytes()
 
 # Bump RENDER_VERSION and re-pin when a rendering change is deliberate.
 _PINNED = {
-    "golden/plain": "a1a51c9e7e684a5a7f5ae20ae1dd7af245d75a512357282941271322a2918185",
-    "golden/thinker": "e526285b9acd27651804eff46e20c1bbd7dfd7d534bdf71aa1d18ccae4216dbc",
-    "golden/blind": "5c06668b405caf676d9ac987d9fdc43fa96749a4780ce0e09216f2e7fd54b077",
+    "golden/plain": "2b5e0e08c29d19f69631f5382bf00628eac0c48b57e15d3a03c7c5089b4fba89",
+    "golden/thinker": "332a8c50b3cc38d3ecebce044b93c1c978d81436d768f44f00d9fecf1aac69d3",
+    "golden/blind": "ed2970228713e7defdb798bb2c34f872c81d5ebdf3fcc9acea67611aa88224cd",
+    "anthropic/claude-golden": "3ca569f1fce14bb3ea8859867139c3c54b47ea1ba391666177f800d69a13b47d",
 }
 
 
@@ -157,6 +160,69 @@ def _log(workspace: Path) -> list[Event]:
             focal_channel_at_arrival="sig/a",
         ),
         _event(10, reminder_event_data("obligations", "You owe a reply to req_1.")),
+        # Legacy transcript markers (#2092): a stamped tool-call turn whose text is
+        # the stamp plus LiteLLM's placeholder, a tool result quoting the stamp, a
+        # stamped text turn, a turn of nothing but stamp + placeholder (dropped as
+        # degenerate once scrubbed), then a text-less tool-call turn and its quiet
+        # no_response result.
+        _event(
+            11,
+            {
+                "role": "assistant",
+                "content": (
+                    "INTERNAL_MONOLOGUE_NOT_SEEN_BY_USER: "
+                    "[System: Empty message content sanitised to satisfy protocol]"
+                ),
+                "tool_calls": [_call("t_search", "search_events")],
+                "reacting_to": 9,
+            },
+        ),
+        _event(
+            12,
+            {
+                "role": "tool",
+                "tool_call_id": "t_search",
+                "content": '[{"content": "INTERNAL_MONOLOGUE_NOT_SEEN_BY_USER: old note"}]',
+            },
+        ),
+        _event(
+            13,
+            {
+                "role": "assistant",
+                "content": "INTERNAL_MONOLOGUE_NOT_SEEN_BY_USER: Nothing new to send.",
+                "reacting_to": 12,
+            },
+        ),
+        _event(
+            14,
+            {
+                "role": "assistant",
+                "content": (
+                    "INTERNAL_MONOLOGUE_NOT_SEEN_BY_USER:\n\n"
+                    "[System: Empty message content sanitised to satisfy protocol]"
+                ),
+                "reacting_to": 12,
+            },
+        ),
+        _event(15, {"role": "user", "content": "anything else?"}),
+        _event(
+            16,
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [_call("t_decline", "no_response")],
+                "reacting_to": 15,
+            },
+        ),
+        _event(
+            17,
+            {
+                "role": "tool",
+                "tool_call_id": "t_decline",
+                "content": "Nothing sent.",
+                "metadata": {"aios_quiet": {"tool": "no_response"}},
+            },
+        ),
     ]
 
 
@@ -197,5 +263,5 @@ def _fixed_catalog(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 
 @pytest.mark.parametrize("gate_model", sorted(_PINNED))
 def test_rendering_matches_the_pinned_hash(gate_model: str, tmp_path: Path) -> None:
-    assert RENDER_VERSION == 2
+    assert RENDER_VERSION == 3
     assert sha256_hex(render(gate_model, tmp_path)) == _PINNED[gate_model]

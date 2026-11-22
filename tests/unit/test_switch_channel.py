@@ -12,7 +12,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from aios.harness.channels import MONOLOGUE_PREFIX, SWITCH_CHANNEL_METADATA_KEY
+from aios.harness.channels import SWITCH_CHANNEL_METADATA_KEY
 from aios.models.events import Event
 from aios.tools.switch_channel import (
     RE_ORIENT_FLOOR_TOKENS,
@@ -58,7 +58,6 @@ def _assistant(
     *,
     focal: str | None,
     text: str = "ok",
-    with_monologue_prefix: bool = True,
     tool_calls: list[dict[str, Any]] | None = None,
 ) -> Event:
     """Assistant event stamped with focal_channel_at_arrival = focal.
@@ -68,8 +67,7 @@ def _assistant(
     A NULL focal produces channel=NULL — "phone down" assistant output
     that belongs to no channel.
     """
-    content = (MONOLOGUE_PREFIX if with_monologue_prefix else "") + text
-    data: dict[str, Any] = {"role": "assistant", "content": content}
+    data: dict[str, Any] = {"role": "assistant", "content": text}
     if tool_calls is not None:
         data["tool_calls"] = tool_calls
     return Event(
@@ -145,7 +143,6 @@ def _assistant_with_tool_call(
         seq,
         focal=focal,
         text="",
-        with_monologue_prefix=False,
         tool_calls=[
             {
                 "id": tool_call_id,
@@ -175,7 +172,7 @@ class TestRecapFiltering:
     def test_includes_agent_tool_calls(self) -> None:
         """An assistant turn on the target channel surfaces via its
         tool_calls — that's where the load-bearing content (what got
-        sent to the peer) lives.  Bare assistant text is monologue and
+        sent to the peer) lives.  Bare assistant text was never sent and
         is dropped.
         """
         events: list[Event] = [
@@ -275,19 +272,18 @@ class TestRecapFiltering:
 class TestRecapRendering:
     def test_drops_pure_text_assistant_events(self) -> None:
         """Assistant events with no tool_calls are dropped entirely —
-        they're pure internal monologue that the peer never saw.  When
-        no events carry channel-bearing content, the recap falls back
-        to the empty-channel line.
+        they're unsent text the peer never saw.  When no events carry
+        channel-bearing content, the recap falls back to the
+        empty-channel line.
         """
         events = [_assistant(1, focal=CHAN_A, text="hello world")]
         out = render_reorient_block(events, CHAN_A)
-        assert MONOLOGUE_PREFIX not in out
         assert "hello world" not in out
         assert "no prior messages on this channel" in out
 
     def test_drops_assistant_text_even_when_tool_calls_present(self) -> None:
-        """An assistant turn that both monologues AND invokes tool_calls
-        renders only the tool_calls.  The text is monologue regardless
+        """An assistant turn that both writes text AND invokes tool_calls
+        renders only the tool_calls.  The text was not sent, regardless
         of whether a send also happened.
         """
         events: list[Event] = [
@@ -301,11 +297,10 @@ class TestRecapRendering:
             ),
         ]
         # Splice in text alongside the tool_calls to simulate a turn
-        # that both monologues and sends.
-        events[1].data["content"] = MONOLOGUE_PREFIX + "thinking out loud"
+        # that both writes text and sends.
+        events[1].data["content"] = "thinking out loud"
         out = render_reorient_block(events, CHAN_A)
         assert "thinking out loud" not in out
-        assert MONOLOGUE_PREFIX not in out
         assert '"text": "real reply"' in out
 
     def test_tool_call_arguments_are_rendered_verbatim(self) -> None:
@@ -339,7 +334,6 @@ class TestRecapRendering:
             1,
             focal=CHAN_A,
             text="",
-            with_monologue_prefix=False,
             tool_calls=[
                 {
                     "id": "call_a",

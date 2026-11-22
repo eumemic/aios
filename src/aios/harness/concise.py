@@ -62,8 +62,8 @@ CONCISE_NAG_BODY: Final[str] = (
 
 CONCISE_NAG_DELIVERY_CLAUSE: Final[str] = (
     " Being concise never means going silent: a reply to a person still "
-    "requires the connector's send tool — bare assistant text is private "
-    "thinking and reaches no one."
+    "requires the connector's send tool — bare assistant text is not sent "
+    "and reaches no one."
 )
 """Appended for a channel-attached session ONLY.
 

@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+- Channel sessions no longer stamp their own text (#2092). The harness used to
+  prefix every assistant text on a channel-bound session with
+  `INTERNAL_MONOLOGUE_NOT_SEEN_BY_USER:` and told the model bare text was
+  "private thinking". On `claude-opus-5-5` a history carrying that label trips
+  the provider's `reasoning_extraction` refusal, before any output or
+  mid-stream; replayed refused requests went from refusing every time to 0/5
+  each once the label was gone. Bare text is now plain unsent text, and:
+  - `no_response(reason)`, injected beside `switch_channel`, is how a step
+    declines to reply. Its result is quiet: it closes the call but is not a
+    stimulus, so declining never wakes the session again.
+  - An inbound channel message owes a reply (a connector tool on that channel)
+    or a `no_response`. A turn that would idle the session with one unanswered
+    gets one nudge per inbound; after that the session idles and a
+    `reply_lapsed` span records it. Trigger wakes, operator messages and tool
+    results owe nothing, and an old step's stamped closing line still reads as
+    the decline it was.
+  - The renderer drops the old stamp from every message, and LiteLLM's
+    empty-text placeholder from assistant text (`RENDER_VERSION` 3; the event
+    log is unchanged). On an Anthropic route a text-less tool-call turn renders
+    with `content: None`, so LiteLLM no longer puts that placeholder on the wire
+    for the model to copy.
+  - A refusal's `stop_details` (category, explanation) are now kept: LiteLLM
+    1.96 dropped them on both the streaming and non-streaming paths. They are
+    recorded on the `model_refusal` span and named in the stop message.
+
 - Snapshot flatten trigger and the snapshot pool budget now measure the on-disk
   CHAIN cost (Σ layer bytes, via `docker history`, cached per content-addressed
   image id) instead of `docker image inspect .Size` — the current filesystem

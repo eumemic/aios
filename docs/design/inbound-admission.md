@@ -19,7 +19,7 @@ agent?"*
 
 ## 2. Threat model
 
-The model is **silent by default** — bare assistant text is private monologue
+The model is **silent by default** — bare assistant text is never delivered
 and reaches no channel; delivery happens only through an explicit connector
 tool call (`aios/harness/channels.py`). "A stranger can make the bot spam a
 room" is therefore not the failure mode, and **mention-gating is not an

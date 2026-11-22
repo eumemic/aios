@@ -22,9 +22,10 @@ import asyncpg
 from aios.config import get_settings
 from aios.db import queries
 from aios.errors import NotFoundError
+from aios.harness.reply_obligation import REPLY_NUDGE_METADATA_KEY
 from aios.jobs.app import defer_wake
 from aios.models.connections import inbound_orig_channel
-from aios.models.events import REMINDER_METADATA_KEY
+from aios.models.events import QUIET_RESULT_METADATA_KEY, REMINDER_METADATA_KEY
 from aios.models.inbound_policy import (
     AllowAll,
     AllowList,
@@ -53,11 +54,19 @@ from aios.services.inbound_budget import check_inbound_budget, check_inbound_bud
 # could forge an arbitrary ``sender_name`` and the renderer would surface
 # it as the trusted ``from=`` clause.
 #
-# ``REMINDER_METADATA_KEY`` marks harness-authored durable reminder rows,
-# which ``append_event`` treats as non-stimulus; a connector must not be able
-# to mint one.
+# ``REMINDER_METADATA_KEY`` and ``QUIET_RESULT_METADATA_KEY`` mark rows
+# ``append_event`` treats as non-stimulus, and ``REPLY_NUDGE_METADATA_KEY`` the
+# reply-or-decline nudge (#2092); a connector must not be able to mint any of them.
 _RESERVED_METADATA_KEYS = frozenset(
-    {"channel", "sender_name", "attachments", "platform_timestamp", REMINDER_METADATA_KEY}
+    {
+        "channel",
+        "sender_name",
+        "attachments",
+        "platform_timestamp",
+        REMINDER_METADATA_KEY,
+        QUIET_RESULT_METADATA_KEY,
+        REPLY_NUDGE_METADATA_KEY,
+    }
 )
 
 

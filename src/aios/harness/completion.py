@@ -90,6 +90,57 @@ try:  # defensive: private module path, may move across litellm versions
 except (ImportError, AttributeError):  # pragma: no cover - litellm layout drift
     pass
 
+# A refusal from Anthropic (``stop_reason: "refusal"``) carries ``stop_details``:
+# ``{"type": "refusal", "category": ..., "explanation": ...}``. LiteLLM's Anthropic
+# adapter drops it on both paths (litellm 1.96.2: ``_handle_message_delta`` reads
+# only ``stop_reason`` off the stream, ``transform_parsed_response`` never reads the
+# key), leaving a refusal recorded as a bare ``finish_reason: content_filter``. The
+# cause of the reasoning_extraction refusals then took request replays to find
+# (#2092). Carry it through ``provider_specific_fields``, LiteLLM's own channel for
+# provider extras; :func:`_stop_details_of` reads it back. Pinned against the
+# installed LiteLLM by ``tests/unit/test_completion_stop_details.py``, so an upgrade
+# that moves these internals fails a test instead of silently losing the field.
+STOP_DETAILS_FIELD = "stop_details"
+try:  # defensive: private module paths, may move across litellm versions
+    from litellm.llms.anthropic.chat import handler as _anthropic_handler
+
+    _chunk_parser = _anthropic_handler.ModelResponseIterator.chunk_parser
+
+    def _chunk_parser_keeping_stop_details(self: Any, chunk: dict[str, Any]) -> Any:
+        parsed = _chunk_parser(self, chunk)
+        if chunk.get("type") == "message_delta" and parsed.choices:
+            details = (chunk.get("delta") or {}).get(STOP_DETAILS_FIELD)
+            if details:
+                delta = parsed.choices[0].delta
+                delta.provider_specific_fields = {
+                    **(delta.provider_specific_fields or {}),
+                    STOP_DETAILS_FIELD: details,
+                }
+        return parsed
+
+    _anthropic_handler.ModelResponseIterator.chunk_parser = _chunk_parser_keeping_stop_details  # type: ignore[method-assign]
+
+    _transform_parsed_response = _anthropic_transformation.AnthropicConfig.transform_parsed_response
+
+    def _transform_keeping_stop_details(
+        self: Any, completion_response: dict[str, Any], *args: Any, **kwargs: Any
+    ) -> Any:
+        model_response = _transform_parsed_response(self, completion_response, *args, **kwargs)
+        details = completion_response.get(STOP_DETAILS_FIELD)
+        if details:
+            message = model_response.choices[0].message
+            message.provider_specific_fields = {
+                **(message.provider_specific_fields or {}),
+                STOP_DETAILS_FIELD: details,
+            }
+        return model_response
+
+    _anthropic_transformation.AnthropicConfig.transform_parsed_response = (  # type: ignore[method-assign]
+        _transform_keeping_stop_details
+    )
+except (ImportError, AttributeError, NameError):  # pragma: no cover - litellm layout drift
+    pass
+
 # Default per-call bounds. Kept here so they're visible at the wrapper boundary
 # rather than buried in defaults that drift between LiteLLM versions. Agents
 # can override either via ``litellm_extra``; the spread happens after these
@@ -167,6 +218,8 @@ class LlmResponse:
     * ``cost`` — LiteLLM's per-request USD figure, or ``None`` when the
       provider doesn't report it.
     * ``message`` — the full normalized provider message dict (opaque).
+    * ``stop_details`` — the provider's account of why it stopped, when it gives
+      one: Anthropic's refusal ``{"type", "category", "explanation"}`` (#2092).
     """
 
     content: str
@@ -176,6 +229,7 @@ class LlmResponse:
     cost: float | None
     message: dict[str, Any]
     admission_report: AdmissionReport | None = None
+    stop_details: dict[str, Any] | None = None
 
     @classmethod
     def from_message(
@@ -186,6 +240,7 @@ class LlmResponse:
         cost: float | None,
         finish_reason: str | None,
         admission_report: AdmissionReport | None = None,
+        stop_details: dict[str, Any] | None = None,
     ) -> LlmResponse:
         """Build from a normalized message dict + the unpacked usage/cost/finish.
 
@@ -202,7 +257,17 @@ class LlmResponse:
             cost=cost,
             message=message,
             admission_report=admission_report,
+            stop_details=stop_details,
         )
+
+
+def _stop_details_of(provider_specific_fields: Any) -> dict[str, Any] | None:
+    """The ``stop_details`` the Anthropic patch above left in a message's or a
+    stream delta's ``provider_specific_fields``, or ``None``."""
+    if not isinstance(provider_specific_fields, dict):
+        return None
+    details = provider_specific_fields.get(STOP_DETAILS_FIELD)
+    return details if isinstance(details, dict) else None
 
 
 def _is_persistable_thinking_block(block: Any) -> bool:
@@ -1035,6 +1100,7 @@ async def call_litellm(
         cost=cost,
         finish_reason=finish_reason,
         admission_report=admission_report,
+        stop_details=_stop_details_of(message.get("provider_specific_fields")),
     )
 
 
@@ -1138,6 +1204,10 @@ async def stream_litellm(
     # Make it sticky: once seen on the wire, override the assembled value.
     saw_content_filter = False
     saw_length = False
+    # The refusal's ``stop_details`` ride the ``message_delta`` chunk (see the
+    # Anthropic patch at the top of this module); read them off the wire rather
+    # than trusting ``stream_chunk_builder`` to carry delta extras through.
+    stop_details: dict[str, Any] | None = None
     try:
         while True:
             guard_timeout = _STREAM_TTFT_TIMEOUT_S if first else _STREAM_INTER_CHUNK_TIMEOUT_S
@@ -1181,6 +1251,11 @@ async def stream_litellm(
                 saw_content_filter = True
             elif finish_reason == "length":
                 saw_length = True
+            chunk_stop_details = _stop_details_of(
+                getattr(chunk.choices[0].delta, "provider_specific_fields", None)
+            )
+            if chunk_stop_details is not None:
+                stop_details = chunk_stop_details
             content = chunk.choices[0].delta.content
             if content:
                 payload = json.dumps({"delta": content})
@@ -1233,4 +1308,5 @@ async def stream_litellm(
         cost=cost,
         finish_reason=finish_reason,
         admission_report=admission_report,
+        stop_details=stop_details or _stop_details_of(message.get("provider_specific_fields")),
     )

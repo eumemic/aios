@@ -57,8 +57,8 @@ SWITCH_CHANNEL_DESCRIPTION = (
     "On a real switch the tool result includes a recap block: peer "
     "inbound messages on the target channel plus the tool_calls you "
     "made while focused there (which is where your outbound sends live "
-    "— e.g. signal_send arguments). Your bare assistant text is "
-    "internal monologue and is dropped from recaps. A call whose "
+    "— e.g. signal_send arguments). Your bare assistant text was never "
+    "sent, so it is left out of recaps. A call whose "
     "channel_id already equals your current focal is a no-op — no "
     "recap, no re-emit."
 )
@@ -357,9 +357,9 @@ def _render_recap_event(
     Assistant events drop their text content entirely and render only
     their tool_calls — ``[you called: name(args), ...]`` (second
     person, addressing the agent reading the recap).  The text portion
-    of a connector-aware session's assistant turn is always internal
-    monologue (see ``MONOLOGUE_PREFIX``) — private thinking the peer
-    never saw, so noise in a "catch up on this chat" view.  Any
+    of a connector-aware session's assistant turn is never delivered —
+    the peer never saw it, so it is noise in a "catch up on this chat"
+    view.  Any
     load-bearing outbound content (what the agent actually said into
     the channel) lives in the ``signal_send``-style connector tool
     calls that follow, so rendering the tool_calls is sufficient to
