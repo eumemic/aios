@@ -99,3 +99,53 @@ def test_openapi_input_schema_exposes_toolset_arm() -> None:
     schema = AgentCreate.model_json_schema()
 
     assert "ToolsetSpec" in schema["$defs"]
+
+
+def test_configs_override_and_disable_members() -> None:
+    agent = _create(
+        [
+            {
+                "type": "toolset",
+                "name": "goal_management",
+                "version": 1,
+                "configs": [
+                    {"name": "create_goal", "permission": "always_ask"},
+                    {"name": "defer_obligations", "enabled": False},
+                ],
+            }
+        ]
+    )
+
+    assert [tool.type for tool in agent.tools] == ["create_goal", "list_obligations"]
+    assert agent.tools[0].permission == "always_ask"
+
+
+def test_default_config_all_off_then_opt_in() -> None:
+    agent = _create(
+        [
+            {
+                "type": "toolset",
+                "name": "agent_management",
+                "version": 1,
+                "default_config": {"enabled": False, "transport": "agent_tool"},
+                "configs": [{"name": "get_agent", "enabled": True}],
+            }
+        ]
+    )
+
+    assert [tool.type for tool in agent.tools] == ["get_agent"]
+    assert agent.tools[0].transport == "agent_tool"
+
+
+def test_config_for_non_member_is_rejected() -> None:
+    with pytest.raises(ValidationError, match="not a member"):
+        _create(
+            [
+                {
+                    "type": "toolset",
+                    "name": "goal_management",
+                    "version": 1,
+                    "configs": [{"name": "bash", "enabled": False}],
+                }
+            ]
+        )
