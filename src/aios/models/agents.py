@@ -1139,7 +1139,13 @@ def _parse_and_expand_toolsets(raw: Any) -> Any:
     for item in raw:
         if isinstance(item, dict) and item.get("type") == "toolset":
             key = (item.get("name"), item.get("version"))
-            if key not in _TOOLSET_CATALOG:
+            # ``name``/``version`` are raw, unvalidated JSON here: a list or
+            # object is unhashable and would make the dict membership test
+            # raise TypeError, which pydantic does NOT convert into a
+            # ValidationError (→ HTTP 500). Only look up str/int keys; any
+            # other shape is by definition not a catalog key.
+            known = isinstance(key[0], str) and isinstance(key[1], int) and key in _TOOLSET_CATALOG
+            if not known:
                 raise ValueError(f"unknown toolset {key[0]!r} version {key[1]!r}")
         entries.append(_TOOL_INGRESS_ADAPTER.validate_python(item))
     return expand_toolsets(entries)
