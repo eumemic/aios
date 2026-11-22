@@ -227,6 +227,18 @@ class TestJudgedOnce:
         log = [_inbound(1), _closing(2, reacting_to=1), _event(3, {"role": "user", "content": "x"})]
         assert _due(log, reacting_to=3) is None
 
+    def test_a_closing_turn_that_never_saw_the_inbound_is_not_its_judgment(self) -> None:
+        """Two quick messages: the second lands while the closing turn answering the
+        first is in inference (``reacting_to`` 1). That turn never saw it, so the
+        next closing turn — the bare-text answer to it — is its judgment point."""
+        log = [
+            _inbound(1),
+            *_turn(2, "signal_send", reacting_to=1),
+            _inbound(4),
+            _closing(5, reacting_to=3),
+        ]
+        assert _due(log, reacting_to=4) == _nudge_due(4)
+
     def test_a_later_inbounds_nudge_is_not_mistaken_for_an_earlier_ones(self) -> None:
         log = [
             _inbound(1),

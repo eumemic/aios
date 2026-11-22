@@ -16,13 +16,15 @@ obligation the quiescence guard checks
   the turn was focused on, or the target of a successful ``switch_channel`` in
   the same turn. A discharge covers every inbound up to that turn's
   ``reacting_to``: one reply answers a burst of messages.
-* **Judged once**, at the first *closing* turn after it — an assistant turn
-  without tool calls, which ends a step. If the inbound is still undischarged
-  there, the guard appends one nudge naming its channel. At the first closing
-  turn after that nudge it lapses: the session idles and a ``reply_lapsed`` span
-  records it. After that it is closed. A closing turn that drew no nudge closes
-  the inbound too — which is what makes a session's history from before this
-  protocol (when every step closed on a line of text) owe nothing.
+* **Judged once**, at the first *closing* turn that saw it — an assistant turn
+  without tool calls, which ends a step, whose ``reacting_to`` covers the
+  inbound (a turn already in inference when the inbound landed is not it). If
+  the inbound is still undischarged there, the guard appends one nudge naming
+  its channel. At the first closing turn that saw that nudge it lapses: the
+  session idles and a ``reply_lapsed`` span records it. After that it is closed.
+  A closing turn that drew no nudge closes the inbound too — which is what makes
+  a session's history from before this protocol (when every step closed on a
+  line of text) owe nothing.
 
 Computed from the step's windowed slate: an inbound's judgment points all follow
 it, and the window always keeps the tail. When a closing turn can't idle the
@@ -33,7 +35,7 @@ toward silence, never toward a second reply.
 
 from __future__ import annotations
 
-from bisect import bisect_right
+from bisect import bisect_left
 from collections.abc import Iterable, Set
 from dataclasses import dataclass
 from typing import Any, Final
@@ -145,7 +147,8 @@ def find_reply_due(
     """
     results: dict[str, dict[str, Any]] = {}
     turns: list[Event] = []
-    closing: list[int] = []
+    closing: list[int] = []  # closing turns' seqs, ascending
+    seen_through: list[int] = []  # running max of their ``reacting_to``
     nudges: list[tuple[int, int]] = []
     inbound: list[tuple[int, str]] = []
     for e in events:
@@ -160,7 +163,10 @@ def find_reply_due(
             if e.data.get("tool_calls"):
                 turns.append(e)
             else:
+                raw = e.data.get("reacting_to")
+                seen = raw if isinstance(raw, int) else e.seq
                 closing.append(e.seq)
+                seen_through.append(max(seen, seen_through[-1]) if seen_through else seen)
         elif role == "user" and not is_reminder_event(e.kind, e.data):
             metadata = e.data.get("metadata")
             nudge = metadata.get(REPLY_NUDGE_METADATA_KEY) if isinstance(metadata, dict) else None
@@ -171,24 +177,37 @@ def find_reply_due(
             elif e.orig_channel is not None and e.seq <= reacting_to:
                 inbound.append((e.seq, e.orig_channel))
 
+    def first_closing_seeing(seq: int) -> int | None:
+        """Index of the first closing turn whose ``reacting_to`` covers ``seq``."""
+        i = bisect_left(seen_through, seq)
+        return i if i < len(closing) else None
+
     declined, answered = _discharges(turns, results, connector_tool_names)
     to_nudge: list[tuple[int, str]] = []
     to_lapse: list[tuple[int, str]] = []
     for seq, channel in inbound:
         if seq <= max(declined, answered.get(channel, 0)):
             continue
-        i = bisect_right(closing, seq)
-        if i == len(closing):
-            to_nudge.append((seq, channel))  # this turn is its first closing turn
+        i = first_closing_seeing(seq)
+        if i is None:
+            to_nudge.append((seq, channel))  # this turn is its judgment point
             continue
-        # Its nudge, if it drew one, is the first nudge row after its first closing
-        # turn: the guard writes it in the same transaction as that turn.
-        nudge_seq = next((n for n, through in nudges if n > closing[i] and through >= seq), None)
+        # Its nudge, if it drew one, is a nudge row covering it between that turn and
+        # the next closing turn: the guard writes it in the same transaction.
+        judged_at = closing[i]
         next_closing = closing[i + 1] if i + 1 < len(closing) else None
-        if nudge_seq is None or (next_closing is not None and next_closing < nudge_seq):
+        nudge_seq = next(
+            (
+                n
+                for n, through in nudges
+                if n > judged_at and through >= seq and (next_closing is None or n < next_closing)
+            ),
+            None,
+        )
+        if nudge_seq is None:
             continue  # judged without a nudge: closed
-        if bisect_right(closing, nudge_seq) == len(closing):
-            to_lapse.append((seq, channel))  # this turn is the first closing turn after it
+        if first_closing_seeing(nudge_seq) is None and reacting_to >= nudge_seq:
+            to_lapse.append((seq, channel))  # this turn is the first to see its nudge
 
     due = ReplyDue(nudge=_owed(to_nudge), lapse=_owed(to_lapse))
     return due if due.nudge or due.lapse else None
