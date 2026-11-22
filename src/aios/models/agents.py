@@ -973,8 +973,8 @@ _TOOLSET_CATALOG: dict[tuple[ToolsetName, int], tuple[BuiltinToolType, ...]] = {
         "call_agent",
         "call_workflow",
         "list_related_sessions",
-        "stop_task",
-        "list_tasks",
+        "cancel_call",
+        "list_calls",
     ),
     ("workflow_management", 1): (
         "create_workflow",
