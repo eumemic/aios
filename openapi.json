@@ -20898,6 +20898,156 @@
         "title": "ToolsSchemaUpdate",
         "description": "Body for ``PUT /v1/connectors/{connector}/tools_schema``."
       },
+      "ToolsetMemberConfig": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "enum": [
+              "bash",
+              "read",
+              "write",
+              "edit",
+              "glob",
+              "grep",
+              "web_fetch",
+              "web_search",
+              "search_events",
+              "memory_search",
+              "schedule_wake",
+              "wake_session",
+              "wake_self",
+              "list_related_sessions",
+              "list_vault_credentials",
+              "http_request",
+              "trigger_create",
+              "trigger_remove",
+              "trigger_update",
+              "trigger_list",
+              "list_account_triggers",
+              "create_workflow",
+              "update_workflow",
+              "archive_workflow",
+              "unarchive_workflow",
+              "resume_gate",
+              "get_workflow",
+              "list_workflows",
+              "get_run",
+              "list_runs",
+              "archive_run",
+              "list_run_events",
+              "call_session",
+              "call_agent",
+              "call_workflow",
+              "create_agent",
+              "update_agent",
+              "archive_agent",
+              "get_agent",
+              "list_agents",
+              "create_goal",
+              "list_obligations",
+              "defer_obligations",
+              "stop_task",
+              "list_tasks",
+              "skill_upsert",
+              "skill_archive"
+            ],
+            "title": "Name"
+          },
+          "enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Enabled"
+          },
+          "permission": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "always_allow",
+                  "always_ask"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Permission"
+          },
+          "transport": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "cli",
+                  "agent_tool",
+                  "both"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Transport"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "title": "ToolsetMemberConfig",
+        "description": "Per-member override within a curated toolset (``configs[]``).\n\nUnset fields inherit from the toolset's ``default_config``."
+      },
+      "ToolsetMemberDefaults": {
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "title": "Enabled",
+            "default": true
+          },
+          "permission": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "always_allow",
+                  "always_ask"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Permission"
+          },
+          "transport": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "cli",
+                  "agent_tool",
+                  "both"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Transport"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "ToolsetMemberDefaults",
+        "description": "``default_config`` for a curated toolset: applied to every member.\n\n``enabled=False`` gives the upstream \"start all off, then opt in\" shape;\nopt members back in with ``configs[]`` entries."
+      },
       "ToolsetSpec": {
         "properties": {
           "type": {
@@ -20920,6 +21070,30 @@
             "type": "integer",
             "const": 1,
             "title": "Version"
+          },
+          "default_config": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ToolsetMemberDefaults"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "configs": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/ToolsetMemberConfig"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Configs"
           }
         },
         "additionalProperties": false,
