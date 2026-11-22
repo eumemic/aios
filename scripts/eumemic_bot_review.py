@@ -709,6 +709,27 @@ def require_inspection_evidence(artifact: str, expected: tuple[int, str]) -> Non
     )
 
 
+# The reviewed head, carried verbatim in the company#383 `at `<sha>`` grammar (aios#2345). The
+# fix driver binds a record to the SHA it cites; a record citing a different head (the parent the
+# agent happened to inspect) or none at all strands a fix-eligible PR. The launcher therefore
+# refuses any artifact that does not cite exactly the SHA it was launched for.
+HEAD_CITATION_TEMPLATE = "Reviewed at `{sha}`."
+_AT_SHA_RE = re.compile(r"\bat[ \t]+`([0-9a-fA-F]+)`")
+
+
+def require_head_citation(artifact: str, head_sha: str) -> None:
+    """Refuse an artifact unless every `at `<sha>`` carrier in it is exactly ``head_sha``."""
+    cited = {match.lower() for match in _AT_SHA_RE.findall(artifact)}
+    expected = head_sha.lower()
+    if cited == {expected}:
+        return
+    _die(
+        f"the `{ARTIFACT_HEADING}` must cite the launched head verbatim as "
+        f"`{HEAD_CITATION_TEMPLATE.format(sha=head_sha)}`; it cites "
+        f"{sorted(cited) or 'no SHA'}. Not publishable."
+    )
+
+
 class _ProxyBroker:
     """A loopback reverse proxy that owns the routed proxy key.
 
@@ -985,12 +1006,17 @@ def _agent_command(
 def _prompt(repo: str, pr_number: str, head_sha: str, base_sha: str) -> str:
     return (
         f"Review pull request {repo}#{pr_number}. The checkout is pinned to PR head "
-        f"{head_sha} and the PR base is {base_sha}, both present locally. The changes under "
+        f"{head_sha} and the PR base is {base_sha}, both present locally. First run "
+        f"`git rev-parse HEAD`; if it does not print {head_sha}, STOP and say so plainly — do "
+        f"not review a different tree and do not check anything else out. The changes under "
         f"review are exactly `git diff {base_sha}...{head_sha}` — read that range first and "
         f"do not review code outside it except as context. Report only actionable "
         f"correctness, security, or regression findings, with file and line references. If "
         f"there are none, say so briefly. Your final response must start exactly with "
-        f"`{ARTIFACT_HEADING}`.\n\n"
+        f"`{ARTIFACT_HEADING}`, and its body must contain the line\n"
+        f"  {HEAD_CITATION_TEMPLATE.format(sha=head_sha)}\n"
+        f"citing exactly that SHA, verbatim and in full, and no other `at` SHA carrier. A record "
+        f"without it, or citing any other commit, is refused.\n\n"
         f"MANDATORY PROOF OF INSPECTION. Run exactly:\n"
         f"  git --no-pager diff {base_sha}...{head_sha} | wc -l\n"
         f"  git --no-pager diff {base_sha}...{head_sha} | sha256sum\n"
@@ -1119,6 +1145,12 @@ def _github_request(
         _die(f"{method} {url} failed: {exc}")
 
 
+def _require_head(head_sha: str) -> None:
+    actual_head = _git("rev-parse", "HEAD").stdout.strip()
+    if not actual_head.startswith(head_sha):
+        _die(f"checkout HEAD {actual_head or 'unknown'} does not match PR head {head_sha}")
+
+
 def _pin_checkout(head_sha: str, base_sha: str) -> None:
     """Fail unless the working tree is the PR head and the base is reachable.
 
@@ -1126,9 +1158,7 @@ def _pin_checkout(head_sha: str, base_sha: str) -> None:
     review, and the prompt names an explicit `base...head` range, so the base
     commit has to be an object the agent can actually diff against.
     """
-    actual_head = _git("rev-parse", "HEAD").stdout.strip()
-    if not actual_head.startswith(head_sha):
-        _die(f"checkout HEAD {actual_head or 'unknown'} does not match PR head {head_sha}")
+    _require_head(head_sha)
     if _git("cat-file", "-e", f"{base_sha}^{{commit}}").returncode:
         fetched = _git("fetch", "--no-tags", "--quiet", "origin", base_sha)
         if fetched.returncode or _git("cat-file", "-e", f"{base_sha}^{{commit}}").returncode:
@@ -1182,6 +1212,10 @@ def run_agent_phase() -> None:
     )
     # Belt: run_agent already checked, but writing is the publishable act.
     require_inspection_evidence(review, evidence)
+    # The tree must still be the launched head (the agent has a shell), and the record must
+    # say so in the grammar the fix driver binds on (aios#2345).
+    _require_head(head_sha)
+    require_head_citation(review, head_sha)
     artifact_path.write_text(review + "\n")
     print(f"wrote {ARTIFACT_HEADING} artifact to {artifact_path}")
 
@@ -1200,6 +1234,7 @@ def run_publish_phase() -> None:
     review = _artifact_in(review) or _die(
         f"review artifact contains no `{ARTIFACT_HEADING}` heading"
     )
+    require_head_citation(review, head_sha)
     marker = f"<!-- eumemic-bot-review:{head_sha} -->"
     if marker not in review:
         review = f"{review}\n\n{marker}"

@@ -592,7 +592,7 @@ def test_main_scrubs_the_git_credential_before_handing_the_tree_to_the_agent(
 
     def agent(*args: Any, **kwargs: Any) -> str:
         order.append("agent")
-        return _good_artifact("Pass.")
+        return _good_artifact("Pass. Reviewed at `abc123`.")
 
     monkeypatch.setattr(reviewer, "_drop_persisted_git_credentials", scrub)
     monkeypatch.setattr(reviewer, "_require_agent_user", boundary)
@@ -624,7 +624,7 @@ def _agent_env(monkeypatch: Any, tmp_path: Path) -> Path:
 
 def _publish_env(monkeypatch: Any, tmp_path: Path) -> Path:
     artifact = tmp_path / "review.md"
-    artifact.write_text("### Code review\n\nPass.\n")
+    artifact.write_text("### Code review\n\nPass. Reviewed at `abc123`.\n")
     for key, value in {
         "GH_TOKEN": "token",
         "REPO": "eumemic/aios",
@@ -651,11 +651,11 @@ def test_agent_phase_writes_artifact_after_agent_returns(monkeypatch: Any, tmp_p
 
     def agent(*args: Any, **kwargs: Any) -> str:
         assert not artifact.exists()
-        return _good_artifact("Pass.")
+        return _good_artifact("Pass. Reviewed at `abc123`.")
 
     monkeypatch.setattr(reviewer, "run_agent", agent)
     reviewer.run_agent_phase()
-    assert artifact.read_text() == _good_artifact("Pass.") + "\n"
+    assert artifact.read_text() == _good_artifact("Pass. Reviewed at `abc123`.") + "\n"
 
 
 def test_publish_phase_posts_and_verifies_marker(
@@ -1368,3 +1368,96 @@ def test_agent_job_reaps_processes_the_agent_left_behind() -> None:
     assert reap["if"] == "always()"
     assert f"-u {reviewer.AGENT_USER}" in reap["run"]
     assert reap_index == ids.index("agent") + 1
+
+
+# --- aios#2345: the record cites exactly the SHA it was launched for ----------------------------
+
+_FULL_HEAD = "a0d638db" + "1" * 32
+_PARENT = "31bba8df" + "2" * 32
+
+
+def test_prompt_requires_the_agent_to_cite_and_verify_the_given_head() -> None:
+    prompt = reviewer._prompt("eumemic/aios", "7", _FULL_HEAD, "basesha")
+    assert f"Reviewed at `{_FULL_HEAD}`" in prompt
+    assert "git rev-parse HEAD" in prompt
+
+
+def test_head_citation_accepts_the_given_sha_verbatim() -> None:
+    reviewer.require_head_citation(_good_artifact(f"Reviewed at `{_FULL_HEAD}`."), _FULL_HEAD)
+
+
+def test_head_citation_rejects_a_record_that_cites_no_sha() -> None:
+    with pytest.raises(SystemExit):
+        reviewer.require_head_citation(_good_artifact("No findings."), _FULL_HEAD)
+
+
+def test_head_citation_rejects_a_record_that_cites_the_parent() -> None:
+    """The aios#2208 shape: launched for a0d638db, the record says 31bba8df."""
+    with pytest.raises(SystemExit):
+        reviewer.require_head_citation(_good_artifact(f"Reviewed at `{_PARENT}`."), _FULL_HEAD)
+
+
+def test_head_citation_rejects_a_second_conflicting_carrier() -> None:
+    body = f"Reviewed at `{_FULL_HEAD}`.\n\nActually reviewed at `{_PARENT}`."
+    with pytest.raises(SystemExit):
+        reviewer.require_head_citation(_good_artifact(body), _FULL_HEAD)
+
+
+def test_head_citation_rejects_a_short_prefix() -> None:
+    with pytest.raises(SystemExit):
+        reviewer.require_head_citation(_good_artifact(f"Reviewed at `{_FULL_HEAD[:8]}`."), _FULL_HEAD)
+
+
+def test_agent_phase_refuses_an_artifact_citing_another_head(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    artifact = _agent_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        reviewer,
+        "run_agent",
+        lambda *a, **k: _good_artifact(f"Reviewed at `{_PARENT}`."),
+    )
+    with pytest.raises(SystemExit):
+        reviewer.run_agent_phase()
+    assert not artifact.exists()
+
+
+def test_agent_phase_refuses_when_the_checkout_moved_during_the_review(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    """The mount is pinned at start AND re-checked before the artifact is written."""
+    artifact = _agent_env(monkeypatch, tmp_path)
+    heads = iter(["abc123full\n", "deadbeefother\n"])
+
+    def git(*args: str) -> subprocess.CompletedProcess[str]:
+        return _ok(next(heads) if args[0] == "rev-parse" else "")
+
+    monkeypatch.setattr(reviewer, "_git", git)
+    monkeypatch.setattr(reviewer, "run_agent", lambda *a, **k: _good_artifact("Reviewed at `abc123`."))
+    with pytest.raises(SystemExit):
+        reviewer.run_agent_phase()
+    assert not artifact.exists()
+
+
+def test_publish_phase_refuses_an_artifact_without_the_head_citation(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    _publish_env(monkeypatch, tmp_path).write_text("### Code review\n\nNo findings.\n")
+    monkeypatch.setattr(
+        reviewer, "_github_request", lambda *a, **k: pytest.fail("must not post")
+    )
+    with pytest.raises(SystemExit):
+        reviewer.run_publish_phase()
+
+
+def test_workflow_publish_requires_the_head_citation_and_skips_a_superseded_head() -> None:
+    jobs = yaml.safe_load(_WORKFLOW.read_text())["jobs"]
+    publish = next(step for step in jobs["publish"]["steps"] if step.get("id") == "publish")
+    run = publish["run"]
+    # The record must carry the launched SHA verbatim (company#383 `at `<sha>`` grammar).
+    assert "at \\`${HEAD_SHA}\\`" in run
+    # A newer push makes this review stale by construction: never post it.
+    assert "pulls/$PR_NUMBER" in run and ".head.sha" in run
+    assert run.index("pulls/$PR_NUMBER") < run.index("issues/$PR_NUMBER/comments")
+    workflow = yaml.safe_load(_WORKFLOW.read_text())
+    assert workflow["concurrency"]["cancel-in-progress"] is True
