@@ -27,10 +27,16 @@ obligation the quiescence guard checks
   line of text) owe nothing.
 
 Computed from the step's windowed slate: an inbound's judgment points all follow
-it, and the window always keeps the tail. When a closing turn can't idle the
-session (a new stimulus arrived during inference) the guard writes nothing, so
-the inbound it would have judged closes without a nudge: the safety net errs
-toward silence, never toward a second reply.
+it, and the window always keeps the tail. The net errs toward silence, never
+toward a second reply:
+
+* When a closing turn can't idle the session (a new stimulus arrived during
+  inference) the guard writes nothing, so the inbound it would have judged
+  closes without a nudge.
+* An inbound that scrolls out of the window before its first closing turn
+  (a step that worked through more than the window of tool output first) is
+  never judged — the model can no longer see that message either, so a nudge
+  would point it at something outside its own context.
 """
 
 from __future__ import annotations
