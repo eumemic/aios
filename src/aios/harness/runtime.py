@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     import asyncpg
 
     from aios.crypto.vault import CryptoBox
+    from aios.harness.account_fairness import AccountStepGate
     from aios.harness.inflight_tool_registry import InflightToolRegistry
     from aios.mcp.pool import McpSessionPool
     from aios.models.memory_stores import MemoryStoreResourceEcho
@@ -48,6 +49,35 @@ tool_provider: ToolProvider | None = None
 # purely a performance optimization — without it, every tool call would
 # re-query the same row set.
 _session_memory_mounts: dict[str, list[MemoryStoreResourceEcho]] = {}
+
+# Per-account step admission gate (issue #418). Built lazily from settings on
+# first use so tests and the worker share one construction path.
+_account_step_gate: AccountStepGate | None = None
+
+
+def get_account_step_gate() -> AccountStepGate:
+    """Return the worker-process per-account step admission gate."""
+    global _account_step_gate
+    if _account_step_gate is None:
+        from aios.config import get_settings
+        from aios.harness.account_fairness import AccountStepGate
+
+        settings = get_settings()
+        backoff = settings.account_fairness_backoff_seconds
+        _account_step_gate = AccountStepGate(
+            settings.effective_account_step_concurrency_max,
+            # A waiter re-arrives every ``backoff`` seconds while it waits; one that
+            # misses many re-arrivals is gone (archived / job lost) and must not
+            # keep reserving a slot.
+            stale_after_seconds=max(30.0, 10 * backoff),
+        )
+    return _account_step_gate
+
+
+def reset_account_step_gate() -> None:
+    """Drop the gate so the next use rebuilds it from current settings (tests)."""
+    global _account_step_gate
+    _account_step_gate = None
 
 
 def set_session_memory_mounts(session_id: str, echoes: list[MemoryStoreResourceEcho]) -> None:

@@ -732,7 +732,32 @@ async def run_session_step(
     # IMMEDIATELY after the bind so the still-fallible setup below (``step_start``
     # append, ``register_step``) can't escape with the contextvars still bound — e.g.
     # a DB drop or a session archived in the race window past the account_id guard.
+    account_gate = runtime.get_account_step_gate()
+    admitted = False
     try:
+        # Per-account execution-time fairness (issue #418). Non-blocking: a wake
+        # whose account is at its step cap re-defers itself into the future and
+        # returns, freeing this procrastinate slot for another account's ready job
+        # (a blocking wait would hold the slot and defeat the point). Checked
+        # BEFORE ``step_start`` so a bounce is not a step — its only trace is the
+        # ``wake_deferred`` span ``defer_wake`` appends. ``defer_wake`` re-derives
+        # the foreground/background priority tier, so fairness never re-tiers a
+        # wake. See :mod:`aios.harness.account_fairness`.
+        if not account_gate.try_admit(account_id, session_id):
+            log.debug(
+                "step.account_fairness_deferred",
+                session_id=session_id,
+                active=account_gate.active(account_id),
+            )
+            await defer_wake(
+                pool,
+                session_id,
+                cause="reschedule",
+                delay_seconds=get_settings().account_fairness_backoff_seconds,
+                account_id=account_id,
+            )
+            return
+        admitted = True
         inflight_tool_registry = runtime.require_inflight_tool_registry()
 
         # Outermost span pair: brackets the entire step (issue #131).  Emitted
@@ -863,6 +888,8 @@ async def run_session_step(
         ):
             log.info("step.session_reclaimed", session_id=session_id, cause=cause)
     finally:
+        if admitted:
+            account_gate.release(account_id)
         clear_contextvars()
 
 
