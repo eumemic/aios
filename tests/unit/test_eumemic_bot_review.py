@@ -1463,3 +1463,69 @@ def test_workflow_publish_requires_the_head_citation_and_skips_a_superseded_head
     assert run.index("pulls/$PR_NUMBER") < run.index("issues/$PR_NUMBER/comments")
     workflow = yaml.safe_load(_WORKFLOW.read_text())
     assert workflow["concurrency"]["cancel-in-progress"] is True
+
+
+def _publish_citation_guard() -> str:
+    """The workflow's publish-step citation guard, up to the live-head API call."""
+    steps = yaml.safe_load(_WORKFLOW.read_text())["jobs"]["publish"]["steps"]
+    (run,) = [step["run"] for step in steps if step.get("id") == "publish"]
+    guard, sep, _ = run.partition("live_head=")
+    assert sep, "publish step no longer checks the live head"
+    return guard
+
+
+_CITATION_CORPUS = [
+    f"Reviewed at `{_FULL_HEAD}`.",
+    f"Reviewed at `{_FULL_HEAD.upper()}`.",
+    f"Reviewed at `{_FULL_HEAD}`.\n\nNote that `0` is returned on error.",
+    f"Reviewed at `{_FULL_HEAD}`.\n\nThe format `ff` is flat `add`; what `dead`, beat `beef`.",
+    f"Reviewed at `{_FULL_HEAD}`.\n\nAlso_at `{_PARENT}` and 9at `{_PARENT}`.",
+    f"Reviewed at\t`{_FULL_HEAD}`.",
+    f"Reviewed at `{_FULL_HEAD}`.\n\nActually reviewed at `{_PARENT}`.",
+    f"Reviewed at `{_FULL_HEAD}`.\n\nSee (at `{_PARENT}`).",
+    f"Reviewed at `{_FULL_HEAD}`.\n\nIt's éat `{_PARENT}`.",
+    f"Reviewed at `{_PARENT}`.",
+    f"Reviewed at `{_FULL_HEAD[:8]}`.",
+    "No findings.",
+]
+
+
+@pytest.mark.parametrize("body", _CITATION_CORPUS)
+def test_publish_guard_and_launcher_agree_on_head_citation(body: str, tmp_path: Path) -> None:
+    """The workflow posts exactly what require_head_citation lets the launcher write."""
+    artifact = tmp_path / "review.md"
+    artifact.write_text(_good_artifact(body))
+    try:
+        reviewer.require_head_citation(artifact.read_text(), _FULL_HEAD)
+        python_accepts = True
+    except SystemExit:
+        python_accepts = False
+    result = subprocess.run(
+        ["bash", "-e", "-c", _publish_citation_guard()],
+        env={
+            "PATH": os.environ["PATH"],
+            "HEAD_SHA": _FULL_HEAD,
+            "REVIEW_ARTIFACT_PATH": str(artifact),
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert (result.returncode == 0) == python_accepts, (python_accepts, result.stderr)
+
+
+def test_publish_guard_accepts_prose_ending_in_at_before_a_hex_token(tmp_path: Path) -> None:
+    body = f"Reviewed at `{_FULL_HEAD}`.\n\nNote that `0` is returned on error."
+    reviewer.require_head_citation(_good_artifact(body), _FULL_HEAD)
+    artifact = tmp_path / "review.md"
+    artifact.write_text(_good_artifact(body))
+    result = subprocess.run(
+        ["bash", "-e", "-c", _publish_citation_guard()],
+        env={
+            "PATH": os.environ["PATH"],
+            "HEAD_SHA": _FULL_HEAD,
+            "REVIEW_ARTIFACT_PATH": str(artifact),
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr

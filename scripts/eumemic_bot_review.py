@@ -714,7 +714,9 @@ def require_inspection_evidence(artifact: str, expected: tuple[int, str]) -> Non
 # agent happened to inspect) or none at all strands a fix-eligible PR. The launcher therefore
 # refuses any artifact that does not cite exactly the SHA it was launched for.
 HEAD_CITATION_TEMPLATE = "Reviewed at `{sha}`."
-_AT_SHA_RE = re.compile(r"\bat[ \t]+`([0-9a-fA-F]+)`")
+# Must accept exactly what the workflow's publish guard accepts (LC_ALL=C grep -oE
+# '\\bat[[:blank:]]+`hex`'): ASCII word boundary, space/tab separator. Parity is tested.
+_AT_SHA_RE = re.compile(r"\bat[ \t]+`([0-9a-fA-F]+)`", re.ASCII)
 
 
 def require_head_citation(artifact: str, head_sha: str) -> None:
