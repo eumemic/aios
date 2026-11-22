@@ -15,9 +15,11 @@ from typing import Annotated, Any, Literal, get_args
 
 from pydantic import (
     BaseModel,
+    BeforeValidator,
     ConfigDict,
     Field,
     SerializerFunctionWrapHandler,
+    TypeAdapter,
     ValidationInfo,
     field_validator,
     model_serializer,
@@ -869,6 +871,143 @@ def resolve_ssh_server_refs(
 # ── Tool declaration ──────────────────────────────────────────────────────────
 
 
+ToolsetName = Literal[
+    "goal_management",
+    "delegation",
+    "workflow_management",
+    "trigger_management",
+    "agent_management",
+]
+
+
+class ToolsetMemberDefaults(BaseModel):
+    """``default_config`` for a curated toolset: applied to every member.
+
+    ``enabled=False`` gives the upstream "start all off, then opt in" shape;
+    opt members back in with ``configs[]`` entries.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    permission: PermissionPolicy | None = None
+    transport: ToolTransport | None = None
+
+
+class ToolsetMemberConfig(BaseModel):
+    """Per-member override within a curated toolset (``configs[]``).
+
+    Unset fields inherit from the toolset's ``default_config``.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: BuiltinToolType
+    enabled: bool | None = None
+    permission: PermissionPolicy | None = None
+    transport: ToolTransport | None = None
+
+
+class ToolsetSpec(BaseModel):
+    """Ingress-only reference to an immutable, curated capability set.
+
+    Toolsets are expanded while validating an agent create/update request. They
+    are never persisted or returned: the resolved agent surface contains only
+    ordinary :class:`ToolSpec` entries, making every granted capability explicit.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["toolset"]
+    name: ToolsetName
+    version: Literal[1]
+    default_config: ToolsetMemberDefaults | None = None
+    configs: list[ToolsetMemberConfig] | None = None
+
+    def members(self) -> list[ToolSpec]:
+        """Materialize this toolset's enabled members as ordinary ToolSpecs.
+
+        Disabled members are omitted entirely (absent == not granted), so the
+        stored surface never carries inert bundle residue.
+        """
+        catalog = _TOOLSET_CATALOG[(self.name, self.version)]
+        overrides: dict[str, ToolsetMemberConfig] = {}
+        for cfg in self.configs or []:
+            if cfg.name not in catalog:
+                raise ValueError(
+                    f"configs[] entry {cfg.name!r} is not a member of toolset "
+                    f"{self.name!r} version {self.version}"
+                )
+            if cfg.name in overrides:
+                raise ValueError(
+                    f"duplicate configs[] entry {cfg.name!r} for toolset {self.name!r}"
+                )
+            overrides[cfg.name] = cfg
+        default = self.default_config or ToolsetMemberDefaults()
+        out: list[ToolSpec] = []
+        for member in catalog:
+            override = overrides.get(member)
+            enabled = (
+                override.enabled if override and override.enabled is not None else default.enabled
+            )
+            if not enabled:
+                continue
+            permission = (
+                override.permission if override and override.permission else default.permission
+            )
+            transport = override.transport if override and override.transport else default.transport
+            out.append(ToolSpec(type=member, permission=permission, transport=transport))
+        return out
+
+
+# Each tuple is immutable by convention: changing a released tuple would make
+# identical authoring input grant different authority. Add version 2 instead.
+_TOOLSET_CATALOG: dict[tuple[ToolsetName, int], tuple[BuiltinToolType, ...]] = {
+    ("goal_management", 1): (
+        "create_goal",
+        "list_obligations",
+        "defer_obligations",
+    ),
+    ("delegation", 1): (
+        "call_session",
+        "call_agent",
+        "call_workflow",
+        "list_related_sessions",
+        "cancel_call",
+        "list_calls",
+    ),
+    ("workflow_management", 1): (
+        "create_workflow",
+        "update_workflow",
+        "archive_workflow",
+        "unarchive_workflow",
+        "resume_gate",
+        "get_workflow",
+        "list_workflows",
+        "call_workflow",
+        "get_run",
+        "list_runs",
+        "archive_run",
+        "list_run_events",
+    ),
+    ("trigger_management", 1): (
+        "trigger_create",
+        "trigger_remove",
+        "trigger_update",
+        "trigger_list",
+        "list_account_triggers",
+    ),
+    ("agent_management", 1): (
+        "create_agent",
+        "update_agent",
+        "archive_agent",
+        "get_agent",
+        "list_agents",
+        "call_agent",
+    ),
+}
+
+
 class ToolSpec(BaseModel):
     """One entry in an agent's ``tools`` list.
 
@@ -988,6 +1127,84 @@ class ToolSpec(BaseModel):
         return self
 
 
+ToolIngressSpec = ToolSpec | ToolsetSpec
+_TOOL_INGRESS_ADAPTER: TypeAdapter[ToolIngressSpec] = TypeAdapter(ToolIngressSpec)
+
+
+def _parse_and_expand_toolsets(raw: Any) -> Any:
+    """Parse an ingress tool list before its members validate as persisted specs."""
+    if not isinstance(raw, list):
+        return raw
+    entries: list[ToolIngressSpec] = []
+    for item in raw:
+        if isinstance(item, dict) and item.get("type") == "toolset":
+            key = (item.get("name"), item.get("version"))
+            # ``name``/``version`` are raw, unvalidated JSON here: a list or
+            # object is unhashable and would make the dict membership test
+            # raise TypeError, which pydantic does NOT convert into a
+            # ValidationError (→ HTTP 500). Only look up str/int keys; any
+            # other shape is by definition not a catalog key.
+            known = isinstance(key[0], str) and isinstance(key[1], int) and key in _TOOLSET_CATALOG
+            if not known:
+                raise ValueError(f"unknown toolset {key[0]!r} version {key[1]!r}")
+        entries.append(_TOOL_INGRESS_ADAPTER.validate_python(item))
+    return expand_toolsets(entries)
+
+
+def expand_toolsets(tools: list[ToolIngressSpec]) -> list[ToolSpec]:
+    """Materialize curated toolsets, with explicit declarations winning collisions."""
+    explicit_counts: dict[str, int] = {}
+    explicit: dict[str, ToolSpec] = {}
+    for tool in tools:
+        if isinstance(tool, ToolSpec):
+            explicit_counts[tool.type] = explicit_counts.get(tool.type, 0) + 1
+            explicit[tool.type] = tool
+
+    out: list[ToolSpec] = []
+    emitted: set[str] = set()
+    consumed_overrides: set[str] = set()
+    for entry in tools:
+        if isinstance(entry, ToolSpec):
+            if entry.type not in consumed_overrides:
+                out.append(entry)
+                emitted.add(entry.type)
+            continue
+        for spec in entry.members():
+            member = spec.type
+            if member in emitted:
+                continue
+            emitted.add(member)
+            if explicit_counts.get(member) == 1:
+                out.append(explicit[member])
+                consumed_overrides.add(member)
+            else:
+                out.append(spec)
+
+    _warn_incoherent_tools(out)
+    return out
+
+
+def _warn_incoherent_tools(tools: list[ToolSpec]) -> None:
+    """Warn when explicitly-authored protocol capabilities are incomplete."""
+    enabled = {tool.type for tool in tools if tool.enabled}
+    goal_protocol = frozenset(_TOOLSET_CATALOG[("goal_management", 1)])
+    selected = enabled & goal_protocol
+    missing = goal_protocol - enabled
+    if selected and missing:
+        log.warning(
+            "agent.tool_protocol_incomplete",
+            protocol="goal_management",
+            selected=sorted(selected),
+            missing=sorted(missing),
+        )
+
+
+ResolvedIngressTools = Annotated[
+    list[ToolSpec],
+    BeforeValidator(_parse_and_expand_toolsets, json_schema_input_type=list[ToolIngressSpec]),
+]
+
+
 class AgentCreate(BaseModel):
     """Request body for `POST /v1/agents`."""
 
@@ -999,7 +1216,7 @@ class AgentCreate(BaseModel):
         description="LiteLLM model string, e.g. 'anthropic/claude-opus-4-6'.",
     )
     system: str = Field(default="", description="System prompt; empty by default.")
-    tools: list[ToolSpec] = Field(default_factory=list)
+    tools: ResolvedIngressTools = Field(default_factory=list)
     skills: list[AgentSkillRef] = Field(default_factory=list)
     mcp_servers: list[McpServerSpec] = Field(default_factory=list)
     http_servers: list[HttpServerSpec] = Field(default_factory=list)
@@ -1075,7 +1292,7 @@ class AgentUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=128)
     model: str | None = Field(default=None, min_length=1)
     system: str | None = None
-    tools: list[ToolSpec] | None = None
+    tools: ResolvedIngressTools | None = None
     skills: list[AgentSkillRef] | None = None
     mcp_servers: list[McpServerSpec] | None = None
     http_servers: list[HttpServerSpec] | None = None

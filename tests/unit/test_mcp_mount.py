@@ -216,11 +216,24 @@ def test_apply_mcp_polish_cleans_schemas(polished_mcp: Any) -> None:
     assert mode_prop["type"] == ["string", "null"]
     assert set(mode_prop["enum"]) == {"detached", "single_session", "per_chat"}
 
-    # Preservation: the ``tools[].type`` enum union (no null branch) is left alone —
-    # flattening it would collapse the BuiltinToolType vs. ReplayToolType vs.
-    # custom/mcp_toolset distinction the Pydantic union encodes.
-    tools_type_prop = by_name["create_agent"].inputSchema["properties"]["tools"]["items"][
-        "properties"
-    ]["type"]
-    assert "anyOf" in tools_type_prop
-    assert len(tools_type_prop["anyOf"]) == 3
+    # Preservation: the ``tools[]`` union remains branched rather than being
+    # flattened. It now includes the ingress-only curated ``toolset`` arm in
+    # addition to ordinary persisted ToolSpec declarations.
+    tool_items = by_name["create_agent"].inputSchema["properties"]["tools"]["items"]
+    assert "anyOf" in tool_items
+    assert len(tool_items["anyOf"]) == 2
+    assert any(
+        branch["properties"]["type"].get("const") == "toolset"
+        or branch["properties"]["type"].get("enum") == ["toolset"]
+        for branch in tool_items["anyOf"]
+    )
+    # Within the ToolSpec arm, the ``type`` enum union (no null branch) is left
+    # alone — flattening it would collapse the BuiltinToolType vs. ReplayToolType
+    # vs. custom/mcp_toolset distinction the Pydantic union encodes.
+    tool_spec_type_props = [
+        branch["properties"]["type"]
+        for branch in tool_items["anyOf"]
+        if "anyOf" in branch["properties"]["type"]
+    ]
+    assert len(tool_spec_type_props) == 1
+    assert len(tool_spec_type_props[0]["anyOf"]) == 3

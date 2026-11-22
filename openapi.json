@@ -13175,7 +13175,14 @@
           },
           "tools": {
             "items": {
-              "$ref": "#/components/schemas/ToolSpec"
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/ToolSpec"
+                },
+                {
+                  "$ref": "#/components/schemas/ToolsetSpec"
+                }
+              ]
             },
             "type": "array",
             "title": "Tools"
@@ -13346,7 +13353,14 @@
             "anyOf": [
               {
                 "items": {
-                  "$ref": "#/components/schemas/ToolSpec"
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/ToolSpec"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ToolsetSpec"
+                    }
+                  ]
                 },
                 "type": "array"
               },
@@ -20883,6 +20897,228 @@
         ],
         "title": "ToolsSchemaUpdate",
         "description": "Body for ``PUT /v1/connectors/{connector}/tools_schema``."
+      },
+      "ToolsetMemberConfig": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "enum": [
+              "bash",
+              "read",
+              "write",
+              "edit",
+              "glob",
+              "grep",
+              "web_fetch",
+              "web_search",
+              "search_events",
+              "memory_search",
+              "schedule_wake",
+              "wake_session",
+              "wake_self",
+              "list_related_sessions",
+              "list_vault_credentials",
+              "http_request",
+              "ssh",
+              "trigger_create",
+              "trigger_remove",
+              "trigger_update",
+              "trigger_list",
+              "list_account_triggers",
+              "create_workflow",
+              "update_workflow",
+              "archive_workflow",
+              "unarchive_workflow",
+              "resume_gate",
+              "get_workflow",
+              "get_workflow_script_contract",
+              "list_workflows",
+              "get_run",
+              "list_runs",
+              "archive_run",
+              "list_run_events",
+              "call_session",
+              "call_agent",
+              "call_workflow",
+              "create_agent",
+              "update_agent",
+              "archive_agent",
+              "get_agent",
+              "list_agents",
+              "resolve_role",
+              "create_goal",
+              "list_obligations",
+              "defer_obligations",
+              "cancel_call",
+              "list_calls",
+              "skill_upsert",
+              "skill_archive",
+              "browser_snapshot",
+              "browser_navigate",
+              "browser_click",
+              "browser_click_xy",
+              "browser_type",
+              "browser_press_key",
+              "browser_scroll",
+              "browser_drag",
+              "browser_hover",
+              "browser_select_option",
+              "browser_screenshot"
+            ],
+            "title": "Name"
+          },
+          "enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Enabled"
+          },
+          "permission": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "always_allow",
+                  "always_ask"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Permission"
+          },
+          "transport": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "cli",
+                  "agent_tool",
+                  "both"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Transport"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "title": "ToolsetMemberConfig",
+        "description": "Per-member override within a curated toolset (``configs[]``).\n\nUnset fields inherit from the toolset's ``default_config``."
+      },
+      "ToolsetMemberDefaults": {
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "title": "Enabled",
+            "default": true
+          },
+          "permission": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "always_allow",
+                  "always_ask"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Permission"
+          },
+          "transport": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "cli",
+                  "agent_tool",
+                  "both"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Transport"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "ToolsetMemberDefaults",
+        "description": "``default_config`` for a curated toolset: applied to every member.\n\n``enabled=False`` gives the upstream \"start all off, then opt in\" shape;\nopt members back in with ``configs[]`` entries."
+      },
+      "ToolsetSpec": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "toolset",
+            "title": "Type"
+          },
+          "name": {
+            "type": "string",
+            "enum": [
+              "goal_management",
+              "delegation",
+              "workflow_management",
+              "trigger_management",
+              "agent_management"
+            ],
+            "title": "Name"
+          },
+          "version": {
+            "type": "integer",
+            "const": 1,
+            "title": "Version"
+          },
+          "default_config": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ToolsetMemberDefaults"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "configs": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/ToolsetMemberConfig"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Configs"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "type",
+          "name",
+          "version"
+        ],
+        "title": "ToolsetSpec",
+        "description": "Ingress-only reference to an immutable, curated capability set.\n\nToolsets are expanded while validating an agent create/update request. They\nare never persisted or returned: the resolved agent surface contains only\nordinary :class:`ToolSpec` entries, making every granted capability explicit."
       },
       "TraceEntry": {
         "properties": {
