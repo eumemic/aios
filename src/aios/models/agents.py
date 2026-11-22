@@ -880,6 +880,34 @@ ToolsetName = Literal[
 ]
 
 
+class ToolsetMemberDefaults(BaseModel):
+    """``default_config`` for a curated toolset: applied to every member.
+
+    ``enabled=False`` gives the upstream "start all off, then opt in" shape;
+    opt members back in with ``configs[]`` entries.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    permission: PermissionPolicy | None = None
+    transport: ToolTransport | None = None
+
+
+class ToolsetMemberConfig(BaseModel):
+    """Per-member override within a curated toolset (``configs[]``).
+
+    Unset fields inherit from the toolset's ``default_config``.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: BuiltinToolType
+    enabled: bool | None = None
+    permission: PermissionPolicy | None = None
+    transport: ToolTransport | None = None
+
+
 class ToolsetSpec(BaseModel):
     """Ingress-only reference to an immutable, curated capability set.
 
@@ -893,6 +921,37 @@ class ToolsetSpec(BaseModel):
     type: Literal["toolset"]
     name: ToolsetName
     version: Literal[1]
+    default_config: ToolsetMemberDefaults | None = None
+    configs: list[ToolsetMemberConfig] | None = None
+
+    def members(self) -> list[ToolSpec]:
+        """Materialize this toolset's enabled members as ordinary ToolSpecs.
+
+        Disabled members are omitted entirely (absent == not granted), so the
+        stored surface never carries inert bundle residue.
+        """
+        catalog = _TOOLSET_CATALOG[(self.name, self.version)]
+        overrides: dict[str, ToolsetMemberConfig] = {}
+        for cfg in self.configs or []:
+            if cfg.name not in catalog:
+                raise ValueError(
+                    f"configs[] entry {cfg.name!r} is not a member of toolset "
+                    f"{self.name!r} version {self.version}"
+                )
+            if cfg.name in overrides:
+                raise ValueError(f"duplicate configs[] entry {cfg.name!r} for toolset {self.name!r}")
+            overrides[cfg.name] = cfg
+        default = self.default_config or ToolsetMemberDefaults()
+        out: list[ToolSpec] = []
+        for member in catalog:
+            cfg = overrides.get(member)
+            enabled = cfg.enabled if cfg and cfg.enabled is not None else default.enabled
+            if not enabled:
+                continue
+            permission = cfg.permission if cfg and cfg.permission else default.permission
+            transport = cfg.transport if cfg and cfg.transport else default.transport
+            out.append(ToolSpec(type=member, permission=permission, transport=transport))
+        return out
 
 
 # Each tuple is immutable by convention: changing a released tuple would make
@@ -1098,7 +1157,8 @@ def expand_toolsets(tools: list[ToolIngressSpec]) -> list[ToolSpec]:
                 out.append(entry)
                 emitted.add(entry.type)
             continue
-        for member in _TOOLSET_CATALOG[(entry.name, entry.version)]:
+        for spec in entry.members():
+            member = spec.type
             if member in emitted:
                 continue
             emitted.add(member)
@@ -1106,7 +1166,7 @@ def expand_toolsets(tools: list[ToolIngressSpec]) -> list[ToolSpec]:
                 out.append(explicit[member])
                 consumed_overrides.add(member)
             else:
-                out.append(ToolSpec(type=member))
+                out.append(spec)
 
     _warn_incoherent_tools(out)
     return out
