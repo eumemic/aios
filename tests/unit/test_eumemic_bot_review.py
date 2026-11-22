@@ -1469,6 +1469,7 @@ def _publish_citation_guard() -> str:
     """The workflow's publish-step citation guard, up to the live-head API call."""
     steps = yaml.safe_load(_WORKFLOW.read_text())["jobs"]["publish"]["steps"]
     (run,) = [step["run"] for step in steps if step.get("id") == "publish"]
+    assert isinstance(run, str)
     guard, sep, _ = run.partition("live_head=")
     assert sep, "publish step no longer checks the live head"
     return guard
