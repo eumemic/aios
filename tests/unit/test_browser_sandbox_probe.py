@@ -11,8 +11,10 @@ assertion still fails when the sandbox is genuinely off.
 
 from __future__ import annotations
 
+import shlex
 import shutil
 import subprocess
+import types
 from collections.abc import Callable
 from pathlib import Path
 
@@ -90,8 +92,14 @@ def _install(
 
     clock = FakeClock()
     monkeypatch.setattr(bic, "run", fake_run)
-    monkeypatch.setattr("tests.e2e.browser_image_common.time.monotonic", clock.monotonic)
-    monkeypatch.setattr("tests.e2e.browser_image_common.time.sleep", clock.sleep)
+    # Replace the module's ``time`` BINDING, never the global ``time`` module's
+    # attributes: ``subprocess.Popen._wait`` polls with ``time.sleep`` whenever
+    # a timeout is passed, so patching ``time.sleep`` globally let the real
+    # bash child's run time burn fake seconds and trip the deadline. Only the
+    # probe loop's own retry sleeps may advance this clock.
+    monkeypatch.setattr(
+        bic, "time", types.SimpleNamespace(monotonic=clock.monotonic, sleep=clock.sleep)
+    )
     return calls
 
 
@@ -120,6 +128,30 @@ def test_renderer_reaped_between_execs_does_not_flake(
 
 def test_waits_for_a_renderer_to_appear(monkeypatch: pytest.MonkeyPatch, fake: FakeProc) -> None:
     """No renderer yet (page still opening) is the one thing re-probed."""
+
+    def spawn() -> None:
+        fake.spawn_renderer()
+
+    calls = _install(monkeypatch, fake, after_exec=spawn)
+    bic.assert_chromium_sandbox_on("c")
+    assert len(calls) == 2
+
+
+def test_slow_exec_does_not_advance_the_fake_clock(
+    monkeypatch: pytest.MonkeyPatch, fake: FakeProc, tmp_path: Path
+) -> None:
+    """Only the probe loop's own retry sleeps may advance the fake deadline
+    clock. The first exec takes 0.5s of REAL time with its pipes closed (so
+    ``subprocess`` falls into ``Popen._wait``'s timed poll loop, which calls
+    ``time.sleep``); if that leaked into the fake clock, ~30 fake seconds
+    would pass and the deadline would fire before the second probe."""
+    marker = tmp_path / "first-exec-done"
+    slow_first = (
+        f"if [ ! -e {shlex.quote(str(marker))} ]; then "
+        f"touch {shlex.quote(str(marker))}; exec 1>&- 2>&-; sleep 0.5; exit 1; fi\n"
+    )
+    real_script = bic.sandbox_probe_script
+    monkeypatch.setattr(bic, "sandbox_probe_script", lambda: slow_first + real_script())
 
     def spawn() -> None:
         fake.spawn_renderer()
@@ -175,11 +207,39 @@ def test_negative_control_namespace_layer_off(
         bic.assert_chromium_sandbox_on("c")
 
 
+def _mirror_self_prefix(fake_root: Path) -> str:
+    """Shell prelude copying the REAL ``/proc`` entries of the running probe
+    shell (``$$``) and of one of its forked subshells (same cmdline, different
+    pid — what ``$(...)`` creates) into the fake tree, so the probe sees its
+    own processes and nothing else from the host."""
+    root = shlex.quote(str(fake_root))
+    return f"""mirror() {{
+  mkdir -p {root}/"$1"/ns
+  cat /proc/"$1"/cmdline > {root}/"$1"/cmdline
+  cat /proc/"$1"/status > {root}/"$1"/status
+  ln -s "$(readlink /proc/"$1"/ns/user)" {root}/"$1"/ns/user
+}}
+mirror $$
+(mirror $BASHPID)
+"""
+
+
 def test_probe_does_not_select_itself(fake: FakeProc) -> None:
-    """Run against the REAL /proc with no renderer: the probe's own bash
-    process must not match the renderer needle (it would carry init-like
-    evidence and report a false 'sandbox off')."""
+    """The probe's own bash process (and its subshells, which share its
+    cmdline) must not match the renderer needle — it would carry init-like
+    evidence and report a false 'sandbox off'.
+
+    Hermetic: the probe runs over the fake tree (init + gpu-process, NO
+    renderer) into which its own real ``/proc/$$`` entry and a subshell's are
+    mirrored, so host processes (a developer's Chrome, a parallel e2e run)
+    cannot change the outcome, while a self-match would still turn it red."""
+    script = bic.sandbox_probe_script().replace("/proc", str(fake.root))
     r = subprocess.run(
-        ["bash", "-c", bic.sandbox_probe_script()], capture_output=True, text=True, check=False
+        ["bash", "-c", _mirror_self_prefix(fake.root) + script],
+        capture_output=True,
+        text=True,
+        check=False,
     )
-    assert r.returncode == 1, r.stdout
+    mirrored = {d.name for d in fake.root.iterdir()} - {"1", "7"}
+    assert len(mirrored) == 2, f"self-mirroring did not happen: {sorted(mirrored)}"
+    assert r.returncode == 1, (r.stdout, r.stderr)
