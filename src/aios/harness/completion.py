@@ -963,9 +963,15 @@ def _build_litellm_kwargs(
                 "report success; overridden so an unsupported param fails loud"
             ),
         )
-    if auth is not None and get_settings().inference_credential_policy != "legacy_env":
+    if (
+        auth is not None
+        and auth.api_key is not None
+        and get_settings().inference_credential_policy != "legacy_env"
+    ):
         # Account rows are authoritative under non-legacy policies. Inline auth
-        # fields are agent metadata, not account configuration.
+        # fields are agent metadata, not account configuration. A defaults-only
+        # (key-less) row carries no credentials, so it is not authoritative for
+        # binding and leaves the no-row behaviour (and conflict guard) intact.
         for key in ("api_key", "api_base", "base_url"):
             effective_extra.pop(key, None)
     if auth is not None:

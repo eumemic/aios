@@ -191,6 +191,8 @@ def provider_auth_conflict(
     redirect = api_base_of(litellm_extra)
     if redirect is None:
         return False
-    if resolved is not None:
+    if resolved is not None and resolved.api_key is not None:
         return resolved.owner_account_id != account_id
+    # No row, or a defaults-only (key-less) row: LiteLLM would fall back to the
+    # worker's root-owned env key, so only a root account may redirect.
     return not account_is_root

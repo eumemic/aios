@@ -248,3 +248,70 @@ def test_explicit_allowed_params_are_merged_with_central_passthrough() -> None:
     )
 
     assert kwargs["allowed_openai_params"] == ["reasoning_effort", "seed"]
+
+
+_ROOT_DEFAULT = {"thinking": {"type": "adaptive", "display": "summarized"}}
+
+
+async def test_account_defaults_reach_the_wire_without_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A defaults-only row injects its posture but no api_key (env key remains)."""
+    captured = _capture(monkeypatch)
+    auth = ProviderAuth(
+        api_key=None, api_base=None, owner_account_id="acc_root", litellm_defaults=_ROOT_DEFAULT
+    )
+
+    await completion.call_litellm(
+        completion.LlmRequest(messages=[{"role": "user", "content": "hi"}]),
+        model="anthropic/claude-opus-4-8",
+        auth=auth,
+    )
+
+    assert captured["thinking"] == {"type": "adaptive", "display": "summarized"}
+    assert "api_key" not in captured
+    assert "output_config" not in captured
+    assert "reasoning_effort" not in captured
+
+
+async def test_agent_litellm_extra_beats_account_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured = _capture(monkeypatch)
+    auth = ProviderAuth(
+        api_key="sk-x", api_base=None, owner_account_id="acc_root", litellm_defaults=_ROOT_DEFAULT
+    )
+
+    await completion.call_litellm(
+        completion.LlmRequest(
+            messages=[{"role": "user", "content": "hi"}],
+            params={"thinking": {"type": "disabled"}},
+        ),
+        model="anthropic/claude-opus-4-8",
+        auth=auth,
+    )
+
+    assert captured["thinking"] == {"type": "disabled"}
+
+
+async def test_defaults_only_row_does_not_strip_inline_redirect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A key-less defaults row is not credential-authoritative: it must not
+    silently erase an (already conflict-guarded) inline api_base."""
+    captured = _capture(monkeypatch)
+    auth = ProviderAuth(
+        api_key=None, api_base=None, owner_account_id="acc_root", litellm_defaults=_ROOT_DEFAULT
+    )
+
+    await completion.call_litellm(
+        completion.LlmRequest(
+            messages=[{"role": "user", "content": "hi"}],
+            params={"api_base": "https://proxy.example"},
+        ),
+        model="anthropic/claude-opus-4-8",
+        auth=auth,
+    )
+
+    assert captured["api_base"] == "https://proxy.example"
+    assert captured["thinking"] == _ROOT_DEFAULT["thinking"]

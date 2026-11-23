@@ -253,7 +253,7 @@ async def _check_provider_auth_conflict(
     ``accounts`` table beyond what resolution already did.
     """
     account_is_root = True
-    if resolved is None and api_base_of(litellm_extra) is not None:
+    if (resolved is None or resolved.api_key is None) and api_base_of(litellm_extra) is not None:
         async with pool.acquire() as conn:
             account = await queries.get_account(conn, account_id)
         assert account is not None, f"account {account_id} vanished mid-request"

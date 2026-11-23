@@ -57,3 +57,26 @@ def test_resolved_defaults_are_applied_below_explicit_params() -> None:
     merged = merge_litellm_defaults(auth.litellm_defaults, {"temperature": 0.3})
     assert merged["thinking"]["display"] == "summarized"
     assert merged["temperature"] == 0.3
+
+
+def test_defaults_only_own_row_does_not_exempt_redirect_conflict_guard() -> None:
+    """A key-less (defaults-only) own row must not unlock an api_base redirect.
+
+    Without a key, LiteLLM falls back to the worker's env key, so the own-row
+    exemption would reopen the exfiltration guard on a non-root account.
+    """
+    from aios.models.model_providers import provider_auth_conflict
+
+    auth = ProviderAuth(
+        api_key=None,
+        api_base=None,
+        owner_account_id="acc_child",
+        litellm_defaults={"thinking": {"type": "adaptive"}},
+    )
+    extra = {"api_base": "https://attacker.example"}
+    assert provider_auth_conflict(
+        litellm_extra=extra, resolved=auth, account_id="acc_child", account_is_root=False
+    )
+    assert not provider_auth_conflict(
+        litellm_extra=extra, resolved=auth, account_id="acc_child", account_is_root=True
+    )
