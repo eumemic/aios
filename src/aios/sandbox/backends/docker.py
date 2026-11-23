@@ -484,9 +484,19 @@ class DockerBackend:
 
         # Resolve mutable registry tags before launch and stamp the immutable
         # chain root on cold starts. Resumes retain the snapshot's inherited ID.
+        #
+        # The tag is resolved exactly ONCE and the container is launched from
+        # that immutable ID (no second ``--pull always``): a second, independent
+        # pull could land on a newer image if the tag moved in between, leaving
+        # the container running B while labelled A — and the next resume would
+        # misread that as ``base_image_updated`` and discard the snapshot. The
+        # reference itself (``spec.image``) still rides in ``aios.base_image``
+        # via ``spec.labels`` for environment_image_changed detection.
         labels = dict(spec.labels)
+        resolved_base_id: str | None = None
         if spec.snapshot_image is None and _is_registry_image(spec.image):
-            labels[BASE_IMAGE_ID_LABEL_KEY] = await self.image_id(spec.image)
+            resolved_base_id = await self.image_id(spec.image)
+            labels[BASE_IMAGE_ID_LABEL_KEY] = resolved_base_id
 
         # Labels (the registry/spec builder is responsible for setting the
         # managed/instance/session labels; backend just passes through).
@@ -642,12 +652,16 @@ class DockerBackend:
         # (durable session sandboxes), else the cold-start base image. The
         # registry's provision path does the verified resolution and sets
         # ``spec.snapshot_image`` to a locally-runnable tag; here we run it
-        # blindly. A snapshot tag is single-component (``_is_registry_image``
-        # False), so ``--pull always`` is correctly skipped for it — the
-        # snapshot is local by construction and a registry lookup would fail.
-        run_image = spec.snapshot_image or spec.image
-        if _is_registry_image(run_image):
-            argv.extend(["--pull", "always"])
+        # blindly. A snapshot is local by construction, so it is never pulled.
+        # A registry cold start runs the content ID resolved (and pulled)
+        # above — the exact image stamped as ``aios.base_image_id`` — so no
+        # ``--pull`` here: a second pull could race a moving tag.
+        if spec.snapshot_image is not None:
+            run_image = spec.snapshot_image
+        elif resolved_base_id is not None:
+            run_image = resolved_base_id
+        else:
+            run_image = spec.image
         argv.append(run_image)
 
         rc, stdout_bytes, stderr_bytes = await run_docker_cli(argv)
