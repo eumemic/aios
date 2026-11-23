@@ -264,6 +264,22 @@ def _render_browser_lifecycle_notice(data: dict[str, Any]) -> str:
     )
 
 
+def _render_memory_mount_restored_notice(data: dict[str, Any]) -> str:
+    """Render ``memory_mount_restored`` (#1721) as a bracketed user-role notice.
+
+    Total by contract (pure function of ``data``, never raises).
+    """
+    store_ids = data.get("store_ids")
+    which = ""
+    if isinstance(store_ids, list) and store_ids:
+        which = " (" + ", ".join(str(s) for s in store_ids) + ")"
+    return (
+        f"[Your mounted memory store{which} was found incomplete and has been restored "
+        "from the durable store. Files under /mnt/memory reflect the full store again; "
+        "do not rebuild them by hand.]"
+    )
+
+
 def _render_fs_lifecycle_notice(data: dict[str, Any]) -> str:
     """Render an FS-loss lifecycle event as a bracketed user-role notice.
 
@@ -1803,6 +1819,8 @@ def build_messages(
                 content = _render_ack_notice(e.data)
             elif e.data.get("event") in ("browser_takeover_ended", "browser_state_lost"):
                 content = _render_browser_lifecycle_notice(e.data)
+            elif e.data.get("event") == "memory_mount_restored":
+                content = _render_memory_mount_restored_notice(e.data)
             else:
                 content = _render_fs_lifecycle_notice(e.data)
             messages.append({"role": "user", "content": content})

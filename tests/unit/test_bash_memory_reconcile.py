@@ -1401,3 +1401,37 @@ class TestFastPath:
         assert warnings == []
         mock_load_account.assert_not_awaited()
         assert telemetry.last_candidate_read_count() == 0
+
+
+class TestScanTimeout:
+    """#1721: the reconcile's timeout bounds the *scan*, never the user command."""
+
+    async def test_slow_scan_times_out_without_db_work(self, tmp_path: Path) -> None:
+        import threading
+
+        from aios.tools import bash_memory_reconcile as mod
+
+        host_dir = tmp_path / STORE_A
+        host_dir.mkdir()
+        (host_dir / ".materialized").touch()
+        runtime.set_session_memory_mounts(SESSION_ID, [_echo()])
+        release = threading.Event()
+
+        def slow_scan(*_args: Any, **_kwargs: Any) -> Any:
+            release.wait(5)
+            raise AssertionError("scan result must be abandoned")
+
+        create = AsyncMock()
+        try:
+            with (
+                patch.object(mod, "_scan_after", slow_scan),
+                patch.object(mod, "MEMORY_RECONCILE_SCAN_TIMEOUT_SECONDS", 0.05),
+                patch.object(mod.memory_service, "create_memory", create),
+            ):
+                warnings = await mod.reconcile_memory_mounts(SESSION_ID, {}, 0)
+        finally:
+            release.set()
+            runtime.clear_session_memory_mounts(SESSION_ID)
+
+        assert any("scan timed out" in w for w in warnings)
+        create.assert_not_awaited()
