@@ -7,8 +7,12 @@ worker startup, read on every job run.
 
 The values are ``None`` between import and ``worker_main`` initialization, so
 task bodies use the ``require_*`` family to fail loudly if a task fires
-before the worker has finished setting up. The api process never sets these;
-attempting to read them from inside an api request handler will raise.
+before the worker has finished setting up. The worker process populates
+these containers at startup. The api process also sets ``crypto_box`` and
+``tool_provider`` (a ``SubsystemToolProvider``) during its app lifespan and
+restores the previous values on shutdown (see ``aios.api.app``). The other
+globals are worker-only; reading them via ``require_*`` from inside an api
+request handler will raise.
 
 This is intentionally NOT a global mutable singleton in the OO sense — it's a
 deliberate per-process state holder for procrastinate's import-time task
