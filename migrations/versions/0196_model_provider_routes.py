@@ -1,15 +1,15 @@
 """Canonical model routes owned by model-provider configuration.
 
-Revision ID: 0167
-Revises: 0166
+Revision ID: 0196
+Revises: 0195
 """
 
 from __future__ import annotations
 
 from alembic import op
 
-revision = "0167"
-down_revision = "0166"
+revision = "0196"
+down_revision = "0195"
 branch_labels = None
 depends_on = None
 
