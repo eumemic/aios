@@ -142,3 +142,50 @@ async def test_materialize_repairs_marked_rollback(store_paths: tuple[Path, Path
 
     assert restored is True
     assert (host_dir / "restored.md").read_text() == "from db"
+
+
+async def test_materialize_restore_preserves_unreconciled_sandbox_edit(
+    store_paths: tuple[Path, Path],
+) -> None:
+    """Restore fills missing files only; an on-disk degraded-window edit survives."""
+    host_dir, lock_path = store_paths
+    host_dir.mkdir()
+    (host_dir / ".materialized").touch()
+    (host_dir / "edited.md").write_text("sandbox edit")
+
+    async def snapshot(*_args: Any, **_kwargs: Any) -> list[tuple[str, str]]:
+        return [("/edited.md", "stale db"), ("/missing.md", "from db")]
+
+    with (
+        patch("aios.sandbox.memory_mounts.memory_store_host_dir", return_value=host_dir),
+        patch("aios.sandbox.memory_mounts.memory_store_lock_path", return_value=lock_path),
+        patch("aios.db.queries.list_active_memory_paths_and_content", snapshot),
+    ):
+        restored = await materialize_store_to_host(
+            MagicMock(), store_id="memstore_test", account_id="acc_test_stub"
+        )
+
+    assert restored is True
+    assert (host_dir / "edited.md").read_text() == "sandbox edit"
+    assert (host_dir / "missing.md").read_text() == "from db"
+
+
+async def test_materialize_complete_marked_dir_is_noop(store_paths: tuple[Path, Path]) -> None:
+    host_dir, lock_path = store_paths
+    host_dir.mkdir()
+    (host_dir / ".materialized").touch()
+    (host_dir / "a.md").write_text("a")
+
+    async def snapshot(*_args: Any, **_kwargs: Any) -> list[tuple[str, str]]:
+        return [("/a.md", "a")]
+
+    with (
+        patch("aios.sandbox.memory_mounts.memory_store_host_dir", return_value=host_dir),
+        patch("aios.sandbox.memory_mounts.memory_store_lock_path", return_value=lock_path),
+        patch("aios.db.queries.list_active_memory_paths_and_content", snapshot),
+    ):
+        restored = await materialize_store_to_host(
+            MagicMock(), store_id="memstore_test", account_id="acc_test_stub"
+        )
+
+    assert restored is False

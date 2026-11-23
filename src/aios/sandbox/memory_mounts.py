@@ -88,7 +88,11 @@ async def materialize_store_to_host(
                 # value supersedes ours. Without this guard the stale-
                 # snapshot ``atomic_write`` clobbers the fresher mirror
                 # and leaves DB/disk permanently inconsistent.
-                if target.exists() and not restoring:
+                # On a rollback repair the same guard matters more: a file
+                # still on disk may hold a sandbox-side edit not yet
+                # reconciled to the DB; restore only fills in what is
+                # missing so it never discards degraded-window writes.
+                if target.exists():
                     log.info(
                         "memory.materialize_skipped_existing",
                         store_id=store_id,
