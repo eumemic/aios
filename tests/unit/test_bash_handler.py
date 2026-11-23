@@ -13,6 +13,7 @@ from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from structlog.testing import capture_logs
 
 from aios.harness import runtime
 from aios.sandbox.backends.base import CommandResult, SandboxHandle
@@ -299,6 +300,55 @@ class TestMemoryReconcileFastPath:
             assert args[2] == 12345
         finally:
             runtime.clear_session_memory_mounts("sess_01TEST")
+
+
+class _ExecBoom(Exception):
+    pass
+
+
+class _ReconcileBoom(Exception):
+    pass
+
+
+class TestSuppressedReconcileFailureIsLogged:
+    """WP-25 E4: the swallowed reconcile failure is logged, never double-reported."""
+
+    async def test_exec_raised_logs_reconcile_failure_with_session_id(
+        self, stub_registry: _StubRegistry
+    ) -> None:
+        exec_err = _ExecBoom("container died")
+        stub_registry.exec.side_effect = exec_err
+        with (
+            patch(
+                "aios.tools.bash.reconcile_memory_mounts",
+                new_callable=AsyncMock,
+                side_effect=_ReconcileBoom("reconcile failed"),
+            ),
+            capture_logs() as logs,
+            pytest.raises(_ExecBoom) as excinfo,
+        ):
+            await bash_handler("sess_01TEST", {"command": "true"})
+        assert excinfo.value is exec_err
+        records = [r for r in logs if r.get("event") == "bash.memory_reconcile_failed"]
+        assert len(records) == 1
+        assert records[0]["session_id"] == "sess_01TEST"
+
+    async def test_exec_succeeded_propagates_without_logging(
+        self, stub_registry: _StubRegistry
+    ) -> None:
+        reconcile_err = _ReconcileBoom("reconcile failed")
+        with (
+            patch(
+                "aios.tools.bash.reconcile_memory_mounts",
+                new_callable=AsyncMock,
+                side_effect=reconcile_err,
+            ),
+            capture_logs() as logs,
+            pytest.raises(_ReconcileBoom) as excinfo,
+        ):
+            await bash_handler("sess_01TEST", {"command": "true"})
+        assert excinfo.value is reconcile_err
+        assert not [r for r in logs if r.get("event") == "bash.memory_reconcile_failed"]
 
 
 class TestExecRaisedReconcileSuppression:

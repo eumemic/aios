@@ -54,6 +54,7 @@ from typing import Any
 from aios.config import get_settings
 from aios.errors import AiosError
 from aios.harness import runtime
+from aios.logging import get_logger
 from aios.sandbox.spec import resolve_bash_timeout_ceiling
 from aios.tools.bash_memory_reconcile import (
     has_writable_memory_mount,
@@ -61,6 +62,8 @@ from aios.tools.bash_memory_reconcile import (
     snapshot_memory_mounts,
 )
 from aios.tools.registry import registry
+
+log = get_logger("aios.tools.bash")
 
 
 class BashArgumentError(AiosError):
@@ -184,6 +187,7 @@ async def bash_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, 
         except Exception:
             if not exec_raised:
                 raise  # fail hard when exec succeeded
+            log.exception("bash.memory_reconcile_failed", session_id=session_id)
 
     stderr = result.stderr
     if reconcile_warnings:
