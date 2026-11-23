@@ -93,6 +93,15 @@ from aios.tools import bash_memory_telemetry as telemetry
 
 log = get_logger("aios.tools.bash_memory_reconcile")
 
+# #1721: the after-scan is bookkeeping and must never hold the bash call
+# hostage. The bound applies to the off-loop *scan* only — the user's command
+# has already returned (or raised) by the time reconcile runs, and nothing in
+# this module can signal the sandbox process. On timeout the scan's result is
+# abandoned (no DB writes, no inferred deletes) and a warning is surfaced; the
+# files remain on the shared host dir (and DB truth is untouched); the
+# uncorrelated audit (#1748) surfaces any disk/DB divergence left behind.
+MEMORY_RECONCILE_SCAN_TIMEOUT_SECONDS = 30.0
+
 # Hot-window: any file whose before-ctime is within this many nanoseconds of
 # the pre-exec snapshot timestamp is ALWAYS a candidate, regardless of the
 # after-stat comparison. See module docstring — this is the load-bearing
@@ -570,9 +579,25 @@ async def reconcile_memory_mounts(
 
     with telemetry.timed_phase("memory_reconcile"):
         with telemetry.timed_phase("after_scan"):
-            scan = await asyncio.to_thread(
-                _scan_after, session_id, before, snapshot_ns, force_hash=force_hash
-            )
+            try:
+                scan = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        _scan_after, session_id, before, snapshot_ns, force_hash=force_hash
+                    ),
+                    timeout=MEMORY_RECONCILE_SCAN_TIMEOUT_SECONDS,
+                )
+            except TimeoutError:
+                log.warning(
+                    "memory_reconcile.scan_timeout",
+                    session_id=session_id,
+                    timeout_seconds=MEMORY_RECONCILE_SCAN_TIMEOUT_SECONDS,
+                )
+                telemetry.record_candidate_reads(0)
+                return [
+                    f"memory scan timed out after {MEMORY_RECONCILE_SCAN_TIMEOUT_SECONDS:g}s; "
+                    "memory-file changes from this command may not be recorded "
+                    "(your command itself was not affected)"
+                ]
 
         after_sigs = scan.after_sigs
         candidate_bytes = scan.candidate_bytes
