@@ -17678,7 +17678,8 @@
               "type": "string"
             },
             "type": "object",
-            "title": "Model Routes"
+            "title": "Model Routes",
+            "description": "Bare model aliases mapped to canonical, fully-qualified LiteLLM routes. Omitted \u2192 keep; supplied \u2192 replace the whole map."
           }
         },
         "additionalProperties": false,

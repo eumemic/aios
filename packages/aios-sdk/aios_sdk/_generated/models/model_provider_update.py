@@ -29,7 +29,8 @@ class ModelProviderUpdate:
         Attributes:
             api_key (None | str | Unset):
             api_base (None | str | Unset):
-            model_routes (ModelProviderUpdateModelRoutes | Unset):
+            model_routes (ModelProviderUpdateModelRoutes | Unset): Bare model aliases mapped to canonical, fully-qualified
+                LiteLLM routes. Omitted → keep; supplied → replace the whole map.
     """
 
     api_key: None | str | Unset = UNSET

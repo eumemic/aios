@@ -11,7 +11,10 @@ T = TypeVar("T", bound="ModelProviderUpdateModelRoutes")
 
 @_attrs_define
 class ModelProviderUpdateModelRoutes:
-    """ """
+    """Bare model aliases mapped to canonical, fully-qualified LiteLLM routes. Omitted → keep; supplied → replace the whole
+    map.
+
+    """
 
     additional_properties: dict[str, str] = _attrs_field(init=False, factory=dict)
 

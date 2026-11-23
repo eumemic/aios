@@ -715,3 +715,21 @@ async def test_fused_entry_point_surfaces_conflict_with_resolved_auth(
     assert conflict == service.PROVIDER_AUTH_CONFLICT_MESSAGE
     assert auth is not None  # still resolved — the CALLER decides not to use it on conflict
     assert auth.owner_account_id == "acc_parent"
+
+
+async def test_update_agent_persists_canonical_route(monkeypatch: pytest.MonkeyPatch) -> None:
+    # #2013 fork 2: auto-normalize and PERSIST the canonical value (no 422).
+    from aios.services import agents as agents_service
+
+    resolve = AsyncMock(return_value="openai/responses/gpt-5.6-sol")
+    monkeypatch.setattr(agents_service.model_providers_service, "resolve_model_route", resolve)
+    upd = AsyncMock(return_value="agent")
+    monkeypatch.setattr(agents_service.queries, "update_agent", upd)
+    pool = fake_pool_yielding_conn(MagicMock())
+
+    await agents_service.update_agent(
+        pool, "agt_1", account_id="acc_x", expected_version=1, model="gpt-5.6-sol"
+    )
+
+    assert upd.await_args is not None
+    assert upd.await_args.kwargs["model"] == "openai/responses/gpt-5.6-sol"
