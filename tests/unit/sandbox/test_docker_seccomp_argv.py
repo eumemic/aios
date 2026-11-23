@@ -35,6 +35,8 @@ def _install_capture(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
         argv: list[str], *, timeout_s: float = 30.0, snapshot_timeout: bool = False
     ) -> tuple[int, bytes, bytes]:
         del timeout_s
+        if argv[1:3] == ["image", "inspect"]:
+            return 0, b"sha256:base\t1\t1\t{}\n", b""
         calls.append(list(argv))
         return 0, b"deadbeefcafe\n", b""
 

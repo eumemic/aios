@@ -425,6 +425,8 @@ class TestSnapshotBaselineStamp:
             argv: list[str], *, timeout_s: float = 30.0, snapshot_timeout: bool = False
         ) -> tuple[int, bytes, bytes]:
             del timeout_s, snapshot_timeout
+            if argv[1:3] == ["image", "inspect"]:
+                return 0, b"sha256:base\t1\t1\t{}\n", b""
             if argv[1] == "run":
                 return 0, b"cid123deadbeef\n", b""
             if argv[1] == "inspect" and "--size" in argv:
@@ -450,6 +452,8 @@ class TestSnapshotBaselineStamp:
             argv: list[str], *, timeout_s: float = 30.0, snapshot_timeout: bool = False
         ) -> tuple[int, bytes, bytes]:
             del timeout_s, snapshot_timeout
+            if argv[1:3] == ["image", "inspect"]:
+                return 0, b"sha256:base\t1\t1\t{}\n", b""
             if argv[1] == "run":
                 return 0, b"cid123deadbeef\n", b""
             if argv[1] == "inspect":

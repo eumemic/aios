@@ -54,6 +54,8 @@ async def _capture_argv(spec: SandboxSpec) -> list[str]:
         argv: list[str], *, timeout_s: float = 30.0, snapshot_timeout: bool = False
     ) -> tuple[int, bytes, bytes]:
         del timeout_s, snapshot_timeout
+        if argv[1:3] == ["image", "inspect"]:
+            return 0, b"sha256:resolved\t1\t1\t{}\n", b""
         if argv[1] == "run":
             captured["argv"] = argv
         return 0, b"deadbeef1234\n", b""
@@ -96,4 +98,5 @@ class TestInitReaperFlag:
         tini's child)."""
         argv = await _capture_argv(_spec())
         assert "--init" in argv
-        assert argv.index("--init") < argv.index("aios-sandbox:test")
+        # Cold starts launch from the resolved base content ID (#390).
+        assert argv.index("--init") < argv.index("sha256:resolved")

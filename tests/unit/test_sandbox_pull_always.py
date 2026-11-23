@@ -93,4 +93,4 @@ class TestFreshPull:
         out = await _capture(_spec(image=image))
         assert out["pulls"] == []
         assert "--pull" not in out["argv"]
-        assert out["argv"][-1] == image
+        assert out["argv"][-1] == "sha256:resolved"

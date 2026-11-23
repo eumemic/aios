@@ -22,7 +22,7 @@ TAG = "ghcr.io/eumemic/aios-sandbox:stable"
 
 async def test_launched_image_is_the_stamped_image(monkeypatch: pytest.MonkeyPatch) -> None:
     pulls = 0
-    current = {"id": None}
+    current: dict[str, str] = {"id": "sha256:UNPULLED"}
     run_argv: list[str] = []
 
     async def fake_run(
