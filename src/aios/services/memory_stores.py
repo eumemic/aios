@@ -33,8 +33,8 @@ from aios.models.memory_stores import (
     MemoryVersion,
 )
 from aios.sandbox.atomic_mirror import atomic_delete, atomic_write
-from aios.services import memory_embedding
 from aios.sandbox.volumes import memory_store_host_dir
+from aios.services import memory_embedding
 
 
 @dataclass(frozen=True)
