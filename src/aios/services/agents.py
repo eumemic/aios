@@ -32,7 +32,7 @@ from aios.models.agents import (
 )
 from aios.models.attenuation import (
     Surface,
-    api_base_of,
+    endpoints_of,
     http_server_dominated,
     surface_diff,
     surface_of,
@@ -61,17 +61,23 @@ def _is_credential_key(key: str) -> bool:
 
 def _endpoint_credential_projection(
     model: str, litellm_extra: dict[str, Any] | None
-) -> tuple[str | None, str | None, dict[str, Any]]:
+) -> tuple[str | None, frozenset[str], dict[str, Any]]:
     """The authority-bearing slice of ``litellm_extra``: endpoint plus all credentials.
 
     With no explicit ``api_base``/``base_url`` the endpoint is the provider implied by
     the model string, so the model joins the projection in that case only — otherwise
     a credential could be carried to a different provider by swapping the model.
+
+    The endpoint is the *set* of every endpoint key (``api_base`` and its ``base_url``
+    alias), not one resolved value: LiteLLM's ``completion`` lets ``base_url`` override
+    ``api_base`` while other entry points prefer ``api_base``, so a projection that
+    read only one key would let an editor keep the holder's key under ``api_base`` and
+    redirect the call via ``base_url``.
     """
     extra = litellm_extra or {}
-    endpoint = api_base_of(extra)
+    endpoints = endpoints_of(extra)
     credentials = {key: value for key, value in extra.items() if _is_credential_key(key)}
-    return (model if endpoint is None else None, endpoint, credentials)
+    return (None if endpoints else model, endpoints, credentials)
 
 
 def _enforce_authority_delta(
@@ -94,9 +100,9 @@ def _enforce_authority_delta(
     projection = _endpoint_credential_projection(model, litellm_extra)
     if not projection[2]:
         # No credential to misroute: the endpoint alone must be one a holder uses.
-        if api_base_of(litellm_extra) not in {
-            api_base_of(prior.litellm_extra),
-            api_base_of(editor.litellm_extra),
+        if endpoints_of(litellm_extra) not in {
+            endpoints_of(prior.litellm_extra),
+            endpoints_of(editor.litellm_extra),
         }:
             exceeds["litellm_extra"] = ["inference endpoint"]
     elif projection not in (

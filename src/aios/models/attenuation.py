@@ -755,19 +755,46 @@ def surface_diff(expected: Surface, actual: Surface) -> dict[str, list[str]]:
 # endpoint is the load-bearing check.
 
 
+_ENDPOINT_KEYS = ("api_base", "base_url")
+
+
 def api_base_of(litellm_extra: dict[str, object] | None) -> str | None:
     """The effective inference endpoint a ``litellm_extra`` redirects model calls to.
 
     ``None`` means "no redirect" — the default operator-trusted endpoint for the model
     string. LiteLLM accepts both ``api_base`` and the ``base_url`` alias; either pins
-    the endpoint, so both are read here (``api_base`` wins when both are present).
+    the endpoint. Precedence matches LiteLLM's ``completion`` (the path every aios
+    model call takes): ``if base_url is not None: api_base = base_url`` — so
+    ``base_url`` wins when both are present.
+
+    Authorization decisions must NOT rely on this single value alone: other LiteLLM
+    entry points prefer ``api_base``. Use :func:`endpoints_of` to authorize every
+    endpoint key a ``litellm_extra`` carries.
     """
     if not litellm_extra:
         return None
-    raw = litellm_extra.get("api_base")
+    raw = litellm_extra.get("base_url")
     if raw is None:
-        raw = litellm_extra.get("base_url")
+        raw = litellm_extra.get("api_base")
     return raw if isinstance(raw, str) else None
+
+
+def endpoints_of(litellm_extra: dict[str, object] | None) -> frozenset[str]:
+    """Every endpoint value LiteLLM might call for this ``litellm_extra``.
+
+    Both ``api_base`` and its ``base_url`` alias, regardless of which one a given
+    LiteLLM code path prefers. An empty set means "no redirect". A non-string value
+    is kept (as its ``repr``) so a garbage alias can never hide from an identity check.
+    """
+    if not litellm_extra:
+        return frozenset()
+    out: set[str] = set()
+    for key in _ENDPOINT_KEYS:
+        raw = litellm_extra.get(key)
+        if raw is None:
+            continue
+        out.add(raw if isinstance(raw, str) else repr(raw))
+    return frozenset(out)
 
 
 def api_base_trusted(

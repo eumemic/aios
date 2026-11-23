@@ -21,6 +21,7 @@ from aios.models.attenuation import (
     api_base_trusted,
     attenuate,
     canonicalize,
+    endpoints_of,
 )
 from aios.tools.registry import transport_defaults
 
@@ -84,8 +85,14 @@ def model_identity_trusted(
     admit a redirected endpoint.
     """
     allowlist = get_settings().trusted_inference_api_bases
-    return api_base_trusted(
-        api_base_of(child_litellm_extra),
-        launcher_api_base=api_base_of(launcher_litellm_extra),
-        allowlist=allowlist,
+    launcher_api_base = api_base_of(launcher_litellm_extra)
+    child_endpoints = endpoints_of(child_litellm_extra)
+    if not child_endpoints:
+        return api_base_trusted(None, launcher_api_base=launcher_api_base, allowlist=allowlist)
+    # Every endpoint key (``api_base`` AND its ``base_url`` alias) must be admissible:
+    # LiteLLM entry points disagree on which one wins, so trusting only the resolved
+    # one would let the other alias carry the context to an untrusted endpoint.
+    return all(
+        api_base_trusted(endpoint, launcher_api_base=launcher_api_base, allowlist=allowlist)
+        for endpoint in child_endpoints
     )

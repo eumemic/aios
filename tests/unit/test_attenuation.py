@@ -725,11 +725,21 @@ class TestApiBaseExtraction:
         # LiteLLM accepts base_url as an alias for api_base — both pin the endpoint.
         assert api_base_of({"base_url": "https://alias.example"}) == "https://alias.example"
 
-    def test_api_base_wins_over_base_url(self) -> None:
+    def test_base_url_wins_over_api_base(self) -> None:
         from aios.models.attenuation import api_base_of
 
+        # Matches litellm.completion: ``if base_url is not None: api_base = base_url``.
         out = api_base_of({"api_base": "https://a", "base_url": "https://b"})
-        assert out == "https://a"
+        assert out == "https://b"
+
+    def test_endpoints_of_reads_both_aliases(self) -> None:
+        from aios.models.attenuation import endpoints_of
+
+        assert endpoints_of({"api_base": "https://a", "base_url": "https://b"}) == {
+            "https://a",
+            "https://b",
+        }
+        assert endpoints_of({"temperature": 0.2}) == frozenset()
 
     def test_non_string_is_no_redirect(self) -> None:
         from aios.models.attenuation import api_base_of
