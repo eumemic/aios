@@ -119,3 +119,65 @@ def test_same_endpoint_under_either_alias_is_admitted() -> None:
     prior = _agent({"api_base": "https://target.example/v1", "api_key": "T"})
     editor = _agent({})
     _check({"base_url": "https://target.example/v1", "api_key": "T"}, prior, editor)
+
+
+def test_target_key_cannot_follow_custom_llm_provider_change() -> None:
+    model = "openai/gpt-4o"
+    prior = _agent({"api_key": "TARGET-SECRET"}, model=model)
+    editor = _agent({}, model="anthropic/claude")
+    with pytest.raises(ForbiddenError):
+        _check(
+            {"api_key": "TARGET-SECRET", "custom_llm_provider": "openrouter"},
+            prior,
+            editor,
+            model=model,
+        )
+
+
+def test_target_key_cannot_follow_bedrock_runtime_endpoint() -> None:
+    model = "bedrock/anthropic.claude-3-sonnet"
+    creds = {"aws_access_key_id": "AKIA-TARGET", "aws_secret_access_key": "TARGET-SECRET"}
+    prior = _agent(dict(creds), model=model)
+    editor = _agent({}, model=model)
+    with pytest.raises(ForbiddenError):
+        _check(
+            {**creds, "aws_bedrock_runtime_endpoint": "https://editor.example"},
+            prior,
+            editor,
+            model=model,
+        )
+
+
+def test_unknown_routing_key_with_kept_credential_is_denied_by_default() -> None:
+    prior = _agent({"api_key": "TARGET-SECRET"})
+    editor = _agent({})
+    with pytest.raises(ForbiddenError):
+        _check({"api_key": "TARGET-SECRET", "vertex_project": "editor-proj"}, prior, editor)
+
+
+def test_provider_override_cannot_reroute_with_explicit_endpoint() -> None:
+    prior = _agent({"api_base": "https://target.example/v1", "api_key": "T"})
+    editor = _agent({})
+    with pytest.raises(ForbiddenError):
+        _check(
+            {"api_base": "https://target.example/v1", "api_key": "T", "api_version": "x"},
+            prior,
+            editor,
+        )
+
+
+def test_credential_free_provider_override_must_be_held() -> None:
+    prior = _agent({})
+    editor = _agent({})
+    with pytest.raises(ForbiddenError):
+        _check({"custom_llm_provider": "openrouter"}, prior, editor)
+
+
+def test_kept_provider_override_and_tuning_change_is_admitted() -> None:
+    prior = _agent({"api_key": "T", "custom_llm_provider": "openrouter", "temperature": 0.1})
+    editor = _agent({})
+    _check(
+        {"api_key": "T", "custom_llm_provider": "openrouter", "temperature": 0.7, "timeout": 30},
+        prior,
+        editor,
+    )

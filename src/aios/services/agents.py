@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Any
 
 import asyncpg
+import litellm
 
 from aios.db import queries
 from aios.errors import ConflictError, ForbiddenError, NotFoundError
@@ -39,6 +40,7 @@ from aios.models.attenuation import (
 )
 from aios.models.skills import AgentSkillRef
 from aios.services import skills as skills_service
+from aios.services.litellm_params import OPENAI_REQUEST_PARAMS
 from aios.services.model_binding_authz import enforce_workflow_binding_privilege
 from aios.workflows.generic_child import GENERIC_CHILD_SYSTEM
 
@@ -59,25 +61,90 @@ def _is_credential_key(key: str) -> bool:
     return lowered in _CREDENTIAL_KEYS or lowered.endswith(_CREDENTIAL_SUFFIXES)
 
 
-def _endpoint_credential_projection(
+# ``litellm_extra`` keys that only tune the request body and can never change where
+# LiteLLM sends it (or with which credential). Everything NOT listed here is treated as
+# destination-shaping — deny by default — because LiteLLM reads many routing keys
+# (``custom_llm_provider``, ``aws_bedrock_runtime_endpoint``, ``vertex_project``,
+# ``api_version``, ``azure_ad_token_provider``, ...) and a projection that named only
+# the ones we know of would let an editor keep a holder's credential while adding an
+# unknown routing key to redirect it.
+_NON_ROUTING_KEYS = frozenset(OPENAI_REQUEST_PARAMS) - {
+    "api_version",
+    "extra_headers",
+    "model",
+    "messages",
+} | {
+    "allowed_openai_params",
+    "additional_drop_params",
+    "drop_params",
+    "max_retries",
+    "num_retries",
+    "timeout",
+    "stream_timeout",
+}
+
+
+# Compared as an alias-insensitive set via ``endpoints_of``.
+_ENDPOINT_ALIAS_KEYS = frozenset({"api_base", "base_url"})
+
+
+def _routing_items(extra: dict[str, Any]) -> frozenset[tuple[str, str]]:
+    """Every destination-shaping, non-credential key (and value) in ``extra``."""
+    return frozenset(
+        (key, repr(value))
+        for key, value in extra.items()
+        if key not in _NON_ROUTING_KEYS
+        and key not in _ENDPOINT_ALIAS_KEYS
+        and not _is_credential_key(key)
+    )
+
+
+def _effective_provider(model: str, extra: dict[str, Any]) -> str:
+    """The provider LiteLLM resolves for ``model`` given any ``custom_llm_provider``."""
+    override = extra.get("custom_llm_provider")
+    try:
+        _, provider, _, _ = litellm.get_llm_provider(
+            model, custom_llm_provider=override if isinstance(override, str) else None
+        )
+    except Exception:
+        # Unresolvable: fall back to the raw inputs so identity still compares exactly.
+        return f"unresolved:{model!r}:{override!r}"
+    return str(provider)
+
+
+def _destination(
     model: str, litellm_extra: dict[str, Any] | None
-) -> tuple[str | None, frozenset[str], dict[str, Any]]:
-    """The authority-bearing slice of ``litellm_extra``: endpoint plus all credentials.
+) -> tuple[str | None, str, frozenset[str], frozenset[tuple[str, str]]]:
+    """Where LiteLLM actually sends a call: provider, endpoints, and routing keys.
 
-    With no explicit ``api_base``/``base_url`` the endpoint is the provider implied by
-    the model string, so the model joins the projection in that case only — otherwise
-    a credential could be carried to a different provider by swapping the model.
-
-    The endpoint is the *set* of every endpoint key (``api_base`` and its ``base_url``
-    alias), not one resolved value: LiteLLM's ``completion`` lets ``base_url`` override
-    ``api_base`` while other entry points prefer ``api_base``, so a projection that
-    read only one key would let an editor keep the holder's key under ``api_base`` and
-    redirect the call via ``base_url``.
+    With no explicit ``api_base``/``base_url`` the model string itself selects the
+    host, so the model joins the identity in that case only.
     """
     extra = litellm_extra or {}
     endpoints = endpoints_of(extra)
+    return (
+        None if endpoints else model,
+        _effective_provider(model, extra),
+        endpoints,
+        _routing_items(extra),
+    )
+
+
+def _endpoint_credential_projection(
+    model: str, litellm_extra: dict[str, Any] | None
+) -> tuple[tuple[str | None, str, frozenset[str], frozenset[tuple[str, str]]], dict[str, Any]]:
+    """The authority-bearing slice of ``litellm_extra``: destination plus all credentials.
+
+    The destination is what LiteLLM resolves, not just ``api_base``: the effective
+    provider (model string overridden by ``custom_llm_provider``), every endpoint key
+    (``api_base`` and its ``base_url`` alias — LiteLLM's ``completion`` lets
+    ``base_url`` override ``api_base``), and every other non-allowlisted key, since
+    provider-specific routing keys such as ``aws_bedrock_runtime_endpoint`` redirect
+    calls too.
+    """
+    extra = litellm_extra or {}
     credentials = {key: value for key, value in extra.items() if _is_credential_key(key)}
-    return (None if endpoints else model, endpoints, credentials)
+    return (_destination(model, extra), credentials)
 
 
 def _enforce_authority_delta(
@@ -98,11 +165,13 @@ def _enforce_authority_delta(
     # "prior OR editor" independently would let an editor route the target's secret to
     # the editor's endpoint, so the whole projection must match one holder.
     projection = _endpoint_credential_projection(model, litellm_extra)
-    if not projection[2]:
-        # No credential to misroute: the endpoint alone must be one a holder uses.
-        if endpoints_of(litellm_extra) not in {
-            endpoints_of(prior.litellm_extra),
-            endpoints_of(editor.litellm_extra),
+    if not projection[1]:
+        # No credential to misroute: the routing (endpoints + destination-shaping keys)
+        # alone must be one a holder uses. The model is checked separately above.
+        routing = projection[0][2:]
+        if routing not in {
+            _destination(prior.model, prior.litellm_extra)[2:],
+            _destination(editor.model, editor.litellm_extra)[2:],
         }:
             exceeds["litellm_extra"] = ["inference endpoint"]
     elif projection not in (
