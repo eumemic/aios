@@ -392,12 +392,13 @@ def _scan_after(
     scanned_store_ids: set[str] = set()
     candidate_read_count = 0
 
-    stores = (
-        before.store_dirs.items()
-        if isinstance(before, _Snapshot)
-        else _iter_scannable_stores(session_id)
-    )
-    for store_id, host_dir in stores:
+    # Union of the pre-exec captured dirs (survive echo-cache eviction mid-bash,
+    # #1721) and the live echo view (a store materialized during the command).
+    stores: dict[str, Path] = dict(_iter_scannable_stores(session_id))
+    if isinstance(before, _Snapshot):
+        for store_id, host_dir in before.store_dirs.items():
+            stores.setdefault(store_id, host_dir)
+    for store_id, host_dir in stores.items():
         if not host_dir.exists() or not (host_dir / MATERIALIZED_MARKER).exists():
             continue
         scanned_store_ids.add(store_id)
