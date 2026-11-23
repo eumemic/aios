@@ -81,15 +81,17 @@ def _install(
         assert argv[:2] == ["docker", "exec"] and argv[3:5] == ["bash", "-c"], argv
         script = argv[5].replace("/proc", str(fake.root))
         calls.append(script)
-        r = real_run(["bash", "-c", script], capture_output=True, text=True, check=False, timeout=timeout)
+        r = real_run(
+            ["bash", "-c", script], capture_output=True, text=True, check=False, timeout=timeout
+        )
         if after_exec is not None:
             after_exec()
         return r
 
     clock = FakeClock()
     monkeypatch.setattr(bic, "run", fake_run)
-    monkeypatch.setattr(bic.time, "monotonic", clock.monotonic)
-    monkeypatch.setattr(bic.time, "sleep", clock.sleep)
+    monkeypatch.setattr("tests.e2e.browser_image_common.time.monotonic", clock.monotonic)
+    monkeypatch.setattr("tests.e2e.browser_image_common.time.sleep", clock.sleep)
     return calls
 
 
@@ -118,18 +120,26 @@ def test_renderer_reaped_between_execs_does_not_flake(
 
 def test_waits_for_a_renderer_to_appear(monkeypatch: pytest.MonkeyPatch, fake: FakeProc) -> None:
     """No renderer yet (page still opening) is the one thing re-probed."""
-    calls = _install(monkeypatch, fake, after_exec=lambda: fake.spawn_renderer() and None)
+
+    def spawn() -> None:
+        fake.spawn_renderer()
+
+    calls = _install(monkeypatch, fake, after_exec=spawn)
     bic.assert_chromium_sandbox_on("c")
     assert len(calls) == 2
 
 
-def test_no_renderer_ever_fails_at_deadline(monkeypatch: pytest.MonkeyPatch, fake: FakeProc) -> None:
+def test_no_renderer_ever_fails_at_deadline(
+    monkeypatch: pytest.MonkeyPatch, fake: FakeProc
+) -> None:
     _install(monkeypatch, fake)
     with pytest.raises(AssertionError, match="no readable Chromium renderer"):
         bic.assert_chromium_sandbox_on("c")
 
 
-def test_negative_control_seccomp_layer_off(monkeypatch: pytest.MonkeyPatch, fake: FakeProc) -> None:
+def test_negative_control_seccomp_layer_off(
+    monkeypatch: pytest.MonkeyPatch, fake: FakeProc
+) -> None:
     """NEGATIVE CONTROL: a renderer running WITHOUT Chromium's extra seccomp
     filters (docker's profile alone) must fail — and on the first probe, not
     be retried away."""
