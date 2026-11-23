@@ -584,7 +584,7 @@ aios envs list | get | create | update | archive
 | Var | Purpose |
 |---|---|
 | `AIOS_SANDBOX_BACKEND` / `AIOS_SANDBOX_RUNTIME` | Backend (`docker`) / runtime (`runsc` for gVisor). |
-| `AIOS_DOCKER_IMAGE` | Default sandbox + lockdown-sidecar image (`ghcr.io/eumemic/aios-sandbox:latest`). |
+| `AIOS_DOCKER_IMAGE` | Default sandbox + lockdown-sidecar image, pulled from GHCR (`ghcr.io/eumemic/aios-sandbox:latest`); point it at a locally built `aios-sandbox:latest` for development. Sandboxes always join the fixed `aios-sandbox` Docker network (not configurable). |
 | `AIOS_EGRESS_CA_KEY` | **Required.** HKDF-derives the deterministic egress CA, separate from the vault key. |
 | `AIOS_SANDBOX_{CPU_QUOTA,MEMORY_BYTES,PIDS_LIMIT,SECCOMP_PROFILE}` | Per-sandbox resource + syscall caps. |
 | `AIOS_SANDBOX_SNAPSHOT_{BUDGET_BYTES,POOL_BYTES,POOL_RECLAIM_MODE,TTL_SECONDS}` | Per-session byte budget / per-host pool / pool reclaim mode (`dry_run` default reports only; `enforce` reclaims) / dormancy TTL (30 days). |
