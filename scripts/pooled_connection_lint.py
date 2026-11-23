@@ -363,6 +363,7 @@ _DB_HELPER_SYMBOLS = frozenset(
         "queries.unscoped_reapable_archived_workspaces",
         "queries.unscoped_reconcile_absent_host_snapshots",
         "queries.unscoped_session_is_archived",
+        "queries.unscoped_sessions_with_pending_wake",
         "queries.unscoped_set_session_snapshot",
         "queries.unscoped_workspace_path_is_live",
         "queries.update_account",

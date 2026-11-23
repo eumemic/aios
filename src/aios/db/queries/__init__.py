@@ -421,6 +421,7 @@ from .accounts import (  # noqa: E402
     unscoped_get_session_account_id,
     unscoped_get_session_spec_version,
     unscoped_live_session_account_id,
+    unscoped_sessions_with_pending_wake,
     update_account,
 )
 from .agents import (  # noqa: E402
@@ -1211,6 +1212,7 @@ __all__ = [
     "unscoped_reapable_archived_workspaces",
     "unscoped_reconcile_absent_host_snapshots",
     "unscoped_session_is_archived",
+    "unscoped_sessions_with_pending_wake",
     "unscoped_set_session_snapshot",
     "unscoped_workspace_path_is_live",
     "update_account",

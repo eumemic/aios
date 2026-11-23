@@ -36,6 +36,7 @@ class CompletionCounter:
     def __init__(self) -> None:
         self._total = 0
         self._failed = 0
+        self._bounced = 0
 
     @property
     def total(self) -> int:
@@ -47,6 +48,12 @@ class CompletionCounter:
         """Wakes that raised an ``Exception`` — visible, but never progress."""
         return self._failed
 
+    @property
+    def bounced(self) -> int:
+        """Wakes that returned without running a step (refused by the per-account
+        fairness gate and re-deferred, #418) — visible, but never progress."""
+        return self._bounced
+
     def record(self) -> None:
         self._total += 1
 
@@ -54,19 +61,40 @@ class CompletionCounter:
         self._failed += 1
 
     @contextmanager
-    def track(self) -> Iterator[None]:
+    def track(self) -> Iterator[Tracked]:
         """Count the wrapped job by outcome.
 
-        A normal return increments ``total``. An ``Exception`` increments
-        ``failed`` only — an error is not throughput. Cancellation
-        (``BaseException``) counts as neither: that is shutdown or abort.
+        A normal return increments ``total`` — unless the body called
+        :meth:`Tracked.mark_bounced`, in which case only ``bounced`` moves: a
+        wake the fairness gate refused ran no step, and counting it as progress
+        would let a stream of bounces hide a hung account from the dead-man. An
+        ``Exception`` increments ``failed`` only — an error is not throughput.
+        Cancellation (``BaseException``) counts as neither: that is shutdown or
+        abort.
         """
+        tracked = Tracked()
         try:
-            yield
+            yield tracked
         except Exception:
             self.record_failure()
             raise
-        self.record()
+        if tracked.bounced:
+            self._bounced += 1
+        else:
+            self.record()
+
+
+class Tracked:
+    """Handle yielded by :meth:`CompletionCounter.track` for the wrapped job."""
+
+    __slots__ = ("bounced",)
+
+    def __init__(self) -> None:
+        self.bounced = False
+
+    def mark_bounced(self) -> None:
+        """The job returned without doing work; do not count it as progress."""
+        self.bounced = True
 
 
 WAKE_COMPLETIONS = CompletionCounter()

@@ -35,6 +35,7 @@ from aios.config import get_settings
 from aios.db.sse_lock import has_subscriber
 from aios.errors import AiosError, RateLimitedError
 from aios.harness import runtime
+from aios.harness.account_fairness import DEFAULT_PRIORITY
 from aios.harness.auto_review import launch_auto_review
 from aios.harness.completion import (
     LlmRequest,
@@ -76,7 +77,7 @@ from aios.harness.tool_dispatch import (
 )
 from aios.harness.tool_disposition import classify_tool_call
 from aios.ids import WORKFLOW_RUN, make_id
-from aios.jobs.app import defer_run_wake, defer_wake
+from aios.jobs.app import defer_run_wake, defer_wake, wake_priority
 from aios.logging import get_logger
 from aios.models.agents import (
     AgentBinding,
@@ -697,11 +698,26 @@ async def _append_preempted_spans(
     )
 
 
+class _FairnessBounced:
+    """Sentinel type: see :data:`FAIRNESS_BOUNCED`."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "FAIRNESS_BOUNCED"
+
+
+#: Returned by :func:`run_session_step` when the per-account fairness gate
+#: refused the wake and re-deferred it — no step ran. ``wake_session`` uses it
+#: to keep bounces out of the throughput dead-man's progress count (#2593 F2).
+FAIRNESS_BOUNCED = _FairnessBounced()
+
+
 async def run_session_step(
     session_id: str,
     *,
     cause: str = "message",
-) -> None:
+) -> _FairnessBounced | None:
     """Run one inference step for the session.
 
     Called by the procrastinate ``wake_session`` task. The procrastinate
@@ -716,7 +732,7 @@ async def run_session_step(
     # workflow child reclaimed after answering.
     account_id = await sessions_service.load_live_session_account_id(pool, session_id)
     if account_id is None:
-        return
+        return None
     # Bind tenant/session/cause onto structlog contextvars so every line this step
     # emits is attributable; cleared in the outer finally below (defensive hygiene —
     # see that block). Bound AFTER the gone-session guard — that path is an
@@ -732,7 +748,62 @@ async def run_session_step(
     # IMMEDIATELY after the bind so the still-fallible setup below (``step_start``
     # append, ``register_step``) can't escape with the contextvars still bound — e.g.
     # a DB drop or a session archived in the race window past the account_id guard.
+    account_gate = runtime.get_account_step_gate()
+    admitted = False
     try:
+        # Per-account execution-time fairness (issue #418). Non-blocking: a wake
+        # whose account is at its step cap re-defers itself into the future and
+        # returns, freeing this procrastinate slot for another account's ready job
+        # (a blocking wait would hold the slot and defeat the point). Checked
+        # BEFORE ``step_start`` so a bounce is not a step — its only trace is the
+        # ``wake_deferred`` span ``defer_wake`` appends. ``defer_wake`` re-derives
+        # the foreground/background priority tier, so fairness never re-tiers a
+        # wake. See :mod:`aios.harness.account_fairness`.
+        #
+        # A waiter keeps its FIFO place for as long as it is durably waiting —
+        # never lapsed by wall-clock (under saturation no waiter can re-arrive).
+        # Only when a free slot is being withheld from this wake for waiters not
+        # seen recently do we check durable state and drop the ones that are gone.
+        #
+        # Tier-aware (#2593 F1): a wake only queues behind waiters procrastinate
+        # would itself run first — higher tiers, and older waiters of its own
+        # tier — so a background fan-out never holds a free slot away from the
+        # same account's foreground wake. The tier is looked up only when the
+        # decision depends on it and the gate does not already know it.
+        known = account_gate.known_priority(account_id, session_id)
+        if known is not None:
+            priority = known
+        elif account_gate.needs_priority(account_id, session_id):
+            priority = await wake_priority(pool, session_id)
+        else:
+            priority = DEFAULT_PRIORITY
+        unconfirmed = account_gate.unconfirmed_waiters_ahead(
+            account_id, session_id, priority=priority
+        )
+        if unconfirmed:
+            live = await sessions_service.sessions_with_pending_wake(pool, unconfirmed)
+            account_gate.reconcile_waiters(account_id, checked=unconfirmed, live=live)
+        if not account_gate.try_admit(account_id, session_id, priority=priority):
+            log.debug(
+                "step.account_fairness_deferred",
+                session_id=session_id,
+                active=account_gate.active(account_id),
+            )
+            requeued_at = await defer_wake(
+                pool,
+                session_id,
+                cause="reschedule",
+                delay_seconds=get_settings().account_fairness_backoff_seconds,
+                account_id=account_id,
+            )
+            if isinstance(requeued_at, int):
+                # The re-enqueued job's real tier is the waiter's place in line.
+                account_gate.set_waiter_priority(account_id, session_id, requeued_at)
+            # No step ran: tell the task wrapper so the bounce is not counted as
+            # wake throughput (#2593 F2 — it would mask a hung account from the
+            # #2541 dead-man).
+            return FAIRNESS_BOUNCED
+        admitted = True
         inflight_tool_registry = runtime.require_inflight_tool_registry()
 
         # Outermost span pair: brackets the entire step (issue #131).  Emitted
@@ -863,7 +934,10 @@ async def run_session_step(
         ):
             log.info("step.session_reclaimed", session_id=session_id, cause=cause)
     finally:
+        if admitted:
+            account_gate.release(account_id)
         clear_contextvars()
+    return None
 
 
 async def _run_session_step_body(

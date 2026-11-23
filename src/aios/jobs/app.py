@@ -112,6 +112,20 @@ _FOREGROUND_PRIORITY = 0
 _BACKGROUND_PRIORITY = -10
 
 
+async def wake_priority(pool: asyncpg.Pool[Any], session_id: str) -> int:
+    """The procrastinate priority tier a ``wake_session`` for ``session_id`` gets.
+
+    Single derivation shared by :func:`defer_wake` (the job's ``priority``) and
+    the per-account step gate (#418), which must order its waiters by the same
+    tier procrastinate's fetch uses. A missing row (deleted-session race) maps to
+    the foreground default.
+    """
+    async with pool.acquire() as conn:
+        ctx = await queries.get_wake_priority_context(conn, session_id)
+    is_background = ctx[1] if ctx is not None else False  # (account_id, is_background) | None
+    return _BACKGROUND_PRIORITY if is_background else _FOREGROUND_PRIORITY
+
+
 async def defer_wake(
     pool: asyncpg.Pool[Any],
     session_id: str,
@@ -119,8 +133,11 @@ async def defer_wake(
     account_id: str,
     cause: str = "message",
     delay_seconds: float | None = None,
-) -> None:
+) -> int:
     """Enqueue a ``wake_session`` job, swallowing ``AlreadyEnqueued``.
+
+    Returns the procrastinate priority tier the wake was enqueued at (see
+    :func:`wake_priority`).
 
     If a wake is already queued for this session (``queueing_lock``
     deduplication), the existing job will process any new events when
@@ -149,10 +166,7 @@ async def defer_wake(
     # is demoted uniformly with no caller plumbing. A missing row (deleted-session race) →
     # foreground default; the wake then no-ops harmlessly. Resolved before the span/enqueue so
     # it isn't a new failure point between them.
-    async with pool.acquire() as conn:
-        ctx = await queries.get_wake_priority_context(conn, session_id)
-    is_background = ctx[1] if ctx is not None else False  # (account_id, is_background) | None
-    priority = _BACKGROUND_PRIORITY if is_background else _FOREGROUND_PRIORITY
+    priority = await wake_priority(pool, session_id)
 
     span_data: dict[str, Any] = {"event": "wake_deferred", "cause": cause}
     if delay_seconds is not None:
@@ -195,6 +209,7 @@ async def defer_wake(
             cause=cause,
             delay_seconds=delay_seconds,
         )
+    return priority
 
 
 async def defer_run_wake(run_id: str, *, batch: bool = False) -> None:

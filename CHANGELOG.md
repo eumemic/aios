@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+- Per-account wake fairness (#418). One account's burst of session wakes can no
+  longer fill every worker slot and hold back other accounts. Before a step
+  starts, `run_session_step` checks a non-blocking per-account admission gate.
+  A wake whose account is at its cap re-defers itself with
+  `AIOS_ACCOUNT_FAIRNESS_BACKOFF_SECONDS` (default 2s) of delay and frees its
+  worker slot at once. Inside an account, sessions are admitted FIFO, so new
+  wakes from the same account cannot starve older ones. A waiting session keeps
+  its place for as long as it is waiting, even when every worker slot is busy
+  and steps run longer than any timeout window. A waiter is dropped only when
+  the database shows it is gone: its session is archived, or it has no queued
+  or running wake. Elapsed time alone never drops a waiter. The cap is
+  `AIOS_ACCOUNT_STEP_CONCURRENCY_MAX`; it defaults to half of
+  `AIOS_WORKER_CONCURRENCY`, and a value at or above `AIOS_WORKER_CONCURRENCY`
+  is rejected at startup. The gate is process-local, which is exact under the
+  current one-worker-per-database deployment. If N workers ever share one
+  database, the cap becomes N times larger. The waiting line follows
+  procrastinate's priority tiers. A waiting background wake (for example a
+  workflow fan-out child) never holds a free slot away from a foreground wake of
+  the same account. FIFO order applies within each tier. The gate never changes
+  a job's priority. A wake that the gate refuses runs no step, so it does not
+  count as completed throughput for the stalled-worker dead-man. No schema
+  migration is needed.
+
 - Channel sessions no longer stamp their own text (#2092). The harness used to
   prefix every assistant text on a channel-bound session with
   `INTERNAL_MONOLOGUE_NOT_SEEN_BY_USER:` and told the model bare text was

@@ -620,6 +620,28 @@ class Settings(BaseSettings):
         ge=1,
         description="Concurrent session steps per worker process.",
     )
+    account_step_concurrency_max: int | None = Field(
+        default=None,
+        ge=1,
+        description="Per-account cap on concurrently running session steps in one "
+        "worker (execution-time wake fairness, issue #418). A wake whose account is "
+        "at the cap is re-deferred (non-blocking) after "
+        "``account_fairness_backoff_seconds`` so the freed worker slot can serve "
+        "other accounts; same-account sessions are admitted FIFO so none starves. "
+        "Unset → ``max(1, worker_concurrency // 2)``. Must be strictly less than "
+        "``worker_concurrency`` when ``worker_concurrency > 1`` (an equal or larger "
+        "cap could never leave a slot for another account). Process-local: exact "
+        "under the one-worker-per-database shape; N workers sharing a database "
+        "multiply the effective cap by N.",
+    )
+    account_fairness_backoff_seconds: float = Field(
+        default=2.0,
+        gt=0,
+        le=60,
+        description="Delay before a wake refused by the per-account step cap is "
+        "retried. Scheduled-in-the-future jobs are skipped by procrastinate's fetch, "
+        "so this bounds how often a bursting account's surplus wakes bounce.",
+    )
     held_connection_watchdog_threshold_seconds: float = Field(
         default=60.0,
         gt=0,
@@ -1328,6 +1350,25 @@ class Settings(BaseSettings):
     def ssh_allow_internal_host_set(self) -> frozenset[str]:
         """Parsed ``ssh_allow_internal_hosts`` as a set of host[:port] entries."""
         return frozenset(h.strip() for h in self.ssh_allow_internal_hosts.split(",") if h.strip())
+
+    @property
+    def effective_account_step_concurrency_max(self) -> int:
+        """Resolved per-account step cap (see ``account_step_concurrency_max``)."""
+        if self.account_step_concurrency_max is not None:
+            return self.account_step_concurrency_max
+        return max(1, self.worker_concurrency // 2)
+
+    @model_validator(mode="after")
+    def _account_step_cap_below_worker_concurrency(self) -> Settings:
+        cap = self.account_step_concurrency_max
+        if cap is not None and self.worker_concurrency > 1 and cap >= self.worker_concurrency:
+            raise ValueError(
+                f"AIOS_ACCOUNT_STEP_CONCURRENCY_MAX={cap} must be strictly less than "
+                f"AIOS_WORKER_CONCURRENCY={self.worker_concurrency}; otherwise one "
+                "account can still occupy every worker slot and the fairness gate "
+                "is inert (issue #418)."
+            )
+        return self
 
     @model_validator(mode="after")
     def _external_byok_requires_account_only(self) -> Settings:

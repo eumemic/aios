@@ -50,12 +50,16 @@ async def wake_session(
     cause: str = "message",
 ) -> None:
     """Run one inference step for the session."""
-    from aios.harness.loop import run_session_step
+    from aios.harness.loop import FAIRNESS_BOUNCED, run_session_step
 
     # Throughput dead-man signal (#2541): under ``delete_jobs="successful"``
-    # procrastinate leaves no durable trace of a successful job.
-    with WAKE_COMPLETIONS.track():
-        await run_session_step(session_id, cause=cause)
+    # procrastinate leaves no durable trace of a successful job. A wake the
+    # per-account fairness gate refused (#418) ran no step, so it is NOT
+    # progress: counting it would let one account's bouncing surplus hide that
+    # account's hung admitted steps from the dead-man.
+    with WAKE_COMPLETIONS.track() as tracked:
+        if await run_session_step(session_id, cause=cause) is FAIRNESS_BOUNCED:
+            tracked.mark_bounced()
 
 
 @app.task(
