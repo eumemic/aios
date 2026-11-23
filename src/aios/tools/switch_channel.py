@@ -19,6 +19,7 @@ Errors do not mutate ``focal_channel``.
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any
 
@@ -193,8 +194,20 @@ async def switch_channel_handler(session_id: str, arguments: dict[str, Any]) -> 
         all_events = await queries.read_message_events(conn, session_id, account_id=account_id)
         model = await queries.get_session_model(conn, session_id, account_id=account_id)
 
-    content = render_reorient_block(
-        all_events, target, model=model, session_id=session_id, tz_name=tz_name
+    # Off the event loop (WP-25 P6, #1745 Part D precedent): with
+    # ``session_id`` threaded through, the recap can reach the synchronous
+    # cache-miss attachment read in ``context._apply_attachments``. The render
+    # is pure CPU + file I/O (no DB, no loop-bound objects, no ContextVar
+    # writes); ``all_events`` is a list freshly built by the query above and
+    # referenced by no other coroutine, and the remaining args are immutable,
+    # so no snapshot is needed.
+    content = await asyncio.to_thread(
+        render_reorient_block,
+        all_events,
+        target,
+        model=model,
+        session_id=session_id,
+        tz_name=tz_name,
     )
     return ToolResult(
         content=content,
