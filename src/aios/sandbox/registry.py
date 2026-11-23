@@ -2208,7 +2208,23 @@ class SandboxRegistry:
             return dataclasses.replace(spec, snapshot_image=None)
         snap_base = snap_labels.get(BASE_IMAGE_LABEL_KEY)
         snap_base_id = snap_labels.get(BASE_IMAGE_ID_LABEL_KEY)
-        current_base_id = await self._backend.image_id(spec.image) if snap_base_id else None
+        current_base_id: str | None = None
+        if snap_base_id is not None and snap_base == spec.image:
+            # #390: a mutable tag (``:stable``) can advance under an unchanged
+            # reference; compare the resolved content ID. Absent label (every
+            # pre-#390 snapshot) => no drift. Unresolvable (registry outage) =>
+            # no drift too: resuming the old base beats blocking provisioning
+            # or discarding the durable filesystem on a transient failure.
+            try:
+                current_base_id = await self._backend.image_id(spec.image)
+            except SandboxBackendError as exc:
+                log.warning(
+                    "sandbox.base_image_id_unresolved",
+                    session_id=session_id,
+                    image=spec.image,
+                    error=str(exc),
+                )
+                current_base_id = snap_base_id
         if snap_base != spec.image or (
             snap_base_id is not None and snap_base_id != current_base_id
         ):

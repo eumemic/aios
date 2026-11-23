@@ -404,9 +404,12 @@ deterministic local tag — today's behavior exactly. Rules:
   GC pass 4, and the next idle's lineage gate would see a corpse rooted on the new base
   against the old tag and discard live post-drift work as `skipped_stale`) — a
   model-visible `sandbox_fs_reset {reason: "environment_image_changed"}` lifecycle event
-  is appended, and the session cold-starts on the new image. (Content changes under the *same* ref — base rebuilds, `:stable`
-  promotes — do not trigger this; parked chains keep their pinned base until the session is
-  reset or archived.) Keep-the-FS-instead is a defensible alternative semantic; the event is the
+  is appended, and the session cold-starts on the new image. Content changes under the *same* ref — base rebuilds, `:stable`
+  promotes — are detected too (#390): a registry-ref cold start (after `--pull` resolves the
+  tag) stamps the resolved image ID into `aios.base_image_id`, and resume re-resolves the
+  ref; a differing ID discards the snapshot identically but with
+  `reason: "base_image_updated"`. An **absent** `aios.base_image_id` label (every pre-#390
+  snapshot) or an unresolvable ID (registry outage) is treated as no drift and resumes. Keep-the-FS-instead is a defensible alternative semantic; the event is the
   non-negotiable part — sign-off item §11.
 - **First-commit crash heal**: the salvage preamble (§5.4), already under the per-session
   lock, also reconciles the pointer against local truth — a crash after the first-ever
