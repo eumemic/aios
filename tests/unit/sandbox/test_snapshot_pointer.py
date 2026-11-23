@@ -305,6 +305,56 @@ async def test_resolve_legacy_snapshot_without_base_id_resumes(
 
 
 @pytest.mark.asyncio
+async def test_resolve_unresolvable_base_id_resumes(
+    harness: tuple[SandboxRegistry, FakeBackend, list[Any]],
+) -> None:
+    """#390: a registry outage while resolving the base ID must not discard
+    the durable filesystem or block resume — unknown is treated as no drift."""
+    registry, backend, timeline = harness
+    from aios.sandbox.backends.base import (
+        BASE_IMAGE_ID_LABEL_KEY,
+        BASE_IMAGE_LABEL_KEY,
+        ENV_KEYS_LABEL_KEY,
+        VAULT_PLACEHOLDER_KEYS_LABEL_KEY,
+        Mount,
+        SandboxBackendError,
+        SandboxSpec,
+    )
+
+    ref = "aios-sbx-default-sess_x:latest"
+    base = "ghcr.io/eumemic/aios-sandbox:stable"
+    backend.image_labels_by_ref[ref] = {
+        BASE_IMAGE_LABEL_KEY: base,
+        BASE_IMAGE_ID_LABEL_KEY: "sha256:old",
+        ENV_KEYS_LABEL_KEY: "",
+        VAULT_PLACEHOLDER_KEYS_LABEL_KEY: "",
+    }
+
+    async def _boom(image: str) -> str:
+        raise SandboxBackendError(f"docker pull failed for {image}: registry down")
+
+    backend.image_id = _boom  # type: ignore[method-assign]
+    spec = SandboxSpec(
+        session_id="sess_x",
+        instance_id="default",
+        workspace=Mount(host_path=cast(Any, "/tmp/w"), sandbox_path="/workspace"),
+        extra_mounts=(),
+        environment={},
+        labels={},
+        network_policy=UnrestrictedNetworking(),
+        host_gateway_alias=None,
+        image=base,
+        snapshot_image=ref,
+    )
+
+    resolved = await registry._resolve_snapshot("sess_x", spec)
+
+    assert resolved.snapshot_image == ref
+    assert ref not in backend.removed_image_refs
+    assert not any(item[0] == "fs_event" for item in timeline)
+
+
+@pytest.mark.asyncio
 async def test_resolve_snapshot_missing_resets(
     harness: tuple[SandboxRegistry, FakeBackend, list[Any]],
 ) -> None:
