@@ -41,10 +41,18 @@ freezes a stale priority at insert (F1) and races the count against the enqueue
   The check runs only when a free slot is being withheld for unconfirmed
   waiters, and a confirmed-live waiter is not re-checked for another window, so
   the query rate stays bounded.
-* Priority tiering is untouched: the gate never edits procrastinate
-  ``priority``. A re-defer goes through ``defer_wake``, which re-derives the
-  foreground/background tier from lineage, so a foreground wake stays
-  foreground and fairness never demotes a human's message across tiers.
+* **The FIFO is tier-aware** (#2593 F1). Procrastinate fetches ``(priority
+  DESC, id ASC)``, and ``defer_wake`` puts a workflow fan-out's wakes in the
+  background tier (``-10``) under a user's foreground wakes (``0``). The gate
+  orders waiters the same way: a wake's place in line is behind every waiter of
+  a HIGHER tier and behind OLDER waiters of its OWN tier only. Lower-tier
+  waiters never hold a free slot away from a higher-tier wake, so a single
+  account's background fan-out cannot delay that account's own foreground
+  message. FIFO no-starvation still holds within each tier. A lower tier can
+  wait behind a continuous higher tier, which is the policy procrastinate's
+  fetch already applies on master. The gate never edits procrastinate
+  ``priority``: a re-defer goes through ``defer_wake``, which re-derives the
+  tier from lineage, so fairness never moves a wake to another tier.
 
 Locus of the meter (process-local vs Postgres): the gate is process-local. That
 is exact under the ratified deployment shape — one worker per database
@@ -67,13 +75,24 @@ from collections import OrderedDict
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 
+#: procrastinate's default job priority, which ``defer_wake`` uses for foreground.
+DEFAULT_PRIORITY = 0
+
+
+@dataclass
+class _Waiter:
+    # Last-CONFIRMED-live monotonic time (re-arrival or durable check). Never an
+    # expiry deadline.
+    seen: float
+    # Procrastinate priority tier of the waiter's latest wake (higher runs first).
+    priority: int
+
 
 @dataclass
 class _AccountState:
     active: int = 0
-    # session_id -> last-CONFIRMED-live monotonic time (re-arrival or durable
-    # check), insertion-ordered by FIRST refusal. Never an expiry deadline.
-    waiters: OrderedDict[str, float] = field(default_factory=OrderedDict)
+    # session_id -> waiter, insertion-ordered by FIRST refusal (FIFO within a tier).
+    waiters: OrderedDict[str, _Waiter] = field(default_factory=OrderedDict)
 
 
 class AccountStepGate:
@@ -93,27 +112,70 @@ class AccountStepGate:
         self._clock = clock
         self._accounts: dict[str, _AccountState] = {}
 
-    def try_admit(self, account_id: str, session_id: str) -> bool:
+    def known_priority(self, account_id: str, session_id: str) -> int | None:
+        """The tier recorded for ``session_id`` as a waiter, or ``None``.
+
+        A waiter's tier is the priority of the wake job its last refusal
+        enqueued (see :meth:`set_waiter_priority`), i.e. exactly the tier
+        procrastinate fetched the re-deferred job at."""
+        state = self._accounts.get(account_id)
+        waiter = state.waiters.get(session_id) if state is not None else None
+        return waiter.priority if waiter is not None else None
+
+    def needs_priority(self, account_id: str, session_id: str) -> bool:
+        """``True`` when admitting ``session_id`` depends on a tier the gate does
+        not know yet: the account has free capacity, there are waiters to order
+        against, and ``session_id`` is not one of them. Elsewhere the caller can
+        skip the lookup: with no waiters the wake is admitted whatever its tier;
+        at the cap it is refused whatever its tier, and the refusal records the
+        tier the re-deferred job was really enqueued at
+        (:meth:`set_waiter_priority`); a known waiter's tier is already recorded.
+        """
+        state = self._accounts.get(account_id)
+        if state is None or not state.waiters or session_id in state.waiters:
+            return False
+        return state.active < self.max_per_account
+
+    def set_waiter_priority(self, account_id: str, session_id: str, priority: int) -> None:
+        """Record the tier a refused wake was actually re-enqueued at."""
+        state = self._accounts.get(account_id)
+        waiter = state.waiters.get(session_id) if state is not None else None
+        if waiter is not None:
+            waiter.priority = priority
+
+    def try_admit(
+        self, account_id: str, session_id: str, *, priority: int = DEFAULT_PRIORITY
+    ) -> bool:
         """Admit ``session_id`` to run a step now, or record it as a waiter.
 
-        Returns ``True`` when a slot was taken — the caller MUST call
+        ``priority`` is the wake's procrastinate priority tier (higher runs
+        first). Returns ``True`` when a slot was taken — the caller MUST call
         :meth:`release` exactly once when the step finishes (on every path).
         Returns ``False`` when the account is at its cap or the free slots are
-        reserved for longer-waiting sessions of the same account.
+        reserved for sessions ahead of this one: higher-tier waiters, or older
+        waiters of the same tier. Lower-tier waiters never reserve a slot
+        against it.
         """
         now = self._clock()
         state = self._accounts.setdefault(account_id, _AccountState())
         free = self.max_per_account - state.active
-        if free > 0 and self._ahead(state, session_id) < free:
+        if free > 0 and len(self._ahead(state, session_id, priority)) < free:
             state.waiters.pop(session_id, None)
             state.active += 1
             return True
-        # Refused: keep (or take) a place in line; refresh liveness only. The
-        # place itself is never lost to elapsed time (see module docstring).
-        state.waiters[session_id] = now
+        # Refused: keep (or take) a place in line; refresh liveness and tier. The
+        # FIFO position is never lost to elapsed time (see module docstring).
+        waiter = state.waiters.get(session_id)
+        if waiter is None:
+            state.waiters[session_id] = _Waiter(seen=now, priority=priority)
+        else:
+            waiter.seen = now
+            waiter.priority = priority
         return False
 
-    def unconfirmed_waiters_ahead(self, account_id: str, session_id: str) -> list[str]:
+    def unconfirmed_waiters_ahead(
+        self, account_id: str, session_id: str, *, priority: int = DEFAULT_PRIORITY
+    ) -> list[str]:
         """Waiters holding a free slot away from ``session_id`` whose liveness has
         not been confirmed within ``stale_after_seconds``.
 
@@ -129,13 +191,11 @@ class AccountStepGate:
         if free <= 0:
             return []
         now = self._clock()
-        out: list[str] = []
-        for sid, seen in state.waiters.items():
-            if sid == session_id:
-                break
-            if now - seen > self.stale_after_seconds:
-                out.append(sid)
-        return out
+        return [
+            sid
+            for sid in self._ahead(state, session_id, priority)
+            if now - state.waiters[sid].seen > self.stale_after_seconds
+        ]
 
     def reconcile_waiters(
         self, account_id: str, *, checked: Iterable[str], live: Iterable[str]
@@ -151,7 +211,7 @@ class AccountStepGate:
             if sid not in state.waiters:
                 continue
             if sid in live_set:
-                state.waiters[sid] = now
+                state.waiters[sid].seen = now
             else:
                 del state.waiters[sid]
         self._maybe_forget(account_id, state)
@@ -175,10 +235,20 @@ class AccountStepGate:
         return len(self._accounts)
 
     @staticmethod
-    def _ahead(state: _AccountState, session_id: str) -> int:
-        if session_id in state.waiters:
-            return list(state.waiters).index(session_id)
-        return len(state.waiters)
+    def _ahead(state: _AccountState, session_id: str, priority: int) -> list[str]:
+        """Waiters that procrastinate's ``(priority DESC, id ASC)`` order would run
+        before a wake of ``session_id`` at ``priority``: every waiter of a higher
+        tier, plus same-tier waiters that started waiting earlier. A newcomer is
+        behind every same-tier waiter."""
+        out: list[str] = []
+        before_self = True
+        for sid, waiter in state.waiters.items():
+            if sid == session_id:
+                before_self = False
+                continue
+            if waiter.priority > priority or (waiter.priority == priority and before_self):
+                out.append(sid)
+        return out
 
     def _maybe_forget(self, account_id: str, state: _AccountState) -> None:
         if state.active == 0 and not state.waiters:

@@ -373,6 +373,7 @@ def _patched_step(append_event: AsyncMock, defer_wake: AsyncMock, body: Any) -> 
         mock.patch("aios.services.sessions.append_event", new=append_event),
         mock.patch("aios.harness.loop.defer_wake", new=defer_wake),
         mock.patch.object(runtime, "require_inflight_tool_registry", return_value=MagicMock()),
+        mock.patch("aios.harness.loop.wake_priority", new=AsyncMock(return_value=0)),
     )
 
 
@@ -387,7 +388,7 @@ async def test_refused_wake_redefers_without_step_start(_gate: AccountStepGate) 
     prev = runtime.pool
     runtime.pool = pool
     try:
-        with patches[0], patches[1], patches[2], patches[3], patches[4]:
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
             await run_session_step("ses_1", cause="message")
     finally:
         runtime.pool = prev
@@ -425,6 +426,7 @@ async def test_admitted_step_releases_slot_even_on_error(_gate: AccountStepGate)
             patches[2],
             patches[3],
             patches[4],
+            patches[5],
             mock.patch(
                 "aios.harness.loop._apply_retry_or_failure", new=AsyncMock(return_value=None)
             ),
@@ -469,6 +471,7 @@ async def test_stale_waiter_checked_durably_before_withholding_slot(
                 patches[2],
                 patches[3],
                 patches[4],
+                patches[5],
                 mock.patch("aios.services.sessions.sessions_with_pending_wake", new=check),
                 mock.patch(
                     "aios.harness.loop._apply_retry_or_failure", new=AsyncMock(return_value=None)

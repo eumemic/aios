@@ -17,8 +17,13 @@
   `AIOS_WORKER_CONCURRENCY`, and a value at or above `AIOS_WORKER_CONCURRENCY`
   is rejected at startup. The gate is process-local, which is exact under the
   current one-worker-per-database deployment. If N workers ever share one
-  database, the cap becomes N times larger. Priority tiers are not changed, and
-  no schema migration is needed.
+  database, the cap becomes N times larger. The waiting line follows
+  procrastinate's priority tiers. A waiting background wake (for example a
+  workflow fan-out child) never holds a free slot away from a foreground wake of
+  the same account. FIFO order applies within each tier. The gate never changes
+  a job's priority. A wake that the gate refuses runs no step, so it does not
+  count as completed throughput for the stalled-worker dead-man. No schema
+  migration is needed.
 
 - Channel sessions no longer stamp their own text (#2092). The harness used to
   prefix every assistant text on a channel-bound session with
