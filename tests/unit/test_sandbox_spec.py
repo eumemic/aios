@@ -228,5 +228,6 @@ async def test_materialize_memory_mounts_emits_one_restored_event(
     assert result == echoes
     assert append.await_count == expected_events
     if expected_events:
+        assert append.await_args is not None
         data = append.await_args.args[3]
         assert data == {"event": "memory_mount_restored", "store_ids": list(restored)}

@@ -1426,7 +1426,7 @@ class TestScanTimeout:
             with (
                 patch.object(mod, "_scan_after", slow_scan),
                 patch.object(mod, "MEMORY_RECONCILE_SCAN_TIMEOUT_SECONDS", 0.05),
-                patch.object(mod.memory_service, "create_memory", create),
+                patch("aios.tools.bash_memory_reconcile.memory_service.create_memory", create),
             ):
                 warnings = await mod.reconcile_memory_mounts(SESSION_ID, {}, 0)
         finally:

@@ -391,7 +391,9 @@ class TestReconcileNonLethal:
                 patch.object(mod, "_scan_after", hung_scan),
                 patch.object(mod, "MEMORY_RECONCILE_SCAN_TIMEOUT_SECONDS", 0.05),
             ):
-                out = await bash_handler("sess_01TEST", {"command": "long-job", "timeout_seconds": 7})
+                out = await bash_handler(
+                    "sess_01TEST", {"command": "long-job", "timeout_seconds": 7}
+                )
         finally:
             release.set()
             runtime.clear_session_memory_mounts("sess_01TEST")
