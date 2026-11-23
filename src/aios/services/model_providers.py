@@ -170,6 +170,67 @@ def _derive_provider(model: str, custom_llm_provider: str | None) -> str | None:
     return str(provider)
 
 
+def apply_model_route(model: str, routes: dict[str, str] | None) -> str:
+    """Pin an ambiguous BARE model to its provider row's canonical route (#2013).
+
+    A fully-qualified string (contains ``/``) is an explicit route choice and is
+    always honoured unchanged; only a bare alias the row maps is rewritten.
+    """
+    if "/" in model:
+        return model
+    return (routes or {}).get(model, model)
+
+
+def noncanonical_route(model: str, routes: dict[str, str] | None) -> str | None:
+    """The canonical route when ``model`` targets a KNOWN routed model on a
+    different wire path than the provider row pins; ``None`` otherwise.
+
+    "Known" means the model's final segment is a ``model_routes`` alias. The
+    bare alias itself never qualifies (``apply_model_route`` rewrites it first);
+    this catches an explicit non-canonical choice such as ``openai/gpt-5.6-sol``
+    when the row pins ``gpt-5.6-sol`` → ``openai/responses/gpt-5.6-sol``.
+    """
+    canonical = (routes or {}).get(model.rsplit("/", 1)[-1])
+    if canonical is None or apply_model_route(model, routes) == canonical:
+        return None
+    return canonical
+
+
+def has_tool_role_images(messages: list[dict[str, Any]]) -> bool:
+    """Whether any ``tool``-role message carries an image content part.
+
+    The gateway's chat-compat translator stringifies tool-role images into the
+    tool-output text, so the base64 is billed as text (~2-3M tokens for one
+    screenshot) — the measured #2013 blowup. User/assistant images price fine.
+    """
+    for msg in messages:
+        if msg.get("role") != "tool":
+            continue
+        content = msg.get("content")
+        if isinstance(content, list) and any(
+            isinstance(part, dict) and part.get("type") in ("image_url", "image")
+            for part in content
+        ):
+            return True
+    return False
+
+
+def route_image_config_error(
+    model: str, routes: dict[str, str] | None, messages: list[dict[str, Any]]
+) -> str | None:
+    """A deterministic config-error message for an image-bearing tool result
+    sent down a non-canonical route of a known routed model; else ``None``."""
+    canonical = noncanonical_route(model, routes)
+    if canonical is None or not has_tool_role_images(messages):
+        return None
+    return (
+        f"model {model!r} is a non-canonical route for a model the provider config "
+        f"pins to {canonical!r}; this route mis-prices images in tool results "
+        f"(base64 billed as text) and would overflow the context window. "
+        f"Set the agent's model to {canonical!r} (or the bare alias)."
+    )
+
+
 async def resolve_model_route(
     pool: asyncpg.Pool[Any],
     *,
@@ -195,7 +256,7 @@ async def resolve_model_route(
         )
     if resolved is None:
         return model
-    return (resolved.model_routes or {}).get(model, model)
+    return apply_model_route(model, resolved.model_routes)
 
 
 async def _resolve_provider_auth(

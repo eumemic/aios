@@ -1671,8 +1671,13 @@ async def _run_session_step_body(
             ),
             has_subscriber(pool, session_id),
         )
-        if auth is not None and "/" not in agent.model:
-            routed_model = auth.model_routes.get(agent.model, agent.model)
+        # #2013: the provider row owns the wire route. A bare alias (legacy
+        # versions written before normalization) is pinned to its canonical
+        # route here, at call time; an explicit qualified string is honoured.
+        if auth is not None:
+            routed_model = model_providers_service.apply_model_route(
+                agent.model, auth.model_routes
+            )
         if conflict is not None:
             await _handle_provider_configuration_error(
                 pool,
@@ -1691,6 +1696,22 @@ async def _run_session_step_body(
                 session_id,
                 error_kind="model_provider_not_configured",
                 message=model_providers_service.PROVIDER_NOT_CONFIGURED_MESSAGE,
+                account_id=account_id,
+            )
+            return _StepResult()
+        route_error = (
+            model_providers_service.route_image_config_error(
+                routed_model, auth.model_routes, messages
+            )
+            if auth is not None
+            else None
+        )
+        if route_error is not None:
+            await _handle_provider_configuration_error(
+                pool,
+                session_id,
+                error_kind="model_route_config_error",
+                message=route_error,
                 account_id=account_id,
             )
             return _StepResult()

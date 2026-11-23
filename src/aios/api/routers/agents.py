@@ -13,15 +13,34 @@ from aios.services.litellm_params import unsupported_openai_params
 
 router = APIRouter(prefix="/v1/agents", tags=["agents"])
 
+MODEL_ROUTE_HEADER = "X-Aios-Model-Normalized"
+
+
+def _note_model_normalization(response: Response, requested: str | None, stored: str) -> None:
+    """Make a route normalization VISIBLE (#2013): the stored ``model`` differs
+    from what the caller typed because the provider config pins the bare alias
+    to its canonical route. Never a silent mutation."""
+    if requested is None or requested == stored:
+        return
+    response.headers[MODEL_ROUTE_HEADER] = f"{requested} -> {stored}"
+    note = (
+        f'299 aios "model {requested!r} normalized to canonical route {stored!r} '
+        f'by the provider config"'
+    )
+    existing = response.headers.get("Warning")
+    response.headers["Warning"] = f"{existing}, {note}" if existing else note
+
 
 @router.post("", operation_id="create_agent", status_code=status.HTTP_201_CREATED)
-async def create(body: AgentCreate, pool: PoolDep, account_id: AccountIdDep) -> Agent:
+async def create(
+    body: AgentCreate, pool: PoolDep, account_id: AccountIdDep, response: Response
+) -> Agent:
     """Create a new agent at version 1.
 
     Subsequent updates produce new immutable versions in the history; see
     ``update_agent`` and ``list_agent_versions``.
     """
-    return await service.create_agent(
+    agent = await service.create_agent(
         pool,
         name=body.name,
         model=body.model,
@@ -40,6 +59,8 @@ async def create(body: AgentCreate, pool: PoolDep, account_id: AccountIdDep) -> 
         output_style=body.output_style,
         account_id=account_id,
     )
+    _note_model_normalization(response, body.model, agent.model)
+    return agent
 
 
 @router.get("", operation_id="list_agents")
@@ -103,7 +124,7 @@ async def update(
             + ", ".join(unsupported)
             + '; worker will pass them to the provider"'
         )
-    return await service.update_agent(
+    agent = await service.update_agent(
         pool,
         agent_id,
         expected_version=body.version,
@@ -124,6 +145,8 @@ async def update(
         output_style=body.output_style,
         account_id=account_id,
     )
+    _note_model_normalization(response, body.model, agent.model)
+    return agent
 
 
 @router.delete("/{agent_id}", operation_id="archive_agent", status_code=status.HTTP_204_NO_CONTENT)

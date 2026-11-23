@@ -29,6 +29,27 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 from aios.models.attenuation import api_base_of
 
 
+def validate_model_routes(routes: dict[str, str]) -> dict[str, str]:
+    """Each key is an ambiguous BARE model name (no ``/``); each value is the
+    explicit, fully-qualified LiteLLM route (contains ``/``) it pins to (#2013).
+
+    A bare value would itself be ambiguous (re-resolvable through another
+    alias), and a qualified key would rewrite an explicit route choice — which
+    the routing contract promises is always honoured as-is.
+    """
+    out: dict[str, str] = {}
+    for alias, route in routes.items():
+        alias, route = alias.strip(), route.strip()
+        if not alias or "/" in alias:
+            raise ValueError(f"model_routes key {alias!r} must be a bare model name (no '/')")
+        if not route or "/" not in route:
+            raise ValueError(
+                f"model_routes[{alias!r}] = {route!r} must be a fully-qualified route (contain '/')"
+            )
+        out[alias] = route
+    return out
+
+
 class ModelProviderCreate(BaseModel):
     """Request body for ``POST /v1/model-providers``.
 
@@ -55,6 +76,11 @@ class ModelProviderCreate(BaseModel):
     def _normalize_provider(cls, v: str) -> str:
         return v.strip().lower()
 
+    @field_validator("model_routes")
+    @classmethod
+    def _check_routes(cls, v: dict[str, str]) -> dict[str, str]:
+        return validate_model_routes(v)
+
 
 class ModelProviderUpdate(BaseModel):
     """Request body for ``PUT /v1/model-providers/{id}``.
@@ -70,7 +96,18 @@ class ModelProviderUpdate(BaseModel):
 
     api_key: SecretStr | None = Field(default=None, min_length=1)
     api_base: str | None = None
-    model_routes: dict[str, str] = Field(default_factory=dict)
+    model_routes: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Bare model aliases mapped to canonical, fully-qualified LiteLLM routes. "
+            "Omitted → keep; supplied → replace the whole map."
+        ),
+    )
+
+    @field_validator("model_routes")
+    @classmethod
+    def _check_routes(cls, v: dict[str, str]) -> dict[str, str]:
+        return validate_model_routes(v)
 
 
 class ModelProvider(BaseModel):

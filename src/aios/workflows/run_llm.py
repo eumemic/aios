@@ -296,10 +296,16 @@ async def invoke_call_llm(*, run: WfRun, spec: dict[str, Any]) -> tuple[dict[str
         return {
             "error": f"call_llm provider-auth resolution failed: {type(exc).__name__}: {exc}"
         }, 0
-    if auth is not None and "/" not in model:
-        model = auth.model_routes.get(model, model)
+    if auth is not None:
+        model = model_providers_service.apply_model_route(model, auth.model_routes)
     if conflict is not None:
         return {"error": f"call_llm refused: {conflict}"}, 0
+    if auth is not None and (
+        route_error := model_providers_service.route_image_config_error(
+            model, auth.model_routes, messages
+        )
+    ):
+        return {"error": f"call_llm refused: {route_error}"}, 0
     if auth is None and (
         get_settings().inference_credential_policy == "account_only"
         or get_settings().tenancy_posture == "external_byok"
