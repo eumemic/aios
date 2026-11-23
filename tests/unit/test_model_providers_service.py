@@ -431,6 +431,72 @@ async def test_resolve_model_route_honors_explicit_route() -> None:
     conn.fetchval.assert_not_called()
 
 
+def test_apply_model_route_only_rewrites_bare_aliases() -> None:
+    routes = {"gpt-5.6-sol": "openai/responses/gpt-5.6-sol"}
+    assert service.apply_model_route("gpt-5.6-sol", routes) == "openai/responses/gpt-5.6-sol"
+    assert service.apply_model_route("openai/gpt-5.6-sol", routes) == "openai/gpt-5.6-sol"
+    assert service.apply_model_route("gpt-4o", routes) == "gpt-4o"
+    assert service.apply_model_route("gpt-5.6-sol", None) == "gpt-5.6-sol"
+
+
+def test_noncanonical_route_detects_explicit_off_route_choice() -> None:
+    routes = {"gpt-5.6-sol": "openai/responses/gpt-5.6-sol"}
+    assert service.noncanonical_route("openai/gpt-5.6-sol", routes) == (
+        "openai/responses/gpt-5.6-sol"
+    )
+    assert service.noncanonical_route("gpt-5.6-sol", routes) is None
+    assert service.noncanonical_route("openai/responses/gpt-5.6-sol", routes) is None
+    assert service.noncanonical_route("openai/gpt-4o", routes) is None
+
+
+def test_route_image_config_error_only_for_tool_role_images() -> None:
+    routes = {"gpt-5.6-sol": "openai/responses/gpt-5.6-sol"}
+    image = {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA"}}
+    user_img = [{"role": "user", "content": [image]}]
+    tool_img = [{"role": "tool", "tool_call_id": "c", "content": [image]}]
+    # user-role images price correctly on the plain path — not an error
+    assert service.route_image_config_error("openai/gpt-5.6-sol", routes, user_img) is None
+    err = service.route_image_config_error("openai/gpt-5.6-sol", routes, tool_img)
+    assert err is not None and "openai/responses/gpt-5.6-sol" in err
+    assert service.route_image_config_error("openai/responses/gpt-5.6-sol", routes, tool_img) is None
+
+
+def test_model_routes_validation_rejects_ambiguous_entries() -> None:
+    from pydantic import ValidationError
+
+    from aios.models.model_providers import ModelProviderCreate, ModelProviderUpdate
+
+    ok = ModelProviderCreate(
+        provider="openai",
+        api_key="sk",
+        model_routes={"gpt-5.6-sol": "openai/responses/gpt-5.6-sol"},
+    )
+    assert ok.model_routes == {"gpt-5.6-sol": "openai/responses/gpt-5.6-sol"}
+    with pytest.raises(ValidationError):
+        ModelProviderUpdate(model_routes={"gpt-5.6-sol": "gpt-5.6-sol"})
+    with pytest.raises(ValidationError):
+        ModelProviderUpdate(model_routes={"openai/gpt-5.6-sol": "openai/responses/gpt-5.6-sol"})
+
+
+async def test_update_model_provider_forwards_model_routes(crypto_box: CryptoBox) -> None:
+    conn = MagicMock()
+    pool = fake_pool_yielding_conn(conn)
+    routes = {"gpt-5.6-sol": "openai/responses/gpt-5.6-sol"}
+    with patch(
+        "aios.services.model_providers.queries.update_model_provider", AsyncMock()
+    ) as upd:
+        await service.update_model_provider(
+            pool,
+            crypto_box,
+            "mp_1",
+            account_id="acc_x",
+            api_key=None,
+            model_routes=routes,
+        )
+    assert upd.await_args is not None
+    assert upd.await_args.kwargs["model_routes"] == routes
+
+
 # ─── resolve_provider_auth ─────────────────────────────────────────────────────
 
 

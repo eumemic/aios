@@ -61,3 +61,37 @@ async def test_update_warns_when_local_map_would_reject_param(monkeypatch: Any) 
     assert result == updated
     assert "reasoning_effort" in response.headers["Warning"]
     assert "pass them to the provider" in response.headers["Warning"]
+
+
+async def test_update_normalization_is_visible_in_response(monkeypatch: Any) -> None:
+    # #2013: the stored model differs from what the caller typed — the response
+    # must say so rather than mutate silently.
+    current = _agent()
+    updated = _agent(version=2, model="openai/responses/gpt-5.6-sol")
+    monkeypatch.setattr(agents_service, "get_agent", AsyncMock(return_value=current))
+    monkeypatch.setattr(agents_service, "update_agent", AsyncMock(return_value=updated))
+    response = Response()
+
+    result = await router.update(
+        "agt_1", AgentUpdate(version=1, model="gpt-5.6-sol"), object(), "acc_1", response
+    )
+
+    assert result.model == "openai/responses/gpt-5.6-sol"
+    assert response.headers[router.MODEL_ROUTE_HEADER] == (
+        "gpt-5.6-sol -> openai/responses/gpt-5.6-sol"
+    )
+    assert "normalized to canonical route" in response.headers["Warning"]
+
+
+async def test_update_without_normalization_sets_no_route_header(monkeypatch: Any) -> None:
+    current = _agent()
+    updated = _agent(version=2, model="openai/gpt-4o")
+    monkeypatch.setattr(agents_service, "get_agent", AsyncMock(return_value=current))
+    monkeypatch.setattr(agents_service, "update_agent", AsyncMock(return_value=updated))
+    response = Response()
+
+    await router.update(
+        "agt_1", AgentUpdate(version=1, model="openai/gpt-4o"), object(), "acc_1", response
+    )
+
+    assert router.MODEL_ROUTE_HEADER not in response.headers

@@ -57,7 +57,12 @@ _STEP_CTX = SimpleNamespace(
 
 
 def _enter_base_patches(
-    stack: ExitStack, *, resolved: ProviderAuth | None, conflict: str | None
+    stack: ExitStack,
+    *,
+    resolved: ProviderAuth | None,
+    conflict: str | None,
+    agent: SimpleNamespace = _AGENT,
+    step_ctx: SimpleNamespace = _STEP_CTX,
 ) -> None:
     """Everything needed to drive `_run_session_step_body` past the spend gate
     and context build, up to (and including) the provider-auth guard.
@@ -65,7 +70,7 @@ def _enter_base_patches(
     for target, mock in [
         ("aios.harness.loop.find_sessions_needing_inference", AsyncMock(return_value={"sess_x"})),
         ("aios.harness.loop.sessions_service.get_session_basic", AsyncMock(return_value=_SESSION)),
-        ("aios.harness.loop.agents_service.load_for_session", AsyncMock(return_value=_AGENT)),
+        ("aios.harness.loop.agents_service.load_for_session", AsyncMock(return_value=agent)),
         ("aios.services.channels.list_session_channels", AsyncMock(return_value=[])),
         ("aios.harness.loop.refresh_session_mount_state", AsyncMock(return_value=[])),
         (
@@ -77,7 +82,7 @@ def _enter_base_patches(
             AsyncMock(return_value=WindowedEvents(events=[], omission=None)),
         ),
         ("aios.harness.loop._dispatch_confirmed_tools", AsyncMock(return_value=[])),
-        ("aios.harness.loop.compose_step_context", AsyncMock(return_value=_STEP_CTX)),
+        ("aios.harness.loop.compose_step_context", AsyncMock(return_value=step_ctx)),
         (
             "aios.harness.loop.model_providers_service.resolve_provider_auth_or_conflict",
             AsyncMock(return_value=(resolved, conflict)),
@@ -200,3 +205,95 @@ async def test_clean_path_forwards_resolved_auth_to_call_litellm() -> None:
 
     assert call_litellm.await_args is not None
     assert call_litellm.await_args.kwargs["auth"] is auth
+
+
+# ─── #2013: provider-row route pinning at call time ────────────────────────────
+
+_ROUTES = {"gpt-5.6-sol": "openai/responses/gpt-5.6-sol"}
+
+
+class _StopAtModelCall(BaseException):
+    """Escapes the loop's ``except Exception`` handlers so the test halts at the call."""
+
+
+def _routed_agent(model: str) -> SimpleNamespace:
+    return SimpleNamespace(**{**vars(_AGENT), "model": model, "litellm_extra": {}})
+
+
+async def _drive_to_model_call(
+    agent: SimpleNamespace, step_ctx: SimpleNamespace = _STEP_CTX
+) -> tuple[AsyncMock, AsyncMock, AsyncMock]:
+    pool = MagicMock()
+    inflight_tool_registry = MagicMock()
+    inflight_tool_registry.in_flight_tool_call_ids.return_value = set()
+    auth = ProviderAuth(
+        api_key="sk", api_base=None, owner_account_id="acc_x", model_routes=_ROUTES
+    )
+    append_event = AsyncMock(return_value=SimpleNamespace(id="ev"))
+    with ExitStack() as stack:
+        _enter_base_patches(stack, resolved=auth, conflict=None, agent=agent, step_ctx=step_ctx)
+        stack.enter_context(patch("aios.harness.loop.sessions_service.append_event", append_event))
+        stack.enter_context(
+            patch("aios.harness.loop.has_subscriber", AsyncMock(return_value=False))
+        )
+        fail_open = stack.enter_context(
+            patch("aios.harness.loop.fail_all_open_requests", AsyncMock())
+        )
+        stack.enter_context(
+            patch("aios.harness.loop.sessions_service.set_session_stop_reason", AsyncMock())
+        )
+        call_litellm = stack.enter_context(
+            patch(
+                "aios.harness.loop.call_litellm",
+                AsyncMock(side_effect=_StopAtModelCall()),
+            )
+        )
+        try:
+            await _run_session_step_body(
+                pool, inflight_tool_registry, "sess_x", cause="message", account_id="acc_x"
+            )
+        except _StopAtModelCall:
+            pass
+    return call_litellm, fail_open, append_event
+
+
+async def test_bare_alias_is_pinned_to_canonical_route_at_call_time() -> None:
+    call_litellm, _, _ = await _drive_to_model_call(_routed_agent("gpt-5.6-sol"))
+    assert call_litellm.await_args is not None
+    assert call_litellm.await_args.kwargs["model"] == "openai/responses/gpt-5.6-sol"
+
+
+async def test_explicit_qualified_route_is_honoured_as_is() -> None:
+    call_litellm, _, _ = await _drive_to_model_call(_routed_agent("openai/gpt-5.6-sol"))
+    assert call_litellm.await_args is not None
+    assert call_litellm.await_args.kwargs["model"] == "openai/gpt-5.6-sol"
+
+
+async def test_tool_image_on_noncanonical_route_is_a_config_error() -> None:
+    step_ctx = SimpleNamespace(
+        **{
+            **vars(_STEP_CTX),
+            "messages": [
+                {"role": "user", "content": "look"},
+                {
+                    "role": "tool",
+                    "tool_call_id": "c1",
+                    "content": [
+                        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA"}}
+                    ],
+                },
+            ],
+        }
+    )
+    call_litellm, fail_open, append_event = await _drive_to_model_call(
+        _routed_agent("openai/gpt-5.6-sol"), step_ctx
+    )
+    call_litellm.assert_not_awaited()
+    fail_open.assert_awaited_once_with(
+        ANY, "sess_x", account_id="acc_x", error={"kind": "model_route_config_error"}
+    )
+    assert any(
+        c.args[3].get("event") == "model_route_config_error"
+        for c in append_event.call_args_list
+        if c.args[2] == "span"
+    )
