@@ -5,13 +5,17 @@ from __future__ import annotations
 from unittest import mock
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+
 from aios.harness import runtime
 from aios.harness.account_fairness import AccountStepGate
 from aios.harness.throughput import WAKE_COMPLETIONS
 from tests.unit.conftest import fake_pool_yielding_conn
 
 
-async def test_bounced_wake_is_not_counted_as_completed_progress(monkeypatch) -> None:
+async def test_bounced_wake_is_not_counted_as_completed_progress(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from aios.harness.tasks import wake_session
 
     gate = AccountStepGate(1, stale_after_seconds=30)
