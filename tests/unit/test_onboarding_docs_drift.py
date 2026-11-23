@@ -65,3 +65,24 @@ def test_run_checks_matches_ci_lint_and_test_targets() -> None:
     assert "packages/aios-sdk/tests" in checks, (
         "run-checks.sh omits the packages/aios-sdk/tests suite that CI runs."
     )
+
+
+def _x5_unit_pytest_line(text: str) -> str:
+    """Return the first line invoking ``pytest tests/unit`` in *text*."""
+    for line in text.splitlines():
+        if "pytest tests/unit" in line:
+            return line.strip()
+    return ""
+
+
+def test_run_checks_pytest_workers_match_ci() -> None:
+    """WP-25 X5: run-checks.sh runs the unit suite with CI's ``-n 2``."""
+    local = _x5_unit_pytest_line(_read("scripts/run-checks.sh"))
+    ci = _x5_unit_pytest_line(_read(".github/workflows/code-validation.yml"))
+    msg = (
+        "unit pytest worker count drifted between scripts/run-checks.sh "
+        f"({local!r}) and .github/workflows/code-validation.yml ({ci!r}); "
+        "both must carry -n 2."
+    )
+    assert " -n 2" in f" {local} ", msg
+    assert " -n 2" in f" {ci} ", msg
