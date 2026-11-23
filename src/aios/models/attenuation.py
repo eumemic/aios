@@ -755,19 +755,46 @@ def surface_diff(expected: Surface, actual: Surface) -> dict[str, list[str]]:
 # endpoint is the load-bearing check.
 
 
+_ENDPOINT_KEYS = ("api_base", "base_url")
+
+
 def api_base_of(litellm_extra: dict[str, object] | None) -> str | None:
     """The effective inference endpoint a ``litellm_extra`` redirects model calls to.
 
     ``None`` means "no redirect" — the default operator-trusted endpoint for the model
     string. LiteLLM accepts both ``api_base`` and the ``base_url`` alias; either pins
-    the endpoint, so both are read here (``api_base`` wins when both are present).
+    the endpoint. Precedence matches LiteLLM's ``completion`` (the path every aios
+    model call takes): ``if base_url is not None: api_base = base_url`` — so
+    ``base_url`` wins when both are present.
+
+    Authorization decisions must NOT rely on this single value alone: other LiteLLM
+    entry points prefer ``api_base``. Use :func:`endpoints_of` to authorize every
+    endpoint key a ``litellm_extra`` carries.
     """
     if not litellm_extra:
         return None
-    raw = litellm_extra.get("api_base")
+    raw = litellm_extra.get("base_url")
     if raw is None:
-        raw = litellm_extra.get("base_url")
+        raw = litellm_extra.get("api_base")
     return raw if isinstance(raw, str) else None
+
+
+def endpoints_of(litellm_extra: dict[str, object] | None) -> frozenset[str]:
+    """Every endpoint value LiteLLM might call for this ``litellm_extra``.
+
+    Both ``api_base`` and its ``base_url`` alias, regardless of which one a given
+    LiteLLM code path prefers. An empty set means "no redirect". A non-string value
+    is kept (as its ``repr``) so a garbage alias can never hide from an identity check.
+    """
+    if not litellm_extra:
+        return frozenset()
+    out: set[str] = set()
+    for key in _ENDPOINT_KEYS:
+        raw = litellm_extra.get(key)
+        if raw is None:
+            continue
+        out.add(raw if isinstance(raw, str) else repr(raw))
+    return frozenset(out)
 
 
 def api_base_trusted(
@@ -788,3 +815,25 @@ def api_base_trusted(
     if child_api_base == launcher_api_base:
         return True
     return child_api_base is not None and child_api_base in set(allowlist)
+
+
+def http_server_dominated(declared: HttpServerSpec, holder: HttpServerSpec) -> bool:
+    """Whether ``declared`` is route-for-route within ``holder``'s grant (#1961).
+
+    :func:`surface_diff` keys http servers on identity only, which is sound where the
+    result is launcher-verbatim (the spawn edge) but not where an author's declared
+    server is *stored verbatim* (agent create/update). This is the route-aware
+    predicate: same ``(name, base_url)`` identity, the identical route sequence
+    (pattern, order, permission gate, enabled/allow_query flags — removing or
+    re-ordering a route can re-expose a broader first-match gate), and each route's
+    ``methods`` ⊆ the holder's. ``description``/``suppressed_response_status`` are
+    prose/presentation, not authority.
+    """
+    if (declared.name, declared.base_url) != (holder.name, holder.base_url):
+        return False
+    met = _meet_http_server(declared, holder)
+
+    def _authority(routes: list[HttpRouteSpec]) -> list[HttpRouteSpec]:
+        return [r.model_copy(update={"description": None}) for r in routes]
+
+    return _authority(_canon_http_server(declared).routes) == _authority(met.routes)
