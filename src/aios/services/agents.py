@@ -59,6 +59,21 @@ def _is_credential_key(key: str) -> bool:
     return lowered in _CREDENTIAL_KEYS or lowered.endswith(_CREDENTIAL_SUFFIXES)
 
 
+def _endpoint_credential_projection(
+    model: str, litellm_extra: dict[str, Any] | None
+) -> tuple[str | None, str | None, dict[str, Any]]:
+    """The authority-bearing slice of ``litellm_extra``: endpoint plus all credentials.
+
+    With no explicit ``api_base``/``base_url`` the endpoint is the provider implied by
+    the model string, so the model joins the projection in that case only — otherwise
+    a credential could be carried to a different provider by swapping the model.
+    """
+    extra = litellm_extra or {}
+    endpoint = api_base_of(extra)
+    credentials = {key: value for key, value in extra.items() if _is_credential_key(key)}
+    return (model if endpoint is None else None, endpoint, credentials)
+
+
 def _enforce_authority_delta(
     *,
     model: str,
@@ -72,18 +87,23 @@ def _enforce_authority_delta(
     if model not in {prior.model, editor.model}:
         exceeds["model"] = ["model identity"]
 
-    endpoint = api_base_of(litellm_extra)
-    if endpoint not in {api_base_of(prior.litellm_extra), api_base_of(editor.litellm_extra)}:
-        exceeds["litellm_extra"] = ["inference endpoint"]
-    credential_keys = {
-        key for key in litellm_extra.keys() | prior.litellm_extra.keys() if _is_credential_key(key)
-    }
-    if any(
-        litellm_extra.get(key) != prior.litellm_extra.get(key)
-        and litellm_extra.get(key) != editor.litellm_extra.get(key)
-        for key in credential_keys
+    # The endpoint and every credential are one atomic authority: credentials are only
+    # safe at the endpoint their holder paired them with. Checking each piece against
+    # "prior OR editor" independently would let an editor route the target's secret to
+    # the editor's endpoint, so the whole projection must match one holder.
+    projection = _endpoint_credential_projection(model, litellm_extra)
+    if not projection[2]:
+        # No credential to misroute: the endpoint alone must be one a holder uses.
+        if api_base_of(litellm_extra) not in {
+            api_base_of(prior.litellm_extra),
+            api_base_of(editor.litellm_extra),
+        }:
+            exceeds["litellm_extra"] = ["inference endpoint"]
+    elif projection not in (
+        _endpoint_credential_projection(prior.model, prior.litellm_extra),
+        _endpoint_credential_projection(editor.model, editor.litellm_extra),
     ):
-        exceeds.setdefault("litellm_extra", []).append("credential")
+        exceeds["litellm_extra"] = ["inference endpoint", "credential"]
 
     admitted_skills = _skill_authority(prior.skills) | _skill_authority(editor.skills)
     new_skills = _skill_authority(skills) - admitted_skills
