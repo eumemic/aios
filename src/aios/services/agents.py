@@ -13,6 +13,7 @@ import asyncpg
 
 from aios.db import queries
 from aios.errors import ConflictError, ForbiddenError, NotFoundError
+from aios.logging import get_logger
 from aios.models.agents import (
     Agent,
     AgentBinding,
@@ -29,11 +30,124 @@ from aios.models.agents import (
     ToolSpec,
     resolve_mcp_permission,
 )
-from aios.models.attenuation import Surface, surface_diff, surface_of
+from aios.models.attenuation import (
+    Surface,
+    api_base_of,
+    http_server_dominated,
+    surface_diff,
+    surface_of,
+)
 from aios.models.skills import AgentSkillRef
 from aios.services import skills as skills_service
 from aios.services.model_binding_authz import enforce_workflow_binding_privilege
 from aios.workflows.generic_child import GENERIC_CHILD_SYSTEM
+
+log = get_logger("aios.services.agents")
+
+
+def _skill_authority(skills: list[AgentSkillRef]) -> set[str]:
+    return {skill.skill_id for skill in skills}
+
+
+_CREDENTIAL_KEYS = {"headers", "extra_headers", "credentials", "token", "secret", "password"}
+_CREDENTIAL_SUFFIXES = ("_key", "_token", "_secret", "_password", "_credentials", "_key_id")
+
+
+def _is_credential_key(key: str) -> bool:
+    """Whether a ``litellm_extra`` key carries (or injects) a credential."""
+    lowered = key.lower()
+    return lowered in _CREDENTIAL_KEYS or lowered.endswith(_CREDENTIAL_SUFFIXES)
+
+
+def _enforce_authority_delta(
+    *,
+    model: str,
+    litellm_extra: dict[str, Any],
+    skills: list[AgentSkillRef],
+    prior: Agent,
+    editor: Agent | StepSurface,
+) -> None:
+    """Authorize non-Surface authority against prior-or-editor, never patch syntax."""
+    exceeds: dict[str, list[str]] = {}
+    if model not in {prior.model, editor.model}:
+        exceeds["model"] = ["model identity"]
+
+    endpoint = api_base_of(litellm_extra)
+    if endpoint not in {api_base_of(prior.litellm_extra), api_base_of(editor.litellm_extra)}:
+        exceeds["litellm_extra"] = ["inference endpoint"]
+    credential_keys = {
+        key for key in litellm_extra.keys() | prior.litellm_extra.keys() if _is_credential_key(key)
+    }
+    if any(
+        litellm_extra.get(key) != prior.litellm_extra.get(key)
+        and litellm_extra.get(key) != editor.litellm_extra.get(key)
+        for key in credential_keys
+    ):
+        exceeds.setdefault("litellm_extra", []).append("credential")
+
+    admitted_skills = _skill_authority(prior.skills) | _skill_authority(editor.skills)
+    new_skills = _skill_authority(skills) - admitted_skills
+    if new_skills:
+        exceeds["skills"] = sorted(new_skills)
+
+    if exceeds:
+        raise ForbiddenError(
+            "agent authority exceeds the acting agent's permissions",
+            detail={"exceeds": exceeds},
+        )
+
+
+def _field_paths(old: dict[str, Any], new: dict[str, Any], prefix: str = "") -> list[str]:
+    """Return changed paths only; values are deliberately excluded from audit output."""
+    paths: list[str] = []
+    for key in sorted(old.keys() | new.keys()):
+        path = f"{prefix}.{key}" if prefix else key
+        before = old.get(key)
+        after = new.get(key)
+        if isinstance(before, dict) and isinstance(after, dict):
+            paths.extend(_field_paths(before, after, path))
+        elif before != after:
+            paths.append(path)
+    return paths
+
+
+AUTHORITY_FIELDS = (
+    "tools",
+    "mcp_servers",
+    "http_servers",
+    "ssh_servers",
+    "model",
+    "litellm_extra",
+    "skills",
+)
+_AUDIT_EXCLUDE = {"id", "version", "created_at", "updated_at", "archived_at", "created_by"}
+
+
+def _log_agent_update(current: Agent, updated: Agent, *, editor_session_id: str | None) -> None:
+    """Emit the ``agent_updated`` audit event (#1961).
+
+    Records the actor, old/new version, and the changed field *paths* — never values,
+    so no system prompt, metadata, header, or ``litellm_extra`` credential reaches the
+    log. ``preserved_authority_fields`` lists the authority-bearing fields carried
+    forward unchanged from the prior version (preserved, not re-granted by the actor);
+    ``changed_authority_fields`` lists those the actor's own authority was checked on.
+    """
+    changed_paths = _field_paths(
+        current.model_dump(mode="json", exclude=_AUDIT_EXCLUDE),
+        updated.model_dump(mode="json", exclude=_AUDIT_EXCLUDE),
+    )
+    changed_roots = {path.split(".", 1)[0] for path in changed_paths}
+    log.info(
+        "agent_updated",
+        actor="operator" if editor_session_id is None else "session",
+        actor_session_id=editor_session_id,
+        agent_id=updated.id,
+        old_version=current.version,
+        new_version=updated.version,
+        changed_paths=changed_paths,
+        changed_authority_fields=[f for f in AUTHORITY_FIELDS if f in changed_roots],
+        preserved_authority_fields=[f for f in AUTHORITY_FIELDS if f not in changed_roots],
+    )
 
 
 async def _enforce_surface_attenuation(
@@ -46,7 +160,7 @@ async def _enforce_surface_attenuation(
     http_servers: list[HttpServerSpec],
     ssh_servers: list[SshServerSpec],
     prior_surface: Surface | None = None,
-) -> None:
+) -> StepSurface:
     """Raise ``ForbiddenError`` unless the declared agent surface is admissible against
     the acting (creator/editor) session's agent surface.
 
@@ -65,8 +179,12 @@ async def _enforce_surface_attenuation(
 
     Unlike the workflow author edge, agent ``http_servers`` are full ``HttpServerSpec``
     objects (no names-only sugar), and an agent stores its declared surface verbatim, so
-    this is a pure predicate — it raises on a breach and returns ``None``; the caller
-    stores the originally-declared surface unchanged.
+    this is a predicate — it raises on a breach and otherwise returns the editor's
+    :class:`StepSurface` (reused by the non-Surface authority-delta check); the caller
+    stores the originally-declared surface unchanged. On update, http servers are
+    additionally checked route-for-route (:func:`http_server_dominated`), because the
+    identity-only ``surface_diff`` would otherwise admit an added route or widened verb
+    on a server the editor or target already holds.
     """
     # Imported lazily to break the import cycle: ``services.sessions`` imports this
     # module at top level, and ``services.attenuation`` pulls in ``tools.registry``
@@ -93,11 +211,30 @@ async def _enforce_surface_attenuation(
             effective.ssh_servers + preserved.ssh_servers,
         )
     diff = surface_diff(expected, effective)
+    if prior_surface is not None:
+        # #1961: ``surface_diff`` keys http servers on identity only, but an agent
+        # stores its declared servers verbatim — so on update, every declared http
+        # server must also be route-for-route within the editor's or the target's
+        # prior grant (no added route, widened verb, or relaxed gate).
+        holders = {srv.base_url: srv for srv in agent.http_servers}
+        prior_holders = {srv.base_url: srv for srv in prior_surface.http_servers}
+        widened = [
+            srv.name
+            for srv in declared.http_servers
+            if not any(
+                holder is not None and http_server_dominated(srv, holder)
+                for holder in (holders.get(srv.base_url), prior_holders.get(srv.base_url))
+            )
+        ]
+        for name in widened:
+            if name not in diff.get("http_servers", []):
+                diff.setdefault("http_servers", []).append(name)
     if diff:
         raise ForbiddenError(
             "agent surface exceeds the acting agent's permissions",
             detail={"exceeds": diff},
         )
+    return agent
 
 
 async def create_agent(
@@ -253,13 +390,21 @@ async def update_agent(
     With no editor (the HTTP/operator path) anything may be updated.
     """
     if editor_session_id is not None:
-        # #1636: the model-binding privilege, keyed on the editor being a
-        # self-authoring (non-operator) principal. ``model is None`` (the field is
-        # being preserved) introduces no new binding and is a no-op; a non-None
-        # ``workflow:`` model is rejected. The operator/HTTP path skips this.
+        # #1636: reject privileged bindings before any database access.
         enforce_workflow_binding_privilege(model)
-        current = await get_agent(pool, agent_id, account_id=account_id)
-        await _enforce_surface_attenuation(
+    current = await get_agent(pool, agent_id, account_id=account_id)
+    if editor_session_id is not None:
+        # #1961: the authority delta is authorized against ``current`` as the prior
+        # version, so it must BE the version the writer will replace. A token that
+        # does not match the row we authorized against is a lost-update race; the
+        # writer's ``WHERE version = expected`` then pins the base to ``current``.
+        if current.version != expected_version:
+            raise ConflictError(
+                f"agent {agent_id} version mismatch: expected {expected_version}, "
+                f"current is {current.version}",
+                detail={"id": agent_id, "current_version": current.version},
+            )
+        editor = await _enforce_surface_attenuation(
             pool,
             account_id=account_id,
             actor_session_id=editor_session_id,
@@ -269,12 +414,19 @@ async def update_agent(
             ssh_servers=ssh_servers if ssh_servers is not None else current.ssh_servers,
             prior_surface=surface_of(current),
         )
+        _enforce_authority_delta(
+            model=model if model is not None else current.model,
+            litellm_extra=(litellm_extra if litellm_extra is not None else current.litellm_extra),
+            skills=skills if skills is not None else current.skills,
+            prior=current,
+            editor=editor,
+        )
     skills_json_str: str | None = None
     if skills is not None:
         resolved = await skills_service.resolve_skill_refs(pool, skills, account_id=account_id)
         skills_json_str = skills_service.serialize_skills_for_snapshot(skills, resolved)
     async with pool.acquire() as conn:
-        return await queries.update_agent(
+        updated = await queries.update_agent(
             conn,
             agent_id,
             expected_version=expected_version,
@@ -295,6 +447,8 @@ async def update_agent(
             output_style=output_style,
             account_id=account_id,
         )
+    _log_agent_update(current, updated, editor_session_id=editor_session_id)
+    return updated
 
 
 async def get_agent_version(

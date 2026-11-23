@@ -788,3 +788,21 @@ def api_base_trusted(
     if child_api_base == launcher_api_base:
         return True
     return child_api_base is not None and child_api_base in set(allowlist)
+
+
+def http_server_dominated(declared: HttpServerSpec, holder: HttpServerSpec) -> bool:
+    """Whether ``declared`` is route-for-route within ``holder``'s grant (#1961).
+
+    :func:`surface_diff` keys http servers on identity only, which is sound where the
+    result is launcher-verbatim (the spawn edge) but not where an author's declared
+    server is *stored verbatim* (agent create/update). This is the route-aware
+    predicate: same ``(name, base_url)`` identity, the identical route sequence
+    (pattern, order, permission gate, enabled/allow_query flags — removing or
+    re-ordering a route can re-expose a broader first-match gate), and each route's
+    ``methods`` ⊆ the holder's. ``description``/``suppressed_response_status`` are
+    prose/presentation, not authority.
+    """
+    if (declared.name, declared.base_url) != (holder.name, holder.base_url):
+        return False
+    met = _meet_http_server(declared, holder)
+    return _canon_http_server(declared).routes == met.routes

@@ -26,9 +26,9 @@ import pytest
 
 from aios.db import queries as db_queries
 from aios.db.pool import create_pool
-from aios.errors import ForbiddenError
+from aios.errors import ConflictError, ForbiddenError
 from aios.harness import runtime
-from aios.models.agents import Agent, HttpServerSpec, McpServerSpec, ToolSpec
+from aios.models.agents import Agent, HttpRouteSpec, HttpServerSpec, McpServerSpec, ToolSpec
 from aios.models.attenuation import surface_of
 from aios.services import agents as agents_service
 from aios.services import attenuation as attenuation_service
@@ -333,3 +333,65 @@ async def test_spawn_edge_reclamp_is_independent_and_unchanged(pool: asyncpg.Poo
     effective = attenuation_service.clamp(surface_of(child), run_surface)
     # `write` survives create-time (⊆ creator) but is stripped at spawn (⊄ run).
     assert {t.type for t in effective.tools} == {"read"}
+
+
+async def test_update_metadata_only_preserves_kedalion_shape_and_rejects_route_widening(
+    pool: asyncpg.Pool[Any],
+) -> None:
+    """#1961: the CEO→kedalion-ultron shape against real Postgres."""
+    ceo = await _make_agent(pool, "ceo", tools=[ToolSpec(type="read")])
+    session_id = await _make_session(pool, ceo)
+    site = HttpServerSpec(
+        name="site",
+        base_url="https://site.example.test",
+        routes=[HttpRouteSpec(path_pattern="/api/**", methods=["GET"])],
+    )
+    target = await agents_service.create_agent(
+        pool,
+        account_id=ACC,
+        name="kedalion-ultron",
+        model="test/dummy",
+        system="x",
+        tools=[ToolSpec(type="mcp_toolset", mcp_server_name="github-actions")],
+        mcp_servers=[McpServerSpec(name="github-actions", url="https://mcp.example.test")],
+        http_servers=[site],
+        description=None,
+        metadata={},
+        window_min=1000,
+        window_max=100000,
+    )
+
+    updated = await agents_service.update_agent(
+        pool,
+        target.id,
+        account_id=ACC,
+        expected_version=target.version,
+        metadata={"reasoning_effort": "max"},
+        editor_session_id=session_id,
+    )
+    assert updated.metadata == {"reasoning_effort": "max"}
+    for field in agents_service.AUTHORITY_FIELDS:
+        assert updated.model_dump(mode="json")[field] == target.model_dump(mode="json")[field]
+
+    widened = site.model_copy(update={"routes": [HttpRouteSpec(path_pattern="/api/**")]})
+    with pytest.raises(ForbiddenError) as exc:
+        await agents_service.update_agent(
+            pool,
+            target.id,
+            account_id=ACC,
+            expected_version=updated.version,
+            http_servers=[widened],
+            editor_session_id=session_id,
+        )
+    assert exc.value.detail is not None
+    assert "site" in exc.value.detail["exceeds"]["http_servers"]
+
+    with pytest.raises(ConflictError):
+        await agents_service.update_agent(
+            pool,
+            target.id,
+            account_id=ACC,
+            expected_version=target.version,  # stale
+            metadata={"reasoning_effort": "low"},
+            editor_session_id=session_id,
+        )
