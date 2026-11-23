@@ -182,15 +182,46 @@ def assert_mount_ns_denied(container: str) -> None:
     )
 
 
-def renderer_pids(container: str) -> list[str]:
-    """PIDs of Chromium renderer processes inside the container."""
-    script = (
-        "for p in /proc/[0-9]*/cmdline; do "
-        "tr '\\0' ' ' < \"$p\" 2>/dev/null | grep -q -- --type=renderer "
-        '&& basename "$(dirname "$p")"; done; true'
-    )
-    r = run(["docker", "exec", container, "bash", "-c", script], timeout=30)
-    return [line.strip() for line in r.stdout.splitlines() if line.strip().isdigit()]
+def sandbox_probe_script() -> str:
+    """ONE shell script that both SELECTS a live Chromium renderer and READS
+    its sandbox evidence, so it runs inside a single ``docker exec`` (#2320).
+
+    The previous shape listed renderer pids in one ``docker exec`` and read
+    ``/proc/<pid>/status`` in a second; renderers are short-lived (Chromium
+    discards the initial blank-page renderer on first navigation), so the
+    listed pid could be gone by the second round trip. Here a renderer that
+    vanishes mid-probe is simply skipped in favour of the next one, inside
+    the same exec — no cross-exec window exists.
+
+    Output on success (exit 0), one item per line: renderer pid, renderer
+    ``Seccomp_filters:`` line, init ``Seccomp_filters:`` line, renderer
+    user-ns link, init user-ns link. Exit 1: no readable renderer right now.
+    Exit 2: container init itself unreadable (never expected).
+
+    Two self-match hazards are closed deliberately: the needle is split
+    (``--type=""renderer``) so this script's own ``bash -c`` cmdline does not
+    contain the literal, and ``$$`` is skipped besides. Without that the
+    probe could select ITSELF — a process in init's userns with init's
+    filter count — and report a false "sandbox off"."""
+    return """proc=/proc
+needle='--type=''renderer'
+for d in "$proc"/[0-9]*; do
+  pid=${d##*/}
+  [ "$pid" = "$$" ] && continue
+  cmd=$(tr '\\0' ' ' < "$d/cmdline" 2>/dev/null) || continue
+  case "$cmd" in *"$needle"*) ;; *) continue ;; esac
+  rf=$(grep -h '^Seccomp_filters:' "$d/status" 2>/dev/null) || continue
+  rns=$(readlink "$d/ns/user" 2>/dev/null) || continue
+  # pid-reuse guard: still a renderer AFTER the reads, or the evidence is void
+  cmd=$(tr '\\0' ' ' < "$d/cmdline" 2>/dev/null) || continue
+  case "$cmd" in *"$needle"*) ;; *) continue ;; esac
+  inf=$(grep -h '^Seccomp_filters:' "$proc/1/status") || exit 2
+  ins=$(readlink "$proc/1/ns/user") || exit 2
+  printf '%s\\n' "$pid" "$rf" "$inf" "$rns" "$ins"
+  exit 0
+done
+exit 1
+"""
 
 
 def assert_chromium_sandbox_on(container: str) -> None:
@@ -208,34 +239,28 @@ def assert_chromium_sandbox_on(container: str) -> None:
     chrome://sandbox scraping is deliberately not used (unreliable under new
     headless). Shared between the image-contract suite (hand-built ``docker
     run``) and the isolation gate (the REAL ``build_spec_from_browser``
-    provisioning path) so the two probes cannot drift apart."""
-    # A renderer can exit between the listing and the /proc read: Chromium
-    # discards the initial blank-page renderer on the first navigation, and
-    # the two ``docker exec`` round trips leave a window wide enough for it
-    # (seen twice in a row on CI, 2026-09-02: ``/proc/<pid>/status: No such
-    # file``). So no pid is trusted until its status has actually been read
-    # — try each listed renderer, re-list, and only give up at the deadline.
+    provisioning path) so the two probes cannot drift apart.
+
+    Selection and inspection happen in ONE exec (:func:`sandbox_probe_script`,
+    #2320). The only thing waited on is a renderer EXISTING (exit 1 — the
+    persistent context may still be opening its page); the first renderer
+    whose evidence is read is asserted on immediately. A property violation
+    is never retried, so a sandbox-off renderer fails on the first probe."""
+    script = sandbox_probe_script()
     deadline = time.monotonic() + 30
-    probe: subprocess.CompletedProcess[str] | None = None
-    while probe is None and time.monotonic() < deadline:
-        for pid in renderer_pids(container):
-            r = run(
-                [
-                    *("docker", "exec", container, "bash", "-c"),
-                    f"grep -h '^Seccomp_filters:' /proc/{pid}/status /proc/1/status"
-                    f" && readlink /proc/{pid}/ns/user /proc/1/ns/user",
-                ],
-                timeout=30,
-            )
-            if r.returncode == 0:
-                probe = r
-                break
-        if probe is None:
-            time.sleep(1.0)
-    assert probe is not None, (
-        "no readable Chromium renderer process found — did the persistent context open a page?"
-    )
-    filters_line_r, filters_line_i, renderer_ns, init_ns = probe.stdout.strip().splitlines()
+    while True:
+        probe = run(["docker", "exec", container, "bash", "-c", script], timeout=30)
+        if probe.returncode == 0:
+            break
+        assert probe.returncode == 1, (
+            f"sandbox probe failed (rc={probe.returncode}): stdout={probe.stdout!r} "
+            f"stderr={probe.stderr!r}"
+        )
+        assert time.monotonic() < deadline, (
+            "no readable Chromium renderer process found — did the persistent context open a page?"
+        )
+        time.sleep(1.0)
+    _pid, filters_line_r, filters_line_i, renderer_ns, init_ns = probe.stdout.strip().splitlines()
     renderer_filters = int(filters_line_r.split()[-1])
     init_filters = int(filters_line_i.split()[-1])
     assert renderer_filters > init_filters, (
