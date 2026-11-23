@@ -173,3 +173,60 @@ async def test_materialize_github_clones_stops_proxy_on_non_clone_error() -> Non
 
     mock_proxy.start.assert_awaited_once()
     mock_proxy.stop.assert_awaited_once()
+
+
+# ── #1721: memory mount rollback auto-restore ─────────────────────────────────
+
+
+def _mem_echo(store_id: str) -> object:
+    from aios.models.memory_stores import MemoryStoreResourceEcho
+
+    return MemoryStoreResourceEcho(
+        memory_store_id=store_id,
+        access="read_write",
+        instructions="",
+        name=store_id,
+        description="",
+        mount_path=f"/mnt/memory/{store_id}",
+    )
+
+
+@pytest.mark.parametrize(
+    ("restored", "expected_events"),
+    [({"memstore_a": True, "memstore_b": True}, 1), ({"memstore_a": False}, 0)],
+)
+async def test_materialize_memory_mounts_emits_one_restored_event(
+    restored: dict[str, bool], expected_events: int
+) -> None:
+    from aios.harness import runtime
+    from aios.sandbox.spec import _materialize_memory_mounts
+
+    echoes = [_mem_echo(sid) for sid in restored]
+    pool = MagicMock()
+    pool.acquire.return_value.__aenter__ = AsyncMock(return_value=MagicMock())
+    pool.acquire.return_value.__aexit__ = AsyncMock(return_value=None)
+
+    async def fake_materialize(_conn: object, *, store_id: str, account_id: str) -> bool:
+        return restored[store_id]
+
+    append = AsyncMock()
+    prev_pool = runtime.pool
+    runtime.pool = pool
+    try:
+        with (
+            patch(
+                "aios.db.queries.list_session_memory_store_echoes",
+                AsyncMock(return_value=echoes),
+            ),
+            patch("aios.sandbox.memory_mounts.materialize_store_to_host", fake_materialize),
+            patch("aios.sandbox.spec.sessions_service.append_event", append),
+        ):
+            result = await _materialize_memory_mounts("sess_x", account_id="acc_x")
+    finally:
+        runtime.pool = prev_pool
+
+    assert result == echoes
+    assert append.await_count == expected_events
+    if expected_events:
+        data = append.await_args.args[3]
+        assert data == {"event": "memory_mount_restored", "store_ids": list(restored)}
