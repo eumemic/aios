@@ -2,7 +2,11 @@
 # Git pre-commit hook for aios
 # Runs linting, type checking, and unit tests before allowing commits.
 #
-# Install: ln -sf ../../scripts/git-hooks/pre-commit .git/hooks/pre-commit
+# Install (from the repo root):
+#   ln -sf ../../scripts/git-hooks/pre-commit .git/hooks/pre-commit
+#
+# The hook's exit status is run-checks.sh's: with --fail-on-autofix, any
+# ruff auto-fix fails the commit so you can review and re-stage it.
 
 set -uo pipefail
 
@@ -19,15 +23,4 @@ if [[ -z "$STAGED_PY" ]]; then
     exit 0
 fi
 
-"$GIT_ROOT/scripts/run-checks.sh" --fail-on-autofix
-RESULT=$?
-
-# Re-add any files that ruff auto-formatted
-if [[ $RESULT -eq 0 ]]; then
-    modified=$(git diff --name-only | grep -E '\.py$' || true)
-    if [[ -n "$modified" ]]; then
-        git add $modified 2>/dev/null
-    fi
-fi
-
-exit $RESULT
+exec "$GIT_ROOT/scripts/run-checks.sh" --fail-on-autofix
