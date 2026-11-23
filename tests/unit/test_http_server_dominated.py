@@ -63,3 +63,20 @@ def test_relaxed_permission_gate_is_not_dominated() -> None:
 
 def test_renamed_server_is_not_dominated() -> None:
     assert not http_server_dominated(_srv(*_PRIOR.routes, name="other"), _PRIOR)
+
+
+def test_route_description_change_is_dominated() -> None:
+    """Route ``description`` is prose, not authority: editing it is not a widening."""
+    declared = _srv(
+        _PRIOR.routes[0].model_copy(update={"description": "Repos: issues, PRs, labels."}),
+        _PRIOR.routes[1].model_copy(update={"description": "GraphQL mutations."}),
+    )
+    assert http_server_dominated(declared, _PRIOR)
+
+
+def test_route_description_change_does_not_mask_widening() -> None:
+    declared = _srv(
+        HttpRouteSpec(path_pattern="/repos/**", description="docs only"),
+        _PRIOR.routes[1],
+    )
+    assert not http_server_dominated(declared, _PRIOR)

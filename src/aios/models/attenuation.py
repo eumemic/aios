@@ -805,4 +805,8 @@ def http_server_dominated(declared: HttpServerSpec, holder: HttpServerSpec) -> b
     if (declared.name, declared.base_url) != (holder.name, holder.base_url):
         return False
     met = _meet_http_server(declared, holder)
-    return _canon_http_server(declared).routes == met.routes
+
+    def _authority(routes: list[HttpRouteSpec]) -> list[HttpRouteSpec]:
+        return [r.model_copy(update={"description": None}) for r in routes]
+
+    return _authority(_canon_http_server(declared).routes) == _authority(met.routes)
