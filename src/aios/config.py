@@ -1041,6 +1041,15 @@ class Settings(BaseSettings):
         "single-``parallel()`` fan-out width is bounded separately, in the "
         "host (``wf_script_host.MAX_PARALLEL_FANOUT``).",
     )
+    memory_embedding_model: str | None = Field(
+        default=None,
+        description="LiteLLM embedding model for hybrid memory recall (#1629), e.g. "
+        "``text-embedding-3-small``. Its output dimension MUST be 1536 (the immutable "
+        "``memories.embedding vector(1536)`` column); a model change is a re-embed "
+        "migration, not a runtime switch. When unset, memory writes record no embedding "
+        "(DECOUPLED: the row stays FTS-only) and ``memory_search`` runs the FTS arm only. "
+        "Provider keys resolve via LiteLLM's standard env vars.",
+    )
     workflow_default_child_model: str | None = Field(
         default=None,
         description="Default model for generic workflow agent() children launched via operator/HTTP runs when no per-run or per-call model is supplied.",

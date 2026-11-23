@@ -17,10 +17,11 @@
 
 services:
   postgres:
-    # 16-alpine matches the README quickstart and existing dev conventions;
-    # postgres:18 changed the in-image data layout from /var/lib/postgresql/data
+    # pgvector/pgvector:pg16 = postgres 16 + the pgvector extension, required by
+    # migration 0196 (hybrid memory recall, #1629). Same PG major as the former
+    # 16-alpine image; postgres:18 changed the in-image data layout from /var/lib/postgresql/data
     # to /var/lib/postgresql/<major>, which would break existing volumes.
-    image: postgres:16-alpine
+    image: pgvector/pgvector:pg16
     environment:
       POSTGRES_USER: aios
       POSTGRES_PASSWORD: aios

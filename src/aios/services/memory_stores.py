@@ -33,6 +33,7 @@ from aios.models.memory_stores import (
     MemoryVersion,
 )
 from aios.sandbox.atomic_mirror import atomic_delete, atomic_write
+from aios.services import memory_embedding
 from aios.sandbox.volumes import memory_store_host_dir
 
 
@@ -192,6 +193,11 @@ async def create_memory(
             account_id=account_id,
         )
     _mirror_to_host(store_id, path, content)
+    # Derived index, post-commit, DECOUPLED (#1629): a provider failure leaves
+    # embedding NULL (FTS-only) — it never aborts the durable write.
+    await memory_embedding.embed_and_store(
+        pool, account_id=account_id, memory_id=memory.id, content=content, content_sha256=sha
+    )
     return memory
 
 
@@ -282,6 +288,15 @@ async def update_memory(
         _mirror_delete_from_host(store_id, prior_path)
     if new_content is not None:
         _mirror_to_host(store_id, memory.path, new_content)
+        # Re-embed only on content change; a pure rename keeps a valid vector.
+        assert new_sha is not None
+        await memory_embedding.embed_and_store(
+            pool,
+            account_id=account_id,
+            memory_id=memory.id,
+            content=new_content,
+            content_sha256=new_sha,
+        )
     elif memory.path != prior_path:
         _mirror_to_host(store_id, memory.path, prior.content or "")
     return memory

@@ -123,7 +123,7 @@ def postgres_container() -> Iterator[Any]:
     # container, so trade it for markedly cheaper commits and DDL.  This
     # speeds the TRUNCATE-per-test reset and every alembic replay, most
     # visibly on fsync-slow CI runner disks.
-    with PostgresContainer("postgres:16-alpine").with_command(
+    with PostgresContainer("pgvector/pgvector:pg16").with_command(
         "postgres -c fsync=off -c synchronous_commit=off -c full_page_writes=off"
     ) as pg:
         yield pg

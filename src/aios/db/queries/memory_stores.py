@@ -1292,3 +1292,63 @@ async def insert_session_github_repo(
     )
     assert row is not None
     return _row_to_github_repo_echo(row)
+
+
+async def update_memory_embedding(
+    conn: asyncpg.Connection[Any],
+    *,
+    account_id: str,
+    memory_id: str,
+    embedding: list[float],
+    embedding_model: str,
+    content_sha256: str,
+) -> bool:
+    """Write the derived embedding onto a memory row (#1629). NO version bump.
+
+    The embedding is a derived index of the already-versioned content, so it
+    allocates no ``MemoryVersion`` and never touches ``memory_versions``. The
+    ``content_sha256`` guard ties the vector to the exact content that was
+    embedded: if a racing update changed the content after the embed call
+    started, this UPDATE matches no row (returns ``False``) instead of
+    overwriting the newer row with a stale vector.
+    """
+    vec = "[" + ",".join(repr(float(x)) for x in embedding) + "]"
+    result = await conn.execute(
+        """
+        UPDATE memories
+           SET embedding = $1::vector, embedding_model = $2
+         WHERE id = $3 AND account_id = $4 AND content_sha256 = $5
+           AND deleted_at IS NULL
+        """,
+        vec,
+        embedding_model,
+        memory_id,
+        account_id,
+        content_sha256,
+    )
+    return bool(result.endswith(" 1"))
+
+
+async def list_memories_missing_embedding(
+    conn: asyncpg.Connection[Any], *, limit: int, after_id: str | None = None
+) -> list[tuple[str, str, str, str]]:
+    """Live memories with no embedding yet, keyset-paged by id (backfill sweep).
+
+    Operator-scoped (cross-account) by design: it feeds the
+    ``bin/aios-memory-embed-backfill`` sweep, which writes each row back through
+    the account-scoped :func:`update_memory_embedding`.
+    Returns ``(id, account_id, content, content_sha256)`` tuples.
+    """
+    rows = await conn.fetch(
+        """
+        SELECT id, account_id, content, content_sha256
+          FROM memories
+         WHERE embedding IS NULL AND deleted_at IS NULL
+           AND ($2::text IS NULL OR id > $2)
+         ORDER BY id
+         LIMIT $1
+        """,
+        limit,
+        after_id,
+    )
+    return [(r["id"], r["account_id"], r["content"], r["content_sha256"]) for r in rows]

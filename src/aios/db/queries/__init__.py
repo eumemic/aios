@@ -614,6 +614,8 @@ from .memory_stores import (  # noqa: E402
     list_session_memory_store_ranks,
     redact_memory_version,
     update_memory_store,
+    list_memories_missing_embedding,
+    update_memory_embedding,
     update_memory_with_version,
     update_session_github_repo_blob,
 )
@@ -1222,6 +1224,8 @@ __all__ = [
     "update_environment",
     "update_memory_store",
     "update_memory_with_version",
+    "update_memory_embedding",
+    "list_memories_missing_embedding",
     "update_model_provider",
     "update_operator_trigger",
     "update_session",

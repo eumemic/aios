@@ -28,7 +28,11 @@ Safety:
 - The ``memories_search`` view is scoped per-session via
   ``SET LOCAL app.session_id`` joined through ``session_memory_stores``,
   so a session only sees memories of its own attached stores.
-- Results are capped at MAX_ROWS rows, ordered by ts_rank DESC.
+- Results are capped at MAX_ROWS rows, ordered by the fused RRF score DESC.
+
+Hybrid recall (#1629): the fixed query fuses the ``ts_rank`` arm with a
+pgvector cosine arm over ``memories.embedding`` (migration 0196) via
+Reciprocal-Rank Fusion. See ``_SEARCH_SQL``.
 
 Return shape: :class:`~aios.tools.registry.ToolResult` whose ``content`` is the
 formatted text table as plain multi-line text (#2291) — not a JSON envelope, so a
@@ -46,6 +50,7 @@ import asyncpg
 
 from aios.harness import runtime
 from aios.logging import get_logger
+from aios.services.memory_embedding import RRF_K, Embedded, embed_memory_content, vector_literal
 from aios.tools.invoke import ToolBail
 from aios.tools.registry import ToolResult, registry
 
@@ -54,22 +59,50 @@ log = get_logger(__name__)
 MAX_ROWS = 200
 QUERY_TIMEOUT_MS = 10_000
 
-# Fixed, parameterised search query against the per-session ``memories_search``
-# view. The model's keyword string is bound as ``$1`` — never interpolated —
-# so there is no SQL surface to validate. ``websearch_to_tsquery`` parses the
-# Google-style query syntax (quoted phrases, ``or``, ``-`` negation) the model
-# is likely to reach for; matches are ranked by ``ts_rank`` (DESC) and capped.
+# Fixed, parameterised HYBRID search query (#1629) against the per-session
+# ``memories_search`` view. The model's keyword string is bound as ``$1`` and
+# the query embedding (pgvector text form, or NULL) as ``$2`` — never
+# interpolated. Two ranking arms, both read through the SAME view so
+# per-session/per-tenant isolation is inherited unchanged:
+#   * ``fts`` — ``websearch_to_tsquery`` + ``ts_rank`` (stemmed keyword recall);
+#   * ``vec`` — pgvector cosine distance ``<=>`` over ``embedding``.
+# They are fused by Reciprocal-Rank Fusion with K = RRF_K (scale-free: by rank,
+# never by raw score). ``$2 IS NOT NULL`` makes the vec arm contribute nothing
+# when the query embed failed — a bare ``ORDER BY embedding <=> NULL`` would
+# still return embedded rows with NULL distances.
 _SEARCH_SQL = f"""
+    WITH fts AS (
+        SELECT f.id, row_number() OVER (ORDER BY f.score DESC, f.id) AS r
+        FROM (
+            SELECT s.id, ts_rank(s.content_tsv, q) AS score
+            FROM memories_search s, websearch_to_tsquery('english', $1) AS q
+            WHERE s.content_tsv @@ q
+            ORDER BY score DESC, s.id
+            LIMIT {MAX_ROWS}
+        ) f
+    ),
+    vec AS (
+        SELECT v.id, row_number() OVER (ORDER BY v.dist, v.id) AS r
+        FROM (
+            SELECT s.id, s.embedding <=> $2::vector AS dist
+            FROM memories_search s
+            WHERE $2::vector IS NOT NULL AND s.embedding IS NOT NULL
+            ORDER BY dist, s.id
+            LIMIT {MAX_ROWS}
+        ) v
+    )
     SELECT
         m.store,
         m.path,
         m.content_size_bytes,
         m.updated_at,
-        ts_rank(m.content_tsv, q) AS rank,
+        (COALESCE(1.0 / ({RRF_K} + fts.r), 0)
+         + COALESCE(1.0 / ({RRF_K} + vec.r), 0))::float8 AS rank,
         m.content
-    FROM memories_search m,
-         websearch_to_tsquery('english', $1) AS q
-    WHERE m.content_tsv @@ q
+    FROM memories_search m
+    LEFT JOIN fts ON fts.id = m.id
+    LEFT JOIN vec ON vec.id = m.id
+    WHERE fts.id IS NOT NULL OR vec.id IS NOT NULL
     ORDER BY rank DESC, m.updated_at DESC
     LIMIT {MAX_ROWS + 1}
 """
@@ -119,12 +152,19 @@ async def _execute_query(
     True when the query produced more rows than the cap. The query runs in
     a READ ONLY transaction so no mutation is possible, and the user's
     keyword string is bound as ``$1`` (no interpolation).
+
+    The query embedding is computed OUTSIDE the transaction (model I/O never
+    holds a connection). Read-path failure policy is DECOUPLED: if the embed
+    is ``Skipped`` the vector is bound as NULL and the search degrades to the
+    FTS arm alone — search never fails because the embedder is down.
     """
+    outcome = await embed_memory_content(query)
+    qvec = vector_literal(outcome.vector) if isinstance(outcome, Embedded) else None
     async with pool.acquire() as conn, conn.transaction(readonly=True):
         await conn.execute(f"SET LOCAL statement_timeout = '{QUERY_TIMEOUT_MS}ms'")
         # set_config() accepts session_id as a parameter, avoiding interpolation.
         await conn.execute("SELECT set_config('app.session_id', $1, true)", session_id)
-        rows = await conn.fetch(_SEARCH_SQL, query)
+        rows = await conn.fetch(_SEARCH_SQL, query, qvec)
 
     truncated = len(rows) > MAX_ROWS
     if truncated:
@@ -133,15 +173,17 @@ async def _execute_query(
 
 
 MEMORY_SEARCH_DESCRIPTION = (
-    "Full-text search across the content of every memory store attached to "
-    "this session. Backed by a Postgres FTS (GIN) index — ranked and "
-    "stemmed, far better than grepping the memory mounts. Use it to recall "
-    "stored notes/cards by keyword when you don't know the exact path.\n\n"
+    "Hybrid keyword + semantic search across the content of every memory "
+    "store attached to this session. Fuses a Postgres full-text (stemmed "
+    "keyword) ranking with a vector-similarity (meaning) ranking, so a memory "
+    "can match even when it shares no words with your query. Far better than "
+    "grepping the memory mounts. Use it to recall stored notes/cards when you "
+    "don't know the exact path.\n\n"
     "Pass a keyword query in the Google-style websearch syntax: bare words "
     "are AND-ed, \"quoted phrases\" match adjacent words, 'or' is "
     "disjunction, and a leading '-' negates a term. Matching is stemmed and "
     "case-insensitive (English).\n\n"
-    "Results are ranked by relevance (ts_rank DESC), capped at 200 rows, and "
+    "Results are ranked by fused relevance (reciprocal-rank fusion), capped at 200 rows, and "
     "scoped to THIS session's attached stores only — you never see another "
     "session's or tenant's memories. Each row shows the store, path, size, "
     "last-updated time, rank, and a content preview; use the read tool on "
