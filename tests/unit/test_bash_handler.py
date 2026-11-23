@@ -356,3 +356,52 @@ class TestExecRaisedReconcileSuppression:
                 pytest.fail("expected an exception to propagate")
 
         mock_reconcile.assert_awaited_once()
+
+
+class TestReconcileNonLethal:
+    """#1721: the memory reconcile is bookkeeping — it never kills the command."""
+
+    async def test_scan_timeout_leaves_user_command_result_intact(
+        self, stub_registry: _StubRegistry, canned_result: CommandResult
+    ) -> None:
+        import threading
+
+        from aios.harness import runtime
+        from aios.models.memory_stores import MemoryStoreResourceEcho
+        from aios.tools import bash_memory_reconcile as mod
+
+        echo = MemoryStoreResourceEcho(
+            memory_store_id="memstore_01FAKE00000000000000000001",
+            access="read_write",
+            instructions="",
+            name="notes",
+            description="",
+            mount_path="/mnt/memory/notes",
+        )
+        runtime.set_session_memory_mounts("sess_01TEST", [echo])
+        release = threading.Event()
+
+        def hung_scan(*_args: Any, **_kwargs: Any) -> Any:
+            release.wait(5)
+            raise AssertionError("abandoned")
+
+        try:
+            with (
+                patch("aios.tools.bash.snapshot_memory_mounts", return_value=({}, 1)),
+                patch.object(mod, "_scan_after", hung_scan),
+                patch.object(mod, "MEMORY_RECONCILE_SCAN_TIMEOUT_SECONDS", 0.05),
+            ):
+                out = await bash_handler("sess_01TEST", {"command": "long-job", "timeout_seconds": 7})
+        finally:
+            release.set()
+            runtime.clear_session_memory_mounts("sess_01TEST")
+
+        # Exactly one exec, with the USER's timeout — the reconcile never
+        # re-execs, signals, or shortens the command.
+        stub_registry.exec.assert_awaited_once()
+        assert stub_registry.exec.await_args is not None
+        assert stub_registry.exec.await_args.kwargs["timeout_seconds"] == 7
+        assert out["exit_code"] == canned_result.exit_code
+        assert out["stdout"] == canned_result.stdout
+        assert out["timed_out"] is False
+        assert "memory scan timed out" in out["stderr"]
