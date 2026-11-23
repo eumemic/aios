@@ -10,6 +10,7 @@ override them at the `aios.harness.loop.model_providers_service` call site.
 
 from __future__ import annotations
 
+import contextlib
 from contextlib import ExitStack
 from types import SimpleNamespace
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
@@ -226,9 +227,7 @@ async def _drive_to_model_call(
     pool = MagicMock()
     inflight_tool_registry = MagicMock()
     inflight_tool_registry.in_flight_tool_call_ids.return_value = set()
-    auth = ProviderAuth(
-        api_key="sk", api_base=None, owner_account_id="acc_x", model_routes=_ROUTES
-    )
+    auth = ProviderAuth(api_key="sk", api_base=None, owner_account_id="acc_x", model_routes=_ROUTES)
     append_event = AsyncMock(return_value=SimpleNamespace(id="ev"))
     with ExitStack() as stack:
         _enter_base_patches(stack, resolved=auth, conflict=None, agent=agent, step_ctx=step_ctx)
@@ -248,12 +247,10 @@ async def _drive_to_model_call(
                 AsyncMock(side_effect=_StopAtModelCall()),
             )
         )
-        try:
+        with contextlib.suppress(_StopAtModelCall):
             await _run_session_step_body(
                 pool, inflight_tool_registry, "sess_x", cause="message", account_id="acc_x"
             )
-        except _StopAtModelCall:
-            pass
     return call_litellm, fail_open, append_event
 
 

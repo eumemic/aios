@@ -1675,9 +1675,7 @@ async def _run_session_step_body(
         # versions written before normalization) is pinned to its canonical
         # route here, at call time; an explicit qualified string is honoured.
         if auth is not None:
-            routed_model = model_providers_service.apply_model_route(
-                agent.model, auth.model_routes
-            )
+            routed_model = model_providers_service.apply_model_route(agent.model, auth.model_routes)
         if conflict is not None:
             await _handle_provider_configuration_error(
                 pool,

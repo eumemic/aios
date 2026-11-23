@@ -458,7 +458,9 @@ def test_route_image_config_error_only_for_tool_role_images() -> None:
     assert service.route_image_config_error("openai/gpt-5.6-sol", routes, user_img) is None
     err = service.route_image_config_error("openai/gpt-5.6-sol", routes, tool_img)
     assert err is not None and "openai/responses/gpt-5.6-sol" in err
-    assert service.route_image_config_error("openai/responses/gpt-5.6-sol", routes, tool_img) is None
+    assert (
+        service.route_image_config_error("openai/responses/gpt-5.6-sol", routes, tool_img) is None
+    )
 
 
 def test_model_routes_validation_rejects_ambiguous_entries() -> None:
@@ -482,9 +484,7 @@ async def test_update_model_provider_forwards_model_routes(crypto_box: CryptoBox
     conn = MagicMock()
     pool = fake_pool_yielding_conn(conn)
     routes = {"gpt-5.6-sol": "openai/responses/gpt-5.6-sol"}
-    with patch(
-        "aios.services.model_providers.queries.update_model_provider", AsyncMock()
-    ) as upd:
+    with patch("aios.services.model_providers.queries.update_model_provider", AsyncMock()) as upd:
         await service.update_model_provider(
             pool,
             crypto_box,
@@ -722,9 +722,9 @@ async def test_update_agent_persists_canonical_route(monkeypatch: pytest.MonkeyP
     from aios.services import agents as agents_service
 
     resolve = AsyncMock(return_value="openai/responses/gpt-5.6-sol")
-    monkeypatch.setattr(agents_service.model_providers_service, "resolve_model_route", resolve)
+    monkeypatch.setattr(service, "resolve_model_route", resolve)
     upd = AsyncMock(return_value="agent")
-    monkeypatch.setattr(agents_service.queries, "update_agent", upd)
+    monkeypatch.setattr("aios.db.queries.update_agent", upd)
     pool = fake_pool_yielding_conn(MagicMock())
 
     await agents_service.update_agent(
