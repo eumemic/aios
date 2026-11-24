@@ -20,6 +20,7 @@ post-exec hook in :mod:`aios.tools.bash_memory_reconcile`.
 from __future__ import annotations
 
 import fcntl
+from pathlib import Path
 from typing import Any
 
 import asyncpg
@@ -36,6 +37,35 @@ from aios.sandbox.volumes import (
 log = get_logger("aios.sandbox.memory_mounts")
 
 MATERIALIZED_MARKER = ".materialized"
+_MARKER_VERSION = "v1"
+
+
+def _dir_identity(host_dir: Path) -> int:
+    """Inode of the store root directory.
+
+    ``st_dev`` is deliberately excluded: device numbers of network/overlay
+    filesystems can change across a reboot/remount, which would make every
+    store look "replaced" and turn an unreconciled delete into a restore.
+    """
+    return host_dir.stat().st_ino
+
+
+def _read_marker_identity(marker: Path) -> int | None:
+    """Parse the directory identity recorded in ``marker``; None if absent/legacy."""
+    try:
+        parts = marker.read_text().split()
+    except OSError:
+        return None
+    if len(parts) != 2 or parts[0] != _MARKER_VERSION:
+        return None
+    try:
+        return int(parts[1])
+    except ValueError:
+        return None
+
+
+def _write_marker(marker: Path, identity: int) -> None:
+    atomic_write(marker, f"{_MARKER_VERSION} {identity}\n")
 
 
 async def materialize_store_to_host(
@@ -50,9 +80,20 @@ async def materialize_store_to_host(
 
     Acquires a file lock so concurrent provisioning across sessions
     serializes; the loser observes the marker and returns immediately.
-    Once a store is materialized, this function is a constant-time no-op.
-    Subsequent DB drift is propagated by the per-write mirror helpers,
-    not by re-materialization.
+    Once a store is materialized, this function is a no-op for as long as
+    the same directory stays in place: subsequent DB drift is propagated by
+    the per-write mirror helpers and bash reconcile, not by
+    re-materialization. A DB row missing from that directory is NOT evidence
+    of a rollback — a sandbox ``rm`` whose reconcile has not landed yet (a
+    peer session's bash still running, or a reconcile scan that timed out)
+    looks exactly the same, and restoring it would resurrect the delete.
+
+    A rollback is detected only when the marker records a different
+    directory identity (root ``st_ino``) than the directory now at
+    ``host_dir`` — i.e. the directory was replaced or restored wholesale,
+    which no sandbox command can do to its own bind-mount root. Only then
+    are missing files filled in from the DB (never overwriting files on
+    disk).
     """
     host_dir = memory_store_host_dir(store_id)
     marker = host_dir / MATERIALIZED_MARKER
@@ -63,6 +104,29 @@ async def materialize_store_to_host(
         try:
             was_materialized = marker.exists()
             ensure_owned_dir(host_dir)
+            if was_materialized:
+                recorded = _read_marker_identity(marker)
+                current = _dir_identity(host_dir)
+                if recorded is None:
+                    # Legacy (pre-#1721) empty marker: there is no record of
+                    # which directory was materialized, so a missing file is
+                    # indistinguishable from an unreconciled sandbox delete.
+                    # Adopt the current directory without restoring anything.
+                    _write_marker(marker, current)
+                    return False
+                if recorded == current:
+                    # Same directory we materialized. Any DB row missing on
+                    # disk was removed IN PLACE — by a sandbox command whose
+                    # reconcile has not run yet (or timed out), or by a mirror
+                    # delete. Writing it back would resurrect a deletion
+                    # (F1); the bash reconcile is the authority here.
+                    return False
+                # The marker describes a different directory than the one now
+                # at host_dir: the directory was replaced/restored wholesale
+                # (a rollback). A sandbox cannot cause this — the store root
+                # is a bind-mount point, which cannot be removed or replaced
+                # from inside the container — so filling gaps from the DB
+                # cannot undo a sandbox delete.
 
             entries = await queries.list_active_memory_paths_and_content(
                 conn, store_id, account_id=account_id
@@ -74,8 +138,6 @@ async def materialize_store_to_host(
                 if path.is_file() and path.name != MATERIALIZED_MARKER
             }
             restoring = was_materialized and not live_paths.issubset(disk_paths)
-            if was_materialized and not restoring:
-                return False
 
             for path, content in entries:
                 # Memory paths are guaranteed to start with "/" by the SQL CHECK.
@@ -102,8 +164,11 @@ async def materialize_store_to_host(
                 atomic_write(target, content or "")
 
             # Marker last so a crash mid-materialization leaves an unmarked
-            # dir that the next attempt will redo.
-            marker.touch()
+            # dir that the next attempt will redo. It records the identity of
+            # the directory it describes so a later provision can tell an
+            # in-place sandbox delete (same directory) from a wholesale
+            # rollback/replacement (different directory).
+            _write_marker(marker, _dir_identity(host_dir))
             log.info(
                 "memory.materialized",
                 store_id=store_id,

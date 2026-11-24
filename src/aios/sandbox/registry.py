@@ -71,6 +71,7 @@ from aios.sandbox.backends.base import (
     SandboxHandle,
     SandboxSnapshotTimeoutError,
     SandboxSpec,
+    SandboxTornDownError,
     base_relative_disk_bytes,
     split_label_list,
 )
@@ -356,6 +357,13 @@ class SandboxRegistry:
         self._last_used: dict[str, float] = {}
         # A command may outlive idle TTL; the reaper must not tear down its container.
         self._active_execs: dict[str, int] = {}
+        # Owners the idle reaper has committed to tearing down. Set in the same
+        # synchronous step as the reaper's ``_active_execs`` re-check, and read
+        # by ``exec`` in the same synchronous step as its counter increment, so
+        # exec admission and idle teardown are mutually exclusive: either the
+        # exec is counted first (reaper skips) or teardown is reserved first
+        # (exec is refused, never started on a container about to be destroyed).
+        self._idle_teardown: set[str] = set()
         self._locks: dict[str, asyncio.Lock] = {}
         self._reaper_task: asyncio.Task[None] | None = None
         self._gc_task: asyncio.Task[None] | None = None
@@ -2510,6 +2518,13 @@ class SandboxRegistry:
     ) -> CommandResult:
         """Run ``command`` while protecting its sandbox from idle teardown."""
         owner_id = handle.owner_id
+        # No await between this check and the increment: atomic w.r.t. the
+        # reaper's check-and-reserve in ``_reap_idle_once``.
+        if owner_id in self._idle_teardown:
+            raise SandboxTornDownError(
+                f"sandbox for {owner_id} is being released after idle timeout; "
+                "the command was not started — retry to provision a fresh sandbox"
+            )
         self._active_execs[owner_id] = self._active_execs.get(owner_id, 0) + 1
         self._last_used[owner_id] = time.monotonic()
         try:
@@ -2875,11 +2890,19 @@ class SandboxRegistry:
                     and not self._active_execs.get(sid)
                     and time.monotonic() - current > idle_timeout
                 ):
+                    # Reserve the teardown in the same synchronous step as the
+                    # ``_active_execs`` re-check above: from here on ``exec``
+                    # refuses this owner, so no command can be admitted onto a
+                    # container that ``_release_owner`` is about to destroy
+                    # (its await points would otherwise let one in).
+                    self._idle_teardown.add(sid)
                     log.info("sandbox.idle_release", owner_id=sid)
                     try:
                         await self._release_owner(sid)
                     except Exception as err:
                         log.warning("sandbox.idle_release_failed", owner_id=sid, error=str(err))
+                    finally:
+                        self._idle_teardown.discard(sid)
 
     async def _reap_idle_loop(self, idle_timeout: float, interval: float = 60.0) -> None:
         """Background loop: release sandboxes idle > idle_timeout seconds.

@@ -333,3 +333,56 @@ async def test_reaper_does_not_destroy_active_exec() -> None:
     destroy.assert_not_awaited()
     exec_continue.set()
     await task
+
+
+async def test_exec_admitted_during_reap_is_not_destroyed() -> None:
+    """An exec arriving after the reaper's idle re-check, while release is
+    still awaiting pre-destroy work, must never run on a container that is
+    then destroyed. It is refused before reaching the backend instead."""
+    from aios.sandbox.backends.base import SandboxTornDownError
+
+    gate = asyncio.Event()
+    in_release = asyncio.Event()
+    exec_running = False
+    destroyed_while_exec_running: list[bool] = []
+
+    async def destroy(_handle: SandboxHandle) -> None:
+        destroyed_while_exec_running.append(exec_running)
+
+    async def execute(*_args: Any, **_kwargs: Any) -> MagicMock:
+        nonlocal exec_running
+        exec_running = True
+        try:
+            await asyncio.sleep(0.05)
+            return MagicMock()
+        finally:
+            exec_running = False
+
+    backend = _backend_with_destroy(AsyncMock(side_effect=destroy))
+    backend.exec = AsyncMock(side_effect=execute)  # type: ignore[method-assign]
+    registry = SandboxRegistry(backend)
+    handle = _handle("sess_race")
+    registry._handles["sess_race"] = handle
+    registry._last_used["sess_race"] = 0.0
+
+    async def gated_invalidate(*_args: Any, **_kwargs: Any) -> None:
+        in_release.set()
+        await gate.wait()
+
+    registry._invalidate_session_egress_by_id = gated_invalidate  # type: ignore[method-assign]
+
+    reap = asyncio.create_task(registry._reap_idle_once(idle_timeout=0.0))
+    await asyncio.wait_for(in_release.wait(), timeout=1.0)
+    exec_task = asyncio.create_task(
+        registry.exec(handle, "sleep 1", timeout_seconds=30, max_output_bytes=1000)
+    )
+    await asyncio.sleep(0)
+    gate.set()
+    await asyncio.wait_for(reap, timeout=1.0)
+    exec_outcome = await asyncio.gather(exec_task, return_exceptions=True)
+
+    assert destroyed_while_exec_running == [False]
+    assert isinstance(exec_outcome[0], SandboxTornDownError)
+    backend.exec.assert_not_awaited()
+    assert "sess_race" not in registry._idle_teardown
+    assert "sess_race" not in registry._active_execs
