@@ -56,7 +56,6 @@ from aios.harness.request_body_budget import (
 )
 from aios.logging import get_logger
 from aios.mcp.schema import sanitize_tools_for_provider
-from aios.models.attenuation import api_base_of
 from aios.models.model_providers import ProviderAuth
 from aios.services.litellm_params import openai_params_in, silent_drop_controls_in
 
