@@ -921,6 +921,11 @@ def _apply_attachments(
         # only the insert is lock-guarded (see the cache helpers above).
         # A duplicate compute under a concurrent-render race is harmless:
         # the result is a deterministic function of the immutable bytes.
+        # Synchronous on purpose. Any call that can reach this read, i.e. one
+        # where ``_resolve_attachment_host_path`` can resolve a host path
+        # (requires ``session_id``/``workspace_path``), must run off the event
+        # loop (e.g. via ``asyncio.to_thread``). Never make such a call
+        # directly from a coroutine.
         try:
             payload = host_path.read_bytes()
         except OSError as err:

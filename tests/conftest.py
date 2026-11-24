@@ -22,11 +22,13 @@ runs only the unit tests, which is what most local dev iterations use.
 from __future__ import annotations
 
 import base64
+import importlib.util
 import os
 import secrets
-import subprocess
+import sys
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 from unittest import mock
 
@@ -71,52 +73,51 @@ if _xdist_worker:
     os.environ.setdefault("AIOS_INSTANCE_ID", f"test_{_xdist_worker}")
 
 
+_DOCKER_SKIP_MOD_NAME = "aios_tests_docker_skip"
+
+
+def _load_docker_skip(path: Path) -> ModuleType:
+    """Load ``tests/_docker_skip.py`` by file path (no sys.path dependence)."""
+    if _DOCKER_SKIP_MOD_NAME in sys.modules:
+        return sys.modules[_DOCKER_SKIP_MOD_NAME]
+    spec = importlib.util.spec_from_file_location(_DOCKER_SKIP_MOD_NAME, path)
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[_DOCKER_SKIP_MOD_NAME] = mod  # registered before exec, standard pattern
+    spec.loader.exec_module(mod)
+    return mod
+
+
+_docker_skip = _load_docker_skip(Path(__file__).with_name("_docker_skip.py"))
+
+# Red end-of-run banner counting Docker-gated skips (WP-25 X8).
+pytest_terminal_summary = _docker_skip.pytest_terminal_summary
+
+
 def _docker_available() -> bool:
     """Check if Docker is available, ensuring ``DOCKER_HOST`` is set.
 
-    The Docker CLI auto-discovers Docker Desktop's socket, but the
-    Python ``docker`` library and ``testcontainers`` require
-    ``DOCKER_HOST`` in the environment. This function sets it
-    whenever Docker is available but ``DOCKER_HOST`` is missing.
+    Thin wrapper over ``tests/_docker_skip.py``'s cached probe.
     """
-    # If DOCKER_HOST is already set, just verify Docker is reachable.
-    if "DOCKER_HOST" in os.environ:
-        try:
-            result = subprocess.run(["docker", "info"], capture_output=True, check=False, timeout=5)
-            return result.returncode == 0
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            return False
+    available: bool = _docker_skip.probe_docker()[0]
+    return available
 
-    # DOCKER_HOST is not set. Try known socket paths.
-    for sock in [
-        Path("/var/run/docker.sock"),
-        Path.home() / ".docker" / "run" / "docker.sock",
-    ]:
-        if sock.exists():
-            os.environ["DOCKER_HOST"] = f"unix://{sock}"
-            try:
-                result = subprocess.run(
-                    ["docker", "info"], capture_output=True, check=False, timeout=5
-                )
-                if result.returncode == 0:
-                    return True
-            except (FileNotFoundError, subprocess.TimeoutExpired):
-                pass
-            del os.environ["DOCKER_HOST"]
 
-    return False
+def _docker_skip_reason() -> str:
+    reason: str = _docker_skip.docker_skip_reason(_docker_skip.probe_docker()[1])
+    return reason
 
 
 needs_docker = pytest.mark.skipif(
     not _docker_available(),
-    reason="Docker is not running; integration tests need it for the postgres testcontainer",
+    reason=_docker_skip_reason(),
 )
 
 
 @pytest.fixture(scope="session")
 def postgres_container() -> Iterator[Any]:
     if not _docker_available():
-        pytest.skip("Docker not available")
+        pytest.skip(_docker_skip_reason())
     from testcontainers.postgres import PostgresContainer
 
     # Ephemeral test server: crash-durability is meaningless for a throwaway

@@ -97,7 +97,7 @@ fi
 
 if ! should_skip tests; then
     echo "── pytest (unit) ──"
-    uv run pytest tests/unit -q || fail
+    uv run pytest tests/unit -q -n 2 -o faulthandler_timeout=120 || fail
 
     # Each connector suite runs as its own run: every connector
     # ``tests/`` dir has an ``__init__.py`` and no parent package, so pytest
