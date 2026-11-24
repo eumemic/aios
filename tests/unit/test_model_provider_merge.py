@@ -51,6 +51,7 @@ def test_agent_credentials_suppress_entire_row_credential_source() -> None:
         harness_kwargs={},
         resolved=_auth(),
         agent_extra={"api_key": "agent-key", "api_base": "https://agent.example"},
+        inline_credentials=True,
     )
     assert merged["api_key"] == "agent-key"
     assert merged["api_base"] == "https://agent.example"

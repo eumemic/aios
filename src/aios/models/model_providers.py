@@ -160,6 +160,16 @@ class ProviderAuth:
     credentials: dict[str, Any] = field(default_factory=dict, repr=False)
     litellm_defaults: dict[str, Any] = field(default_factory=dict)
 
+    @property
+    def has_credentials(self) -> bool:
+        """Whether the matched row carries credentials (vs. a defaults-only row).
+
+        A defaults-only row never constrains endpoint identity and never
+        satisfies credential admission: the call is credential-wise exactly
+        as if no row matched.
+        """
+        return bool(self.api_key) or bool(CREDENTIAL_KWARGS & self.credentials.keys())
+
 
 def provider_auth_conflict(
     *,

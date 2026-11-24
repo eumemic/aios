@@ -933,7 +933,12 @@ def _build_litellm_kwargs(
         kwargs["tools"] = sanitize_tools_for_provider(tools)
     from aios.services.model_providers import merge_provider_config
 
-    effective_extra = merge_provider_config(harness_kwargs={}, resolved=auth, agent_extra=extra)
+    effective_extra = merge_provider_config(
+        harness_kwargs={},
+        resolved=auth,
+        agent_extra=extra,
+        inline_credentials=get_settings().inference_credential_policy != "account_only",
+    )
     # Never permit LiteLLM's silent unsupported-parameter path, even when an
     # agent explicitly requests it through ``litellm_extra``.
     #

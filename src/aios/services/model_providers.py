@@ -36,6 +36,7 @@ from aios.db import queries
 from aios.models.attenuation import api_base_of
 from aios.models.model_providers import (
     CREDENTIAL_KWARGS,
+    ENDPOINT_KWARGS,
     REASONING_KWARGS,
     ModelProvider,
     ProviderAuth,
@@ -59,33 +60,75 @@ PROVIDER_AUTH_CONFLICT_MESSAGE = (
 )
 
 
+def inline_credentials_authoritative() -> bool:
+    """Whether an agent's inline credential kwargs may stand as their own source.
+
+    Under ``legacy_env``/``observe_legacy_env`` the issue #1816 all-or-nothing
+    rule applies: an agent ``litellm_extra`` carrying any ``CREDENTIAL_KWARGS``
+    key suppresses the matched row's credentials wholesale (today's oai-proxy
+    fleet). Under ``account_only`` (#1969) account rows are authoritative and
+    inline credential/endpoint kwargs are agent metadata that is stripped.
+    """
+    return get_settings().inference_credential_policy != "account_only"
+
+
 def merge_provider_config(
     *,
     harness_kwargs: dict[str, Any],
     resolved: ProviderAuth | None,
     agent_extra: dict[str, Any] | None,
+    inline_credentials: bool | None = None,
 ) -> dict[str, Any]:
-    """Merge call configuration without ever putting credentials in LlmRequest."""
-    agent = dict(agent_extra or {})
+    """The ONE merge of call kwargs, applied only at the litellm call boundary.
+
+    Precedence: harness kwargs < account ``litellm_defaults`` < account
+    credentials < agent ``litellm_extra``. Whole-key shallow merge with two
+    exceptions: an agent reasoning-family key drops the whole family from the
+    account defaults, and ``extra_body`` unions per key (agent wins). Returns
+    owned containers (deep copies) — callers mutate ``extra_body`` in place.
+
+    Credentials never enter ``LlmRequest.params``: this runs downstream of it.
+    ``inline_credentials`` defaults to :func:`inline_credentials_authoritative`.
+    """
+    agent = deepcopy(dict(agent_extra or {}))
     if "model" in agent:
         raise ValueError("model is forbidden in litellm_extra")
-    defaults = deepcopy(resolved.litellm_defaults if resolved else {})
+    if inline_credentials is None:
+        inline_credentials = inline_credentials_authoritative()
+    defaults: dict[str, Any] = deepcopy(resolved.litellm_defaults if resolved else {})
     if REASONING_KWARGS & agent.keys():
         for key in REASONING_KWARGS:
             defaults.pop(key, None)
-    credentials = deepcopy(resolved.credentials if resolved else {})
-    if CREDENTIAL_KWARGS & agent.keys():
-        credentials = {}
+    credentials: dict[str, Any] = {}
+    if resolved is not None:
+        credentials = deepcopy(resolved.credentials)
+        if resolved.api_key:
+            credentials["api_key"] = resolved.api_key
+        if api_base_of(credentials) is None and resolved.api_base is not None:
+            credentials["api_base"] = resolved.api_base
+        if not inline_credentials:
+            # Account row is authoritative: inline credential/endpoint kwargs
+            # are agent metadata, never combined with the row's secret.
+            for key in CREDENTIAL_KWARGS | ENDPOINT_KWARGS:
+                agent.pop(key, None)
+        elif CREDENTIAL_KWARGS & agent.keys():
+            # All-or-nothing: the agent's endpoint+credential pair stands alone.
+            credentials = {}
+        if ENDPOINT_KWARGS & agent.keys():
+            # One endpoint source only — LiteLLM's api_base-over-base_url
+            # precedence would otherwise silently invert "agent wins".
+            for key in ENDPOINT_KWARGS:
+                credentials.pop(key, None)
     merged = deepcopy(harness_kwargs)
     merged.update(defaults)
     merged.update(credentials)
-    row_extra_body = merged.get("extra_body")
+    lower_extra_body = merged.get("extra_body")
     agent_extra_body = agent.pop("extra_body", None)
     merged.update(agent)
-    if isinstance(row_extra_body, dict) and isinstance(agent_extra_body, dict):
-        merged["extra_body"] = {**deepcopy(row_extra_body), **deepcopy(agent_extra_body)}
+    if isinstance(lower_extra_body, dict) and isinstance(agent_extra_body, dict):
+        merged["extra_body"] = {**lower_extra_body, **agent_extra_body}
     elif agent_extra_body is not None:
-        merged["extra_body"] = deepcopy(agent_extra_body)
+        merged["extra_body"] = agent_extra_body
     return merged
 
 
@@ -282,7 +325,13 @@ async def _resolve_provider_auth(
     except json.JSONDecodeError:
         # Migration compatibility for rows written by 0140 as a bare API key.
         credentials = {"api_key": plaintext}
-    if api_base_of(credentials) is not None and not credentials.get("api_key"):
+    if not isinstance(credentials, dict):
+        credentials = {"api_key": plaintext}
+    if (
+        api_base_of(credentials) is not None or resolved.api_base is not None
+    ) and CREDENTIAL_KWARGS & credentials.keys() and not credentials.get("api_key"):
+        # Merge-time backstop for pre-validator rows: a credentialed row that
+        # yields an endpoint without a key must never fall back to env keys.
         raise ValueError("model-provider credentials endpoint requires api_key")
     return ProviderAuth(
         api_key=str(credentials.get("api_key", "")),
@@ -348,7 +397,12 @@ async def resolve_provider_auth_or_conflict(
     auth = await _resolve_provider_auth(
         pool, crypto_box, account_id=account_id, model=model, litellm_extra=litellm_extra
     )
+    # Only a credentialed row constrains endpoint identity; a defaults-only row
+    # leaves the call on the env credential path, so it is checked as no-row.
     conflict = await _check_provider_auth_conflict(
-        pool, account_id=account_id, litellm_extra=litellm_extra, resolved=auth
+        pool,
+        account_id=account_id,
+        litellm_extra=litellm_extra,
+        resolved=auth if auth is not None and auth.has_credentials else None,
     )
     return auth, conflict
