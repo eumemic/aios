@@ -146,7 +146,7 @@ class ModelProviderUpdate(BaseModel):
         credentials = dict(self.credentials or {})
         if self.api_key is not None:
             credentials["api_key"] = self.api_key.get_secret_value()
-        if "api_base" in self.model_fields_set and self.api_base is not None:
+        if credentials and "api_base" in self.model_fields_set and self.api_base is not None:
             credentials["api_base"] = self.api_base
         _validate_row_content(credentials or None, self.litellm_defaults or {})
         return self

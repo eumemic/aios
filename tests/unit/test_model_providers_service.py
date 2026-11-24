@@ -740,3 +740,33 @@ async def test_defaults_only_ancestor_row_does_not_constrain_endpoint(
         )
     assert conflict is None
     assert auth is not None and not auth.has_credentials
+
+
+def test_update_api_base_only_is_valid_and_keeps_blob() -> None:
+    from aios.models.model_providers import ModelProviderUpdate
+
+    body = ModelProviderUpdate.model_validate({"api_base": "https://new.example"})
+    assert body.api_base == "https://new.example"
+
+
+def test_update_credentials_endpoint_without_key_rejected() -> None:
+    from pydantic import ValidationError
+
+    from aios.models.model_providers import ModelProviderUpdate
+
+    with pytest.raises(ValidationError, match="requires api_key"):
+        ModelProviderUpdate.model_validate(
+            {"credentials": {"base_url": "https://x.example", "extra_headers": {}}}
+        )
+
+
+def test_create_defaults_reject_credential_and_endpoint_keys() -> None:
+    from pydantic import ValidationError
+
+    from aios.models.model_providers import ModelProviderCreate
+
+    for key in ("api_key", "base_url", "extra_headers", "aws_secret_access_key"):
+        with pytest.raises(ValidationError, match="litellm_defaults"):
+            ModelProviderCreate.model_validate(
+                {"provider": "anthropic", "api_key": "k", "litellm_defaults": {key: "x"}}
+            )

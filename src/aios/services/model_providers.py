@@ -222,7 +222,9 @@ async def update_model_provider(
     payload = dict(credentials or {})
     if api_key is not None:
         payload["api_key"] = api_key
-    if api_base is not ... and api_base is not None:
+    # An api_base-only edit stays a plaintext-column update: folding it into
+    # the blob would re-encrypt the credentials WITHOUT the existing key.
+    if payload and api_base is not ... and api_base is not None:
         payload["api_base"] = api_base
     blob = _encrypt_credentials(payload, crypto_box, account_id=account_id) if payload else None
     async with pool.acquire() as conn:
