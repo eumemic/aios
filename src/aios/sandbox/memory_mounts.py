@@ -19,7 +19,10 @@ post-exec hook in :mod:`aios.tools.bash_memory_reconcile`.
 
 from __future__ import annotations
 
+import ctypes
 import fcntl
+import os
+import struct
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +41,8 @@ log = get_logger("aios.sandbox.memory_mounts")
 
 MATERIALIZED_MARKER = ".materialized"
 _MARKER_VERSION = "v1"
+# Version tag of the out-of-tree record format (root-inode identity).
+_RECORD_VERSION = "v2"
 
 
 def _record_path(lock_path: Path) -> Path:
@@ -55,29 +60,95 @@ def materialization_record_path(store_id: str) -> Path:
     return _record_path(memory_store_lock_path(store_id))
 
 
+_AT_FDCWD = -100
+_STATX_INO = 0x100
+_STATX_BTIME = 0x800
+_FS_IOC_GETVERSION = 0x80087601  # _IOR('v', 1, long): inode generation
+
+
+def _statx_btime_ns(path: Path) -> int | None:
+    """Birth time (ns) of ``path`` via ``statx(2)``; None if unsupported.
+
+    Python 3.13 has no ``os.statx`` and ``os.stat`` exposes no birth time on
+    Linux, so call glibc's ``statx`` directly. Layout per ``struct statx``:
+    ``stx_mask`` at offset 0, ``stx_btime`` (s64 sec, u32 nsec) at offset 80.
+    """
+    statx = getattr(os, "statx", None)
+    if statx is not None:  # pragma: no cover - Python >= 3.15
+        try:
+            st = statx(path, _STATX_BTIME)
+            bt = getattr(st, "stx_birthtime_ns", None)
+            return int(bt) if bt else None
+        except OSError:
+            return None
+    libc = _libc()
+    if libc is None or not hasattr(libc, "statx"):
+        return None
+    buf = ctypes.create_string_buffer(256)
+    if libc.statx(_AT_FDCWD, os.fsencode(path), 0, _STATX_INO | _STATX_BTIME, buf) != 0:
+        return None
+    (mask,) = struct.unpack_from("I", buf, 0)
+    if not mask & _STATX_BTIME:
+        return None
+    sec, nsec = struct.unpack_from("qI", buf, 80)
+    return int(sec) * 1_000_000_000 + int(nsec)
+
+
+def _libc() -> Any:
+    try:
+        return ctypes.CDLL(None, use_errno=True)
+    except OSError:  # pragma: no cover - non-glibc platform
+        return None
+
+
+def _inode_generation(path: Path) -> int | None:
+    """Inode generation number (``FS_IOC_GETVERSION``); None if unsupported.
+
+    ext4 assigns a fresh random generation every time an inode number is
+    (re)allocated, which disambiguates a reused root inode even when two
+    directory creations fall in the same coarse-clock tick (identical btime).
+    """
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    except OSError:
+        return None
+    try:
+        raw = fcntl.ioctl(fd, _FS_IOC_GETVERSION, b"\0" * 8)
+        return int(struct.unpack("l", raw)[0])
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+
+
 def _dir_identity(host_dir: Path) -> str | None:
-    """Identity of the materialized directory instance; None if the marker is gone.
+    """Identity of the directory INSTANCE at ``host_dir``; None if absent.
 
-    Combines the root directory inode with the in-tree marker file's inode and
-    **ctime**. A wholesale restore (``rm -rf dir; cp -a backup dir``, rsync of a
-    snapshot, …) can reuse the freed root inode — ext4 hands the just-freed
-    number straight back — and it carries the old marker bytes, but it cannot
-    reproduce the marker's ctime: ctime is set by the kernel to "now" whenever
-    the inode is created or its metadata changes and is not settable from
-    userspace (``cp -a``/``copy2`` preserve mtime/atime only). An in-place
-    sandbox ``rm``/edit of other files never touches the marker inode, so the
-    identity stays stable across it (F1).
+    Built ONLY from immutable properties of the root directory inode — its
+    inode number, birth time (``statx`` btime) and inode generation — none of
+    which a process can change on an existing inode with chmod/chown/touch/
+    utime/link/rename/unlink inside the directory. The sandbox sees
+    ``host_dir`` as its bind-mount root, so it cannot replace the root inode
+    either: anything it does there happens IN PLACE and leaves this identity
+    unchanged (F1/F4).
 
-    ``st_dev`` is deliberately excluded: device numbers of network/overlay
-    filesystems can change across a reboot/remount, which would make every
-    store look "replaced" and turn an unreconciled delete into a restore.
+    A wholesale restore (``rm -rf dir; cp -a backup dir``) creates a NEW root
+    inode. Even when ext4 hands back the just-freed inode number, the new
+    inode gets a new birth time and a fresh random generation, and neither is
+    copied by ``cp -a``/rsync/``copy2`` (F3).
+
+    Deliberately NOT used: the in-tree ``.materialized`` marker (the sandbox
+    can chmod/touch/link/delete it, bumping its ctime or inode), any ctime or
+    mtime (changed by in-place metadata ops), and ``st_dev`` (unstable across
+    remounts of network/overlay filesystems).
     """
     try:
         root = host_dir.stat()
-        mst = (host_dir / MATERIALIZED_MARKER).stat()
     except OSError:
         return None
-    return f"{root.st_ino}:{mst.st_ino}:{mst.st_ctime_ns}"
+    btime = _statx_btime_ns(host_dir)
+    gen = _inode_generation(host_dir)
+    return f"{root.st_ino}:{btime if btime is not None else '-'}:{gen if gen is not None else '-'}"
 
 
 def _read_record(record: Path) -> str | None:
@@ -86,7 +157,7 @@ def _read_record(record: Path) -> str | None:
         parts = record.read_text().split()
     except OSError:
         return None
-    if len(parts) != 2 or parts[0] != _MARKER_VERSION:
+    if len(parts) != 2 or parts[0] != _RECORD_VERSION:
         return None
     return parts[1]
 
@@ -101,7 +172,7 @@ def _stamp(host_dir: Path, record: Path) -> None:
     atomic_write(host_dir / MATERIALIZED_MARKER, f"{_MARKER_VERSION}\n")
     identity = _dir_identity(host_dir)
     if identity is not None:
-        atomic_write(record, f"{_MARKER_VERSION} {identity}\n")
+        atomic_write(record, f"{_RECORD_VERSION} {identity}\n")
 
 
 async def materialize_store_to_host(
@@ -127,10 +198,12 @@ async def materialize_store_to_host(
     A rollback is detected by comparing the identity of the directory now at
     ``host_dir`` (see :func:`_dir_identity`) with the identity recorded in an
     out-of-tree record next to the lock file at the last materialization.
-    The record cannot be rolled back with the directory, and the identity
-    includes the in-tree marker's ctime, which a restored copy cannot carry
-    over even when the filesystem reuses the root inode. A mismatch (or a
-    vanished marker) means the directory was replaced/restored wholesale —
+    The record cannot be rolled back with the directory, and the identity is
+    taken only from the root directory inode (number + birth time + inode
+    generation), which no in-place operation — including metadata changes to
+    the in-tree marker or the root — can alter, and which a restored copy
+    cannot carry over even when the filesystem reuses the root inode number.
+    A mismatch means the directory was replaced/restored wholesale —
     something no sandbox command can do to its own bind-mount root. Only then
     are missing files filled in from the DB (never overwriting files on disk).
     """
@@ -145,27 +218,32 @@ async def materialize_store_to_host(
             recorded = _read_record(record)
             marker_present = marker.exists()
             ensure_owned_dir(host_dir)
-            if marker_present:
-                current = _dir_identity(host_dir)
-                if recorded is None:
-                    # Marker with no out-of-tree record: a legacy marker
-                    # (pre-#1721 empty file, or a pre-record identity marker).
-                    # There is no trustworthy record of which directory was
-                    # materialized, so a missing file is indistinguishable from
-                    # an unreconciled sandbox delete. Adopt the current
-                    # directory without restoring anything.
-                    _stamp(host_dir, record)
-                    return False
-                if recorded == current:
-                    # Same directory instance we materialized. Any DB row
-                    # missing on disk was removed IN PLACE — by a sandbox
-                    # command whose reconcile has not run yet (or timed out),
-                    # or by a mirror delete. Writing it back would resurrect a
-                    # deletion (F1); the bash reconcile is the authority here.
-                    return False
+            current = _dir_identity(host_dir)
+            if recorded is not None and recorded == current:
+                # Same directory instance we materialized (root inode, birth
+                # time and generation unchanged). Everything a sandbox can do
+                # inside its bind mount — rm, edits, chmod/chown/touch/link on
+                # the marker or root, even deleting the marker — happens IN
+                # PLACE and leaves this identity intact. Any DB row missing on
+                # disk was therefore removed in place, by a sandbox command
+                # whose reconcile has not run yet (or timed out) or by a
+                # mirror delete. Writing it back would resurrect a deletion
+                # (F1/F4); the bash reconcile is the authority here.
+                if not marker_present:
+                    atomic_write(marker, f"{_MARKER_VERSION}\n")
+                return False
+            if marker_present and recorded is None:
+                # Marker with no (current-format) out-of-tree record: a legacy
+                # marker (pre-#1721 empty file, or a pre-record identity
+                # marker). There is no trustworthy record of which directory
+                # was materialized, so a missing file is indistinguishable
+                # from an unreconciled sandbox delete. Adopt the current
+                # directory without restoring anything.
+                _stamp(host_dir, record)
+                return False
             # Reaching here with ``recorded`` set means the directory at
             # host_dir is not the instance we materialized: it was replaced /
-            # restored from a copy (identity mismatch) or wiped (marker gone).
+            # restored from a copy or wiped and recreated (identity mismatch).
             # A sandbox cannot replace its bind-mount root, so filling gaps
             # from the DB cannot undo a sandbox delete.
             was_materialized = recorded is not None
