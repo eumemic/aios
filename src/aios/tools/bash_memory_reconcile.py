@@ -93,6 +93,15 @@ from aios.tools import bash_memory_telemetry as telemetry
 
 log = get_logger("aios.tools.bash_memory_reconcile")
 
+# #1721: the after-scan is bookkeeping and must never hold the bash call
+# hostage. The bound applies to the off-loop *scan* only — the user's command
+# has already returned (or raised) by the time reconcile runs, and nothing in
+# this module can signal the sandbox process. On timeout the scan's result is
+# abandoned (no DB writes, no inferred deletes) and a warning is surfaced; the
+# files remain on the shared host dir (and DB truth is untouched); the
+# uncorrelated audit (#1748) surfaces any disk/DB divergence left behind.
+MEMORY_RECONCILE_SCAN_TIMEOUT_SECONDS = 30.0
+
 # Hot-window: any file whose before-ctime is within this many nanoseconds of
 # the pre-exec snapshot timestamp is ALWAYS a candidate, regardless of the
 # after-stat comparison. See module docstring — this is the load-bearing
@@ -135,8 +144,17 @@ class _NeverEqualSig(_Sig):
 
 _SENTINEL_SIG = _NeverEqualSig(size=-1, mtime_ns=-1, ctime_ns=-1, ino=-1)
 
-# Snapshot type: (store_id, store_path) -> stat signature.
-_Snapshot = dict[tuple[str, str], _Sig]
+
+class _Snapshot(dict[tuple[str, str], _Sig]):
+    """Signatures plus the host directories captured before exec.
+
+    Retaining stores independently from runtime's echo cache lets the after
+    pass recover writes even if teardown clears that cache mid-command.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.store_dirs: dict[str, Path] = {}
 
 
 class _Unreadable:
@@ -253,8 +271,9 @@ def _snapshot_sigs(session_id: str) -> _Snapshot:
     to run inline in the caller's thread (callers off the event loop via
     ``asyncio.to_thread``).
     """
-    snapshot: _Snapshot = {}
+    snapshot = _Snapshot()
     for store_id, host_dir in _iter_scannable_stores(session_id):
+        snapshot.store_dirs[store_id] = host_dir
         for fpath, store_path in _walk_store_files(host_dir):
             snapshot[(store_id, store_path)] = _stat_sig(fpath)
     return snapshot
@@ -350,7 +369,7 @@ class _ScanResult:
 
 def _scan_after(
     session_id: str,
-    before: _Snapshot,
+    before: dict[tuple[str, str], _Sig],
     snapshot_ns: int,
     *,
     force_hash: bool,
@@ -368,12 +387,20 @@ def _scan_after(
 
     Runs entirely off the event loop (call via ``asyncio.to_thread``).
     """
-    after_sigs: _Snapshot = {}
+    after_sigs: _Snapshot = _Snapshot()
     candidate_bytes: _BytesMap = {}
     scanned_store_ids: set[str] = set()
     candidate_read_count = 0
 
-    for store_id, host_dir in _iter_scannable_stores(session_id):
+    # Union of the pre-exec captured dirs (survive echo-cache eviction mid-bash,
+    # #1721) and the live echo view (a store materialized during the command).
+    stores: dict[str, Path] = dict(_iter_scannable_stores(session_id))
+    if isinstance(before, _Snapshot):
+        for store_id, host_dir in before.store_dirs.items():
+            stores.setdefault(store_id, host_dir)
+    for store_id, host_dir in stores.items():
+        if not host_dir.exists() or not (host_dir / MATERIALIZED_MARKER).exists():
+            continue
         scanned_store_ids.add(store_id)
         for fpath, store_path in _walk_store_files(host_dir):
             after_sig = _stat_sig(fpath)
@@ -508,7 +535,7 @@ def _warn_store_unscannable(
 
 
 async def reconcile_memory_mounts(
-    session_id: str, before: _Snapshot, snapshot_ns: int
+    session_id: str, before: dict[tuple[str, str], _Sig], snapshot_ns: int
 ) -> list[str]:
     """Diff memory mount state against ``before``; write DB changes.
 
@@ -544,7 +571,8 @@ async def reconcile_memory_mounts(
     # paying a thread-pool round trip just to discover an empty result.
     # ``runtime.get_session_memory_mounts`` is a plain dict read (no I/O), so
     # this check is free.
-    if not before and not has_writable_memory_mount(session_id):
+    captured_stores = isinstance(before, _Snapshot) and bool(before.store_dirs)
+    if not before and not captured_stores and not has_writable_memory_mount(session_id):
         telemetry.record_candidate_reads(0)
         return []
 
@@ -552,9 +580,25 @@ async def reconcile_memory_mounts(
 
     with telemetry.timed_phase("memory_reconcile"):
         with telemetry.timed_phase("after_scan"):
-            scan = await asyncio.to_thread(
-                _scan_after, session_id, before, snapshot_ns, force_hash=force_hash
-            )
+            try:
+                scan = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        _scan_after, session_id, before, snapshot_ns, force_hash=force_hash
+                    ),
+                    timeout=MEMORY_RECONCILE_SCAN_TIMEOUT_SECONDS,
+                )
+            except TimeoutError:
+                log.warning(
+                    "memory_reconcile.scan_timeout",
+                    session_id=session_id,
+                    timeout_seconds=MEMORY_RECONCILE_SCAN_TIMEOUT_SECONDS,
+                )
+                telemetry.record_candidate_reads(0)
+                return [
+                    f"memory scan timed out after {MEMORY_RECONCILE_SCAN_TIMEOUT_SECONDS:g}s; "
+                    "memory-file changes from this command may not be recorded "
+                    "(your command itself was not affected)"
+                ]
 
         after_sigs = scan.after_sigs
         candidate_bytes = scan.candidate_bytes
@@ -602,7 +646,7 @@ async def reconcile_memory_mounts(
 
 async def _reconcile_db_phase(
     session_id: str,
-    before: _Snapshot,
+    before: dict[tuple[str, str], _Sig],
     candidate_bytes: _BytesMap,
     real_deletes: list[tuple[str, str]],
     warnings: list[str],

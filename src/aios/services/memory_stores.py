@@ -33,6 +33,7 @@ from aios.models.memory_stores import (
     MemoryVersion,
 )
 from aios.sandbox.atomic_mirror import atomic_delete, atomic_write
+from aios.sandbox.memory_mounts import materialization_record_path
 from aios.sandbox.volumes import memory_store_host_dir
 
 
@@ -164,6 +165,9 @@ async def delete_store(pool: asyncpg.Pool[Any], store_id: str, *, account_id: st
     # because it's a best-effort cleanup — a missing dir means no session
     # ever provisioned for this store, which is fine.
     shutil.rmtree(memory_store_host_dir(store_id), ignore_errors=True)
+    # The materialization record lives outside the host dir (so a directory
+    # restore cannot roll it back); drop it too.
+    materialization_record_path(store_id).unlink(missing_ok=True)
 
 
 # ── memories ───────────────────────────────────────────────────────────────

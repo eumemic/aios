@@ -571,6 +571,28 @@ class TestReconcile:
         mocks["aios.tools.bash_memory_reconcile.memory_service.update_memory"].assert_not_awaited()
         assert any("/notes.md" in w for w in warnings)
 
+    async def test_create_survives_echo_cache_clear(self, tmp_path: Path) -> None:
+        """Captured host directories remain scannable after runtime echo eviction."""
+        from aios.tools.bash_memory_reconcile import reconcile_memory_mounts, snapshot_memory_mounts
+
+        host_dir = self._make_host_dir(tmp_path)
+        runtime.set_session_memory_mounts(SESSION_ID, [_echo()])
+        with patch("aios.tools.bash_memory_reconcile.memory_store_host_dir", return_value=host_dir):
+            before, snapshot_ns = snapshot_memory_mounts(SESSION_ID)
+        (host_dir / "created.md").write_text("durable\n")
+        runtime.clear_session_memory_mounts(SESSION_ID)
+        mocks = self._mocks()
+        with _patch_all(mocks):
+            await reconcile_memory_mounts(SESSION_ID, before, snapshot_ns)
+
+        mocks["aios.tools.bash_memory_reconcile.memory_service.create_memory"].assert_awaited_once()
+        assert (
+            mocks[
+                "aios.tools.bash_memory_reconcile.memory_service.create_memory"
+            ].await_args.kwargs["path"]
+            == "/created.md"
+        )
+
     async def test_store_unscannable_after_not_deleted(self, tmp_path: Path) -> None:
         """Whole store drops out of the after-scan (echo-cache cleared mid-bash):
         every delete is suppressed and the store is warned — the direct #1705
@@ -591,8 +613,9 @@ class TestReconcile:
         assert (STORE_A, "/notes.md") in before
         assert (STORE_A, "/log.md") in before
 
-        # Simulate the mount echo-cache clearing between before and reconcile.
+        # Simulate both echo-cache eviction and loss of the captured host view.
         runtime.clear_session_memory_mounts(SESSION_ID)
+        (host_dir / ".materialized").unlink()
 
         fake_memory = MagicMock()
         fake_memory.id = "mem_01FAKE0000000000000000004"
@@ -1378,3 +1401,37 @@ class TestFastPath:
         assert warnings == []
         mock_load_account.assert_not_awaited()
         assert telemetry.last_candidate_read_count() == 0
+
+
+class TestScanTimeout:
+    """#1721: the reconcile's timeout bounds the *scan*, never the user command."""
+
+    async def test_slow_scan_times_out_without_db_work(self, tmp_path: Path) -> None:
+        import threading
+
+        from aios.tools import bash_memory_reconcile as mod
+
+        host_dir = tmp_path / STORE_A
+        host_dir.mkdir()
+        (host_dir / ".materialized").touch()
+        runtime.set_session_memory_mounts(SESSION_ID, [_echo()])
+        release = threading.Event()
+
+        def slow_scan(*_args: Any, **_kwargs: Any) -> Any:
+            release.wait(5)
+            raise AssertionError("scan result must be abandoned")
+
+        create = AsyncMock()
+        try:
+            with (
+                patch.object(mod, "_scan_after", slow_scan),
+                patch.object(mod, "MEMORY_RECONCILE_SCAN_TIMEOUT_SECONDS", 0.05),
+                patch("aios.tools.bash_memory_reconcile.memory_service.create_memory", create),
+            ):
+                warnings = await mod.reconcile_memory_mounts(SESSION_ID, {}, 0)
+        finally:
+            release.set()
+            runtime.clear_session_memory_mounts(SESSION_ID)
+
+        assert any("scan timed out" in w for w in warnings)
+        create.assert_not_awaited()

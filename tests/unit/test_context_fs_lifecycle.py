@@ -170,3 +170,16 @@ def test_omission_marker_anchors_on_leading_notice() -> None:
         isinstance(m.get("content"), str) and "fresh base filesystem" in m["content"]
         for m in result.messages
     )
+
+
+def test_memory_mount_restored_renders_and_does_not_wake() -> None:
+    """#1721: the restore notice is model-visible but non-stimulus-bearing."""
+    events = [
+        _msg(1, "user", "hello"),
+        _lifecycle(2, {"event": "memory_mount_restored", "store_ids": ["memstore_x"]}),
+    ]
+    result = build_messages(events, system_prompt=None)
+    content = result.messages[-1]["content"]
+    assert result.messages[-1]["role"] == "user"
+    assert "restored" in content and "memstore_x" in content
+    assert result.reacting_to == 1

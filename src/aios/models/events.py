@@ -68,6 +68,11 @@ MODEL_VISIBLE_LIFECYCLE_EVENTS: frozenset[str] = frozenset(
         # cleared. Both non-stimulus-bearing: read at the next genuine wake.
         "browser_takeover_ended",
         "browser_state_lost",
+        # #1721: a memory mount that materialized with fewer files than the
+        # store's live DB rows was re-materialized from the DB. Rendered so
+        # the agent reads "your memory was restored" instead of inferring
+        # absence and hand-rebuilding. Non-stimulus-bearing.
+        "memory_mount_restored",
     }
 )
 

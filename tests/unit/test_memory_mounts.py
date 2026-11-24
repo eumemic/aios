@@ -18,9 +18,11 @@ without needing a lock.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import shutil
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -121,3 +123,201 @@ async def test_materialize_writes_when_target_absent(
     assert (host_dir / "foo.md").read_text() == "v1"
     assert (host_dir / "sub" / "bar.md").read_text() == "B"
     assert (host_dir / ".materialized").exists()
+
+
+def _patched(host_dir: Path, lock_path: Path, rows: list[tuple[str, str]]) -> Any:
+    async def snapshot(*_args: Any, **_kwargs: Any) -> list[tuple[str, str]]:
+        return list(rows)
+
+    return contextlib.ExitStack(), [
+        patch("aios.sandbox.memory_mounts.memory_store_host_dir", return_value=host_dir),
+        patch("aios.sandbox.memory_mounts.memory_store_lock_path", return_value=lock_path),
+        patch("aios.db.queries.list_active_memory_paths_and_content", snapshot),
+    ]
+
+
+async def _materialize(host_dir: Path, lock_path: Path, rows: list[tuple[str, str]]) -> bool:
+    stack, patches = _patched(host_dir, lock_path, rows)
+    with stack:
+        for p in patches:
+            stack.enter_context(p)
+        return await materialize_store_to_host(
+            MagicMock(), store_id="memstore_test", account_id="acc_test_stub"
+        )
+
+
+def _replace_dir_wholesale(host_dir: Path, keep: dict[str, str]) -> None:
+    """Simulate a rollback: the store root is replaced by a restored copy
+    (new directory inode) that carries the old marker but lost files."""
+    marker_bytes = (host_dir / ".materialized").read_bytes()
+    restored = host_dir.parent / "restored"
+    restored.mkdir()
+    (restored / ".materialized").write_bytes(marker_bytes)
+    for name, content in keep.items():
+        (restored / name).write_text(content)
+    shutil.rmtree(host_dir)
+    restored.rename(host_dir)
+
+
+async def test_materialize_repairs_wholesale_rollback(store_paths: tuple[Path, Path]) -> None:
+    host_dir, lock_path = store_paths
+    rows = [("/kept.md", "k"), ("/restored.md", "from db")]
+    assert await _materialize(host_dir, lock_path, rows) is False
+    _replace_dir_wholesale(host_dir, {"kept.md": "k"})
+
+    restored = await _materialize(host_dir, lock_path, rows)
+
+    assert restored is True
+    assert (host_dir / "restored.md").read_text() == "from db"
+    # Re-stamped: a second provision over the repaired dir is a no-op.
+    assert await _materialize(host_dir, lock_path, rows) is False
+
+
+async def test_rollback_from_backup_with_reused_inode_is_repaired(
+    store_paths: tuple[Path, Path],
+) -> None:
+    """F3: the ordinary restore (``rm -rf dir; cp -a backup dir``) of a backup
+    taken AFTER materialization (so it carries the marker) must be detected,
+    even though ext4 hands the freed root inode straight back to the copy."""
+    host_dir, lock_path = store_paths
+    backup = host_dir.parent / "backup"
+    await _materialize(host_dir, lock_path, [("/old.md", "o")])
+    shutil.copytree(host_dir, backup)
+    (host_dir / "new.md").write_text("n")
+    rows = [("/old.md", "o"), ("/new.md", "n")]
+    shutil.rmtree(host_dir)
+    shutil.copytree(backup, host_dir)
+
+    restored = await _materialize(host_dir, lock_path, rows)
+
+    assert restored is True
+    assert (host_dir / "new.md").read_text() == "n"
+    assert await _materialize(host_dir, lock_path, rows) is False
+
+
+async def test_wiped_store_dir_is_restored_with_signal(store_paths: tuple[Path, Path]) -> None:
+    """A materialized store whose dir vanished entirely (marker included) is
+    repaired AND reported, not silently re-materialized."""
+    host_dir, lock_path = store_paths
+    rows = [("/a.md", "a"), ("/b.md", "b")]
+    await _materialize(host_dir, lock_path, rows)
+    shutil.rmtree(host_dir)
+
+    assert await _materialize(host_dir, lock_path, rows) is True
+    assert (host_dir / "a.md").read_text() == "a"
+
+
+async def test_materialize_restore_preserves_unreconciled_sandbox_edit(
+    store_paths: tuple[Path, Path],
+) -> None:
+    """Restore fills missing files only; an on-disk degraded-window edit survives."""
+    host_dir, lock_path = store_paths
+    rows = [("/edited.md", "stale db"), ("/missing.md", "from db")]
+    await _materialize(host_dir, lock_path, rows)
+    _replace_dir_wholesale(host_dir, {"edited.md": "sandbox edit"})
+
+    restored = await _materialize(host_dir, lock_path, rows)
+
+    assert restored is True
+    assert (host_dir / "edited.md").read_text() == "sandbox edit"
+    assert (host_dir / "missing.md").read_text() == "from db"
+
+
+async def test_materialize_complete_marked_dir_is_noop(store_paths: tuple[Path, Path]) -> None:
+    host_dir, lock_path = store_paths
+    rows = [("/a.md", "a")]
+    await _materialize(host_dir, lock_path, rows)
+
+    assert await _materialize(host_dir, lock_path, rows) is False
+
+
+async def test_in_place_delete_is_not_restored(store_paths: tuple[Path, Path]) -> None:
+    """F1: a file removed from the SAME materialized directory (a sandbox
+    ``rm`` whose reconcile has not landed — peer bash still running, or the
+    scan timed out) must not be written back by a later provision."""
+    host_dir, lock_path = store_paths
+    rows = [("/keep.md", "k"), ("/gone.md", "g")]
+    await _materialize(host_dir, lock_path, rows)
+    (host_dir / "gone.md").unlink()
+
+    restored = await _materialize(host_dir, lock_path, rows)
+
+    assert restored is False
+    assert not (host_dir / "gone.md").exists()
+
+
+async def test_legacy_empty_marker_is_adopted_without_restore(
+    store_paths: tuple[Path, Path],
+) -> None:
+    """A pre-#1721 marker records no directory identity, so a missing file
+    cannot be told apart from an unreconciled delete: adopt, never restore."""
+    host_dir, lock_path = store_paths
+    host_dir.mkdir()
+    (host_dir / ".materialized").touch()
+    rows = [("/gone.md", "g")]
+
+    assert await _materialize(host_dir, lock_path, rows) is False
+    assert not (host_dir / "gone.md").exists()
+    assert (host_dir / ".materialized").read_text().strip() != ""
+
+
+async def test_in_flight_sandbox_delete_survives_peer_provision(
+    store_paths: tuple[Path, Path],
+) -> None:
+    """F1 end-to-end: session A's bash ``rm``s a file; before A's reconcile
+    runs, a peer provision re-materializes the shared store. The delete must
+    stay on disk AND reach the DB via A's reconcile."""
+    from aios.harness import runtime
+    from aios.models.memory_stores import MemoryStoreResourceEcho
+    from aios.tools.bash_memory_reconcile import (
+        reconcile_memory_mounts,
+        snapshot_memory_mounts,
+    )
+
+    host_dir, lock_path = store_paths
+    store_id = "memstore_test"
+    session_id = "sess_in_flight_delete"
+    rows = [("/keep.md", "k"), ("/gone.md", "g")]
+    await _materialize(host_dir, lock_path, rows)
+
+    echo = MemoryStoreResourceEcho(
+        memory_store_id=store_id,
+        access="read_write",
+        instructions="",
+        name="notes",
+        description="",
+        mount_path="/mnt/memory/notes",
+    )
+    runtime.set_session_memory_mounts(session_id, [echo])
+    fake_memory = MagicMock()
+    fake_memory.id = "mem_gone"
+    delete = AsyncMock()
+    prev_pool = runtime.pool
+    runtime.pool = MagicMock()
+    try:
+        with patch("aios.tools.bash_memory_reconcile.memory_store_host_dir", return_value=host_dir):
+            before, snapshot_ns = snapshot_memory_mounts(session_id)
+            (host_dir / "gone.md").unlink()  # session A's bash: rm gone.md
+            # Peer provision while A's delete is unreconciled; DB still lists it.
+            restored = await _materialize(host_dir, lock_path, rows)
+            with (
+                patch(
+                    "aios.tools.bash_memory_reconcile.memory_service.get_memory_by_path",
+                    AsyncMock(return_value=fake_memory),
+                ),
+                patch("aios.tools.bash_memory_reconcile.memory_service.delete_memory", delete),
+                patch("aios.tools.bash_memory_reconcile.memory_service.update_memory", AsyncMock()),
+                patch("aios.tools.bash_memory_reconcile.memory_service.create_memory", AsyncMock()),
+                patch(
+                    "aios.tools.bash_memory_reconcile.sessions_service.load_session_account_id",
+                    AsyncMock(return_value="acc_test_stub"),
+                ),
+            ):
+                await reconcile_memory_mounts(session_id, before, snapshot_ns)
+    finally:
+        runtime.pool = prev_pool
+        runtime.clear_session_memory_mounts(session_id)
+
+    assert not restored, "peer provision reported a rollback for an in-flight delete"
+    assert not (host_dir / "gone.md").exists(), "peer provision resurrected a deleted file"
+    delete.assert_awaited_once()

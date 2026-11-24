@@ -376,6 +376,16 @@ class SandboxSnapshotTimeoutError(SandboxBackendError):
     """Size-dependent snapshot work exceeded its deadline."""
 
 
+class SandboxTornDownError(SandboxBackendError):
+    """An exec was refused because the owner's sandbox is mid-teardown.
+
+    Raised by :meth:`SandboxRegistry.exec` instead of starting a command on a
+    container the idle reaper has already committed to destroying (#1721). A
+    :class:`SandboxBackendError` so callers treat it as the transient
+    infrastructure failure it is; the next provision gets a fresh sandbox.
+    """
+
+
 class SandboxCapacityError(SandboxBackendError):
     """A cold provision was refused because the host snapshot pool (or the
     owning account) is over its capacity budget.
