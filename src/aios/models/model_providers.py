@@ -48,6 +48,31 @@ ENDPOINT_KWARGS = frozenset({"api_base", "base_url", "aws_bedrock_runtime_endpoi
 REASONING_KWARGS = frozenset({"reasoning_effort", "thinking", "output_config"})
 
 
+# The CREDENTIAL_KWARGS members that actually carry a secret. Presence of a
+# non-secret family member alone (``aws_region_name``, ``extra_headers``, …)
+# suppresses row injection but does NOT stop LiteLLM's env-key fallback, so it
+# must never exempt the redirect guard.
+SECRET_CREDENTIAL_KWARGS = frozenset(
+    {"api_key", "aws_secret_access_key", "vertex_credentials", "azure_ad_token", "client_secret"}
+)
+
+
+def _inline_secret_present(litellm_extra: dict[str, Any]) -> bool:
+    """A real (non-degenerate) inline secret: a stripped-non-empty string.
+
+    A PRESENT-but-degenerate ``api_key`` (None, "", whitespace, non-str) is
+    treated by LiteLLM as absent (env fallback), so it disqualifies outright.
+    """
+    if "api_key" in litellm_extra:
+        key = litellm_extra["api_key"]
+        return isinstance(key, str) and bool(key.strip())
+    return any(
+        isinstance(v, str) and bool(v.strip())
+        for k, v in litellm_extra.items()
+        if k in SECRET_CREDENTIAL_KWARGS
+    )
+
+
 def _validate_row_content(
     credentials: dict[str, Any] | None, litellm_defaults: dict[str, Any]
 ) -> None:
@@ -214,15 +239,10 @@ def provider_auth_conflict(
     redirect = api_base_of(litellm_extra)
     if redirect is None:
         return False
-    if litellm_extra is not None and CREDENTIAL_KWARGS & litellm_extra.keys():
+    if litellm_extra is not None and _inline_secret_present(litellm_extra):
         # Agent endpoint + credential is an independent source; the resolved row
-        # is suppressed wholesale by merge_provider_config. Reject degenerate
-        # api_key values that LiteLLM would treat as environment fallback.
-        inline_key = litellm_extra.get("api_key")
-        if "api_key" not in litellm_extra or (
-            isinstance(inline_key, str) and bool(inline_key.strip())
-        ):
-            return False
+        # is suppressed wholesale by merge_provider_config.
+        return False
     if resolved is not None:
         return resolved.owner_account_id != account_id
     return not account_is_root

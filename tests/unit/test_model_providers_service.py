@@ -614,3 +614,129 @@ async def test_fused_entry_point_surfaces_conflict_with_resolved_auth(
     assert conflict == service.PROVIDER_AUTH_CONFLICT_MESSAGE
     assert auth is not None  # still resolved — the CALLER decides not to use it on conflict
     assert auth.owner_account_id == "acc_parent"
+
+
+class TestCredentialFamilies:
+    def test_non_secret_family_member_does_not_exempt_redirect(self) -> None:
+        """aws_region_name alone suppresses row injection but LiteLLM would
+        still fall back to env keys, so it must not exempt the guard."""
+        assert (
+            provider_auth_conflict(
+                litellm_extra={"base_url": "https://x.example", "aws_region_name": "us-east-1"},
+                resolved=None,
+                account_id="acc_child",
+                account_is_root=False,
+            )
+            is True
+        )
+
+    def test_inline_aws_secret_forms_independent_source(self) -> None:
+        assert (
+            provider_auth_conflict(
+                litellm_extra={
+                    "aws_bedrock_runtime_endpoint": "https://x.example",
+                    "aws_access_key_id": "AKIA",
+                    "aws_secret_access_key": "secret",
+                },
+                resolved=None,
+                account_id="acc_child",
+                account_is_root=False,
+            )
+            is False
+        )
+
+    def test_bedrock_endpoint_is_a_redirect(self) -> None:
+        assert (
+            provider_auth_conflict(
+                litellm_extra={"aws_bedrock_runtime_endpoint": "https://x.example"},
+                resolved=None,
+                account_id="acc_child",
+                account_is_root=False,
+            )
+            is True
+        )
+
+
+def _json_blob(crypto_box: CryptoBox, account_id: str, payload: dict[str, Any]) -> Any:
+    import json
+
+    return crypto_box.derive_account_subkey(account_id).encrypt(json.dumps(payload))
+
+
+async def test_resolve_returns_generalized_credentials_and_defaults(
+    crypto_box: CryptoBox,
+) -> None:
+    resolved = ResolvedModelProvider(
+        owner_account_id="acc_parent",
+        api_base=None,
+        blob=_json_blob(
+            crypto_box,
+            "acc_parent",
+            {"aws_access_key_id": "AKIA", "aws_secret_access_key": "s", "api_key": "k"},
+        ),
+        litellm_defaults={"thinking": {"type": "adaptive", "display": "summarized"}},
+    )
+    pool = fake_pool_yielding_conn(MagicMock())
+    with patch(
+        "aios.services.model_providers.queries.resolve_model_provider",
+        AsyncMock(return_value=resolved),
+    ):
+        auth = await service._resolve_provider_auth(
+            pool, crypto_box, account_id="acc_child", model="anthropic/claude-x", litellm_extra=None
+        )
+    assert auth is not None
+    assert auth.credentials["aws_secret_access_key"] == "s"
+    assert auth.litellm_defaults == {"thinking": {"type": "adaptive", "display": "summarized"}}
+    assert auth.has_credentials
+
+
+async def test_credentialed_row_endpoint_without_key_is_hard_error(crypto_box: CryptoBox) -> None:
+    """Merge-time backstop for pre-validator rows: never env-key fallback."""
+    resolved = ResolvedModelProvider(
+        owner_account_id="acc_x",
+        api_base="https://proxy.example",
+        blob=_json_blob(crypto_box, "acc_x", {"extra_headers": {"x": "y"}}),
+    )
+    pool = fake_pool_yielding_conn(MagicMock())
+    with (
+        patch(
+            "aios.services.model_providers.queries.resolve_model_provider",
+            AsyncMock(return_value=resolved),
+        ),
+        pytest.raises(ValueError, match="requires api_key"),
+    ):
+        await service._resolve_provider_auth(
+            pool, crypto_box, account_id="acc_x", model="anthropic/claude-x", litellm_extra=None
+        )
+
+
+async def test_defaults_only_ancestor_row_does_not_constrain_endpoint(
+    crypto_box: CryptoBox,
+) -> None:
+    """A defaults-only ancestor row is checked as no-row: a root account's
+    redirect is admissible (it holds the env keys), no ancestor-row conflict."""
+    resolved = ResolvedModelProvider(
+        owner_account_id="acc_parent",
+        api_base=None,
+        blob=_json_blob(crypto_box, "acc_parent", {}),
+        litellm_defaults={"reasoning_effort": "high"},
+    )
+    conn = MagicMock()
+    pool = fake_pool_yielding_conn(conn)
+    root = MagicMock(parent_account_id=None)
+    with (
+        patch(
+            "aios.services.model_providers.queries.resolve_model_provider",
+            AsyncMock(return_value=resolved),
+        ),
+        patch("aios.services.model_providers.queries.get_account", AsyncMock(return_value=root)),
+    ):
+        auth, conflict = await service.resolve_provider_auth_or_conflict(
+            pool,
+            crypto_box,
+            account_id="acc_root",
+            model="anthropic/claude-x",
+            litellm_extra={"api_base": "https://trusted.example"},
+        )
+    assert conflict is None
+    assert auth is not None and not auth.has_credentials

@@ -328,8 +328,10 @@ async def _resolve_provider_auth(
     if not isinstance(credentials, dict):
         credentials = {"api_key": plaintext}
     if (
-        api_base_of(credentials) is not None or resolved.api_base is not None
-    ) and CREDENTIAL_KWARGS & credentials.keys() and not credentials.get("api_key"):
+        (api_base_of(credentials) is not None or resolved.api_base is not None)
+        and CREDENTIAL_KWARGS & credentials.keys()
+        and not credentials.get("api_key")
+    ):
         # Merge-time backstop for pre-validator rows: a credentialed row that
         # yields an endpoint without a key must never fall back to env keys.
         raise ValueError("model-provider credentials endpoint requires api_key")
