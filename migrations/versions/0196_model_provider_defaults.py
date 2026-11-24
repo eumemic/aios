@@ -1,7 +1,7 @@
 """Add generalized model-provider defaults and optimistic versioning.
 
-Revision ID: 0167
-Revises: 0166
+Revision ID: 0196
+Revises: 0195
 """
 
 from __future__ import annotations
@@ -10,8 +10,8 @@ from collections.abc import Sequence
 
 from alembic import op
 
-revision: str = "0167"
-down_revision: str = "0166"
+revision: str = "0196"
+down_revision: str = "0195"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
