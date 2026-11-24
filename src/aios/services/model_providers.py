@@ -132,7 +132,7 @@ def merge_provider_config(
             # precedence would otherwise silently invert "agent wins".
             for key in ENDPOINT_KWARGS:
                 credentials.pop(key, None)
-    merged = _owned(harness_kwargs)
+    merged: dict[str, Any] = _owned(harness_kwargs)
     merged.update(defaults)
     merged.update(credentials)
     lower_extra_body = merged.get("extra_body")
