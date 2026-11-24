@@ -40,32 +40,68 @@ MATERIALIZED_MARKER = ".materialized"
 _MARKER_VERSION = "v1"
 
 
-def _dir_identity(host_dir: Path) -> int:
-    """Inode of the store root directory.
+def _record_path(lock_path: Path) -> Path:
+    """Out-of-tree materialization record for the store whose lock is ``lock_path``.
+
+    Lives next to the lock file (``<store_id>.materialized``), i.e. OUTSIDE the
+    store's host directory, so restoring the host directory from a backup
+    cannot carry an old copy of it back into place.
+    """
+    return lock_path.with_suffix(".materialized")
+
+
+def materialization_record_path(store_id: str) -> Path:
+    """Public accessor so store deletion can drop the out-of-tree record."""
+    return _record_path(memory_store_lock_path(store_id))
+
+
+def _dir_identity(host_dir: Path) -> str | None:
+    """Identity of the materialized directory instance; None if the marker is gone.
+
+    Combines the root directory inode with the in-tree marker file's inode and
+    **ctime**. A wholesale restore (``rm -rf dir; cp -a backup dir``, rsync of a
+    snapshot, …) can reuse the freed root inode — ext4 hands the just-freed
+    number straight back — and it carries the old marker bytes, but it cannot
+    reproduce the marker's ctime: ctime is set by the kernel to "now" whenever
+    the inode is created or its metadata changes and is not settable from
+    userspace (``cp -a``/``copy2`` preserve mtime/atime only). An in-place
+    sandbox ``rm``/edit of other files never touches the marker inode, so the
+    identity stays stable across it (F1).
 
     ``st_dev`` is deliberately excluded: device numbers of network/overlay
     filesystems can change across a reboot/remount, which would make every
     store look "replaced" and turn an unreconciled delete into a restore.
     """
-    return host_dir.stat().st_ino
-
-
-def _read_marker_identity(marker: Path) -> int | None:
-    """Parse the directory identity recorded in ``marker``; None if absent/legacy."""
     try:
-        parts = marker.read_text().split()
+        root = host_dir.stat()
+        mst = (host_dir / MATERIALIZED_MARKER).stat()
+    except OSError:
+        return None
+    return f"{root.st_ino}:{mst.st_ino}:{mst.st_ctime_ns}"
+
+
+def _read_record(record: Path) -> str | None:
+    """Parse the identity stored in the out-of-tree record; None if absent/garbled."""
+    try:
+        parts = record.read_text().split()
     except OSError:
         return None
     if len(parts) != 2 or parts[0] != _MARKER_VERSION:
         return None
-    try:
-        return int(parts[1])
-    except ValueError:
-        return None
+    return parts[1]
 
 
-def _write_marker(marker: Path, identity: int) -> None:
-    atomic_write(marker, f"{_MARKER_VERSION} {identity}\n")
+def _stamp(host_dir: Path, record: Path) -> None:
+    """Write the in-tree marker, then record its identity out of tree.
+
+    The in-tree marker stays because the bash reconcile and the audit gate on
+    it (an unmarked dir is "not materialized here"). The out-of-tree record is
+    what rollback detection trusts.
+    """
+    atomic_write(host_dir / MATERIALIZED_MARKER, f"{_MARKER_VERSION}\n")
+    identity = _dir_identity(host_dir)
+    if identity is not None:
+        atomic_write(record, f"{_MARKER_VERSION} {identity}\n")
 
 
 async def materialize_store_to_host(
@@ -88,12 +124,15 @@ async def materialize_store_to_host(
     peer session's bash still running, or a reconcile scan that timed out)
     looks exactly the same, and restoring it would resurrect the delete.
 
-    A rollback is detected only when the marker records a different
-    directory identity (root ``st_ino``) than the directory now at
-    ``host_dir`` — i.e. the directory was replaced or restored wholesale,
-    which no sandbox command can do to its own bind-mount root. Only then
-    are missing files filled in from the DB (never overwriting files on
-    disk).
+    A rollback is detected by comparing the identity of the directory now at
+    ``host_dir`` (see :func:`_dir_identity`) with the identity recorded in an
+    out-of-tree record next to the lock file at the last materialization.
+    The record cannot be rolled back with the directory, and the identity
+    includes the in-tree marker's ctime, which a restored copy cannot carry
+    over even when the filesystem reuses the root inode. A mismatch (or a
+    vanished marker) means the directory was replaced/restored wholesale —
+    something no sandbox command can do to its own bind-mount root. Only then
+    are missing files filled in from the DB (never overwriting files on disk).
     """
     host_dir = memory_store_host_dir(store_id)
     marker = host_dir / MATERIALIZED_MARKER
@@ -102,31 +141,34 @@ async def materialize_store_to_host(
     with lock_path.open("w") as lock_file:
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
         try:
-            was_materialized = marker.exists()
+            record = _record_path(lock_path)
+            recorded = _read_record(record)
+            marker_present = marker.exists()
             ensure_owned_dir(host_dir)
-            if was_materialized:
-                recorded = _read_marker_identity(marker)
+            if marker_present:
                 current = _dir_identity(host_dir)
                 if recorded is None:
-                    # Legacy (pre-#1721) empty marker: there is no record of
-                    # which directory was materialized, so a missing file is
-                    # indistinguishable from an unreconciled sandbox delete.
-                    # Adopt the current directory without restoring anything.
-                    _write_marker(marker, current)
+                    # Marker with no out-of-tree record: a legacy marker
+                    # (pre-#1721 empty file, or a pre-record identity marker).
+                    # There is no trustworthy record of which directory was
+                    # materialized, so a missing file is indistinguishable from
+                    # an unreconciled sandbox delete. Adopt the current
+                    # directory without restoring anything.
+                    _stamp(host_dir, record)
                     return False
                 if recorded == current:
-                    # Same directory we materialized. Any DB row missing on
-                    # disk was removed IN PLACE — by a sandbox command whose
-                    # reconcile has not run yet (or timed out), or by a mirror
-                    # delete. Writing it back would resurrect a deletion
-                    # (F1); the bash reconcile is the authority here.
+                    # Same directory instance we materialized. Any DB row
+                    # missing on disk was removed IN PLACE — by a sandbox
+                    # command whose reconcile has not run yet (or timed out),
+                    # or by a mirror delete. Writing it back would resurrect a
+                    # deletion (F1); the bash reconcile is the authority here.
                     return False
-                # The marker describes a different directory than the one now
-                # at host_dir: the directory was replaced/restored wholesale
-                # (a rollback). A sandbox cannot cause this — the store root
-                # is a bind-mount point, which cannot be removed or replaced
-                # from inside the container — so filling gaps from the DB
-                # cannot undo a sandbox delete.
+            # Reaching here with ``recorded`` set means the directory at
+            # host_dir is not the instance we materialized: it was replaced /
+            # restored from a copy (identity mismatch) or wiped (marker gone).
+            # A sandbox cannot replace its bind-mount root, so filling gaps
+            # from the DB cannot undo a sandbox delete.
+            was_materialized = recorded is not None
 
             entries = await queries.list_active_memory_paths_and_content(
                 conn, store_id, account_id=account_id
@@ -164,11 +206,11 @@ async def materialize_store_to_host(
                 atomic_write(target, content or "")
 
             # Marker last so a crash mid-materialization leaves an unmarked
-            # dir that the next attempt will redo. It records the identity of
-            # the directory it describes so a later provision can tell an
-            # in-place sandbox delete (same directory) from a wholesale
-            # rollback/replacement (different directory).
-            _write_marker(marker, _dir_identity(host_dir))
+            # dir that the next attempt will redo. The out-of-tree record
+            # captures this directory instance's identity so a later
+            # provision can tell an in-place sandbox delete (same instance)
+            # from a wholesale rollback/replacement (different instance).
+            _stamp(host_dir, record)
             log.info(
                 "memory.materialized",
                 store_id=store_id,

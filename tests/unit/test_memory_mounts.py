@@ -173,6 +173,40 @@ async def test_materialize_repairs_wholesale_rollback(store_paths: tuple[Path, P
     assert await _materialize(host_dir, lock_path, rows) is False
 
 
+async def test_rollback_from_backup_with_reused_inode_is_repaired(
+    store_paths: tuple[Path, Path],
+) -> None:
+    """F3: the ordinary restore (``rm -rf dir; cp -a backup dir``) of a backup
+    taken AFTER materialization (so it carries the marker) must be detected,
+    even though ext4 hands the freed root inode straight back to the copy."""
+    host_dir, lock_path = store_paths
+    backup = host_dir.parent / "backup"
+    await _materialize(host_dir, lock_path, [("/old.md", "o")])
+    shutil.copytree(host_dir, backup)
+    (host_dir / "new.md").write_text("n")
+    rows = [("/old.md", "o"), ("/new.md", "n")]
+    shutil.rmtree(host_dir)
+    shutil.copytree(backup, host_dir)
+
+    restored = await _materialize(host_dir, lock_path, rows)
+
+    assert restored is True
+    assert (host_dir / "new.md").read_text() == "n"
+    assert await _materialize(host_dir, lock_path, rows) is False
+
+
+async def test_wiped_store_dir_is_restored_with_signal(store_paths: tuple[Path, Path]) -> None:
+    """A materialized store whose dir vanished entirely (marker included) is
+    repaired AND reported, not silently re-materialized."""
+    host_dir, lock_path = store_paths
+    rows = [("/a.md", "a"), ("/b.md", "b")]
+    await _materialize(host_dir, lock_path, rows)
+    shutil.rmtree(host_dir)
+
+    assert await _materialize(host_dir, lock_path, rows) is True
+    assert (host_dir / "a.md").read_text() == "a"
+
+
 async def test_materialize_restore_preserves_unreconciled_sandbox_edit(
     store_paths: tuple[Path, Path],
 ) -> None:
