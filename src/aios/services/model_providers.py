@@ -22,7 +22,6 @@ added alongside this one without an explicit follow-up decision.
 from __future__ import annotations
 
 import json
-from copy import deepcopy
 from functools import lru_cache
 from types import EllipsisType
 from typing import Any
@@ -72,6 +71,20 @@ def inline_credentials_authoritative() -> bool:
     return get_settings().inference_credential_policy != "account_only"
 
 
+def _owned(value: Any) -> Any:
+    """Copy dict/list containers recursively; leave leaf objects shared.
+
+    ``deepcopy`` would choke on live objects an agent may pass through
+    ``litellm_extra`` (e.g. a ``client``), and copying the containers is all
+    ownership needs — in-place mutation only ever targets dicts.
+    """
+    if isinstance(value, dict):
+        return {k: _owned(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_owned(v) for v in value]
+    return value
+
+
 def merge_provider_config(
     *,
     harness_kwargs: dict[str, Any],
@@ -90,18 +103,18 @@ def merge_provider_config(
     Credentials never enter ``LlmRequest.params``: this runs downstream of it.
     ``inline_credentials`` defaults to :func:`inline_credentials_authoritative`.
     """
-    agent = deepcopy(dict(agent_extra or {}))
+    agent = _owned(dict(agent_extra or {}))
     if "model" in agent:
         raise ValueError("model is forbidden in litellm_extra")
     if inline_credentials is None:
         inline_credentials = inline_credentials_authoritative()
-    defaults: dict[str, Any] = deepcopy(resolved.litellm_defaults if resolved else {})
+    defaults: dict[str, Any] = _owned(resolved.litellm_defaults if resolved else {})
     if REASONING_KWARGS & agent.keys():
         for key in REASONING_KWARGS:
             defaults.pop(key, None)
     credentials: dict[str, Any] = {}
     if resolved is not None:
-        credentials = deepcopy(resolved.credentials)
+        credentials = _owned(resolved.credentials)
         if resolved.api_key:
             credentials["api_key"] = resolved.api_key
         if api_base_of(credentials) is None and resolved.api_base is not None:
@@ -119,7 +132,7 @@ def merge_provider_config(
             # precedence would otherwise silently invert "agent wins".
             for key in ENDPOINT_KWARGS:
                 credentials.pop(key, None)
-    merged = deepcopy(harness_kwargs)
+    merged = _owned(harness_kwargs)
     merged.update(defaults)
     merged.update(credentials)
     lower_extra_body = merged.get("extra_body")
