@@ -34,12 +34,15 @@ class ModelProviderUpdate:
             api_base (None | str | Unset):
             credentials (ModelProviderUpdateCredentialsType0 | None | Unset):
             litellm_defaults (ModelProviderUpdateLitellmDefaultsType0 | None | Unset):
+            version (int | None | Unset): Optional optimistic-concurrency guard: the version the caller last read. When set
+                and the row has moved on, the update is rejected with 409 and nothing is written.
     """
 
     api_key: None | str | Unset = UNSET
     api_base: None | str | Unset = UNSET
     credentials: ModelProviderUpdateCredentialsType0 | None | Unset = UNSET
     litellm_defaults: ModelProviderUpdateLitellmDefaultsType0 | None | Unset = UNSET
+    version: int | None | Unset = UNSET
 
     def to_dict(self) -> dict[str, Any]:
         from ..models.model_provider_update_credentials_type_0 import (
@@ -77,6 +80,12 @@ class ModelProviderUpdate:
         else:
             litellm_defaults = self.litellm_defaults
 
+        version: int | None | Unset
+        if isinstance(self.version, Unset):
+            version = UNSET
+        else:
+            version = self.version
+
         field_dict: dict[str, Any] = {}
 
         field_dict.update({})
@@ -88,6 +97,8 @@ class ModelProviderUpdate:
             field_dict["credentials"] = credentials
         if litellm_defaults is not UNSET:
             field_dict["litellm_defaults"] = litellm_defaults
+        if version is not UNSET:
+            field_dict["version"] = version
 
         return field_dict
 
@@ -160,11 +171,21 @@ class ModelProviderUpdate:
 
         litellm_defaults = _parse_litellm_defaults(d.pop("litellm_defaults", UNSET))
 
+        def _parse_version(data: object) -> int | None | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(int | None | Unset, data)
+
+        version = _parse_version(d.pop("version", UNSET))
+
         model_provider_update = cls(
             api_key=api_key,
             api_base=api_base,
             credentials=credentials,
             litellm_defaults=litellm_defaults,
+            version=version,
         )
 
         return model_provider_update

@@ -153,8 +153,15 @@ async def update_model_provider(
     blob: EncryptedBlob | None = None,
     api_base: str | EllipsisType | None = ...,
     litellm_defaults: dict[str, Any] | EllipsisType | None = ...,
+    expected_version: int | None = None,
 ) -> ModelProvider:
     """Update a config's key and/or ``api_base``.
+
+    ``expected_version`` (optional, agents-style optimistic concurrency): when
+    given, the write only lands if the row is still at that version — checked
+    up front (so a no-op body against a stale version still conflicts) AND in
+    the ``UPDATE`` predicate (the authoritative check against a concurrent
+    writer). A mismatch raises ``ConflictError`` (409) and writes nothing.
 
     Mirrors ``update_vault`` (pre-check + a ``WHERE ... archived_at IS NULL``
     guard that raises ``ConflictError`` when a concurrent archive won the
@@ -172,6 +179,8 @@ async def update_model_provider(
             f"model provider config {model_provider_id} is archived",
             detail={"id": model_provider_id},
         )
+    if expected_version is not None and current.version != expected_version:
+        raise _version_mismatch(model_provider_id, expected_version, current.version)
 
     args: list[Any] = [model_provider_id]
     sets: list[str] = []
@@ -190,17 +199,68 @@ async def update_model_provider(
         return current
     sets.extend(("version = version + 1", "updated_at = now()"))
     args.append(account_id)
-    sql = (
-        f"UPDATE model_providers SET {', '.join(sets)} "
-        f"WHERE id = $1 AND account_id = ${len(args)} AND archived_at IS NULL RETURNING *"
-    )
+    where = f"WHERE id = $1 AND account_id = ${len(args)} AND archived_at IS NULL"
+    if expected_version is not None:
+        args.append(expected_version)
+        where += f" AND version = ${len(args)}"
+    sql = f"UPDATE model_providers SET {', '.join(sets)} {where} RETURNING *"
     row = await conn.fetchrow(sql, *args)
     if row is None:
+        # No row matched (id, account, NOT archived[, version]): a racing
+        # archive or a concurrent version bump. Re-read to say which.
+        fresh = await get_model_provider(conn, model_provider_id, account_id=account_id)
+        if fresh.archived_at is None and expected_version is not None:
+            raise _version_mismatch(model_provider_id, expected_version, fresh.version)
         raise ConflictError(
             f"model provider config {model_provider_id} is archived",
             detail={"id": model_provider_id},
         )
     return _row_to_model_provider(row)
+
+
+def _version_mismatch(model_provider_id: str, expected: int, current: int) -> ConflictError:
+    return ConflictError(
+        f"version mismatch: expected {expected}, current is {current}",
+        detail={"expected": expected, "current": current, "id": model_provider_id},
+    )
+
+
+class LockedModelProvider(NamedTuple):
+    """The credential-bearing state of a row, read under ``FOR UPDATE``."""
+
+    api_base: str | None
+    blob: EncryptedBlob
+
+
+async def lock_model_provider(
+    conn: asyncpg.Connection[Any], model_provider_id: str, *, account_id: str
+) -> LockedModelProvider:
+    """Row-lock an active config and return its stored endpoint + encrypted blob.
+
+    Must run inside a transaction. Used by read-modify-write credential updates
+    so two concurrent partial updates serialize instead of each merging onto
+    the same stale blob.
+    """
+    row = await conn.fetchrow(
+        "SELECT api_base, ciphertext, nonce, archived_at FROM model_providers "
+        "WHERE id = $1 AND account_id = $2 FOR UPDATE",
+        model_provider_id,
+        account_id,
+    )
+    if row is None:
+        raise NotFoundError(
+            f"model provider config {model_provider_id} not found",
+            detail={"id": model_provider_id},
+        )
+    if row["archived_at"] is not None:
+        raise ConflictError(
+            f"model provider config {model_provider_id} is archived",
+            detail={"id": model_provider_id},
+        )
+    return LockedModelProvider(
+        api_base=row["api_base"],
+        blob=EncryptedBlob(ciphertext=bytes(row["ciphertext"]), nonce=bytes(row["nonce"])),
+    )
 
 
 async def archive_model_provider(

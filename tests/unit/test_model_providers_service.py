@@ -289,6 +289,22 @@ async def test_create_encrypts_under_caller_subkey(crypto_box: CryptoBox) -> Non
         crypto_box.derive_account_subkey("acc_y").decrypt(blob)
 
 
+def _locked(
+    crypto_box: CryptoBox,
+    account_id: str = "acc_x",
+    payload: dict[str, Any] | None = None,
+    api_base: str | None = None,
+) -> Any:
+    """Patch the row-lock read the blob-touching update path performs."""
+    from aios.db.queries import LockedModelProvider
+
+    blob = _json_blob(crypto_box, account_id, payload if payload is not None else {"api_key": "k"})
+    return patch(
+        "aios.services.model_providers.queries.lock_model_provider",
+        AsyncMock(return_value=LockedModelProvider(api_base=api_base, blob=blob)),
+    )
+
+
 async def test_update_omitted_api_base_passes_ellipsis(crypto_box: CryptoBox) -> None:
     conn = MagicMock()
     pool = fake_pool_yielding_conn(conn)
@@ -336,7 +352,10 @@ async def test_update_explicit_null_api_base_clears(crypto_box: CryptoBox) -> No
             }
         )
 
-    with patch("aios.services.model_providers.queries.update_model_provider", _update):
+    with (
+        _locked(crypto_box, api_base="https://old.example"),
+        patch("aios.services.model_providers.queries.update_model_provider", _update),
+    ):
         await service.update_model_provider(
             pool, crypto_box, "mp_1", account_id="acc_x", api_key=None, api_base=None
         )
@@ -369,7 +388,10 @@ async def test_update_service_layer_uses_presence_not_truthiness(crypto_box: Cry
             }
         )
 
-    with patch("aios.services.model_providers.queries.update_model_provider", _update):
+    with (
+        _locked(crypto_box),
+        patch("aios.services.model_providers.queries.update_model_provider", _update),
+    ):
         await service.update_model_provider(
             pool, crypto_box, "mp_1", account_id="acc_x", api_key=""
         )
@@ -385,6 +407,7 @@ async def test_update_racing_archive_raises_conflict(crypto_box: CryptoBox) -> N
     pool = fake_pool_yielding_conn(conn)
 
     with (
+        _locked(crypto_box),
         patch(
             "aios.services.model_providers.queries.update_model_provider",
             AsyncMock(side_effect=ConflictError("model provider config mp_1 is archived")),
@@ -749,15 +772,81 @@ def test_update_api_base_only_is_valid_and_keeps_blob() -> None:
     assert body.api_base == "https://new.example"
 
 
-def test_update_credentials_endpoint_without_key_rejected() -> None:
+def test_update_body_credentials_are_partial_so_endpoint_rule_is_deferred() -> None:
+    """A credentials patch is merged onto the stored set, so whether an
+    endpoint still has a key can only be judged on the merged result (the
+    service does that — below). The body validator still rejects unknown and
+    forbidden keys."""
     from pydantic import ValidationError
 
     from aios.models.model_providers import ModelProviderUpdate
 
-    with pytest.raises(ValidationError, match="requires api_key"):
-        ModelProviderUpdate.model_validate(
-            {"credentials": {"base_url": "https://x.example", "extra_headers": {}}}
+    ModelProviderUpdate.model_validate(
+        {"credentials": {"base_url": "https://x.example", "extra_headers": {}}}
+    )
+    with pytest.raises(ValidationError, match="unsupported keys"):
+        ModelProviderUpdate.model_validate({"credentials": {"model": "x"}})
+    with pytest.raises(ValidationError, match="credential or endpoint keys"):
+        ModelProviderUpdate.model_validate({"litellm_defaults": {"api_key": "x"}})
+
+
+async def test_update_credentials_endpoint_without_key_rejected(crypto_box: CryptoBox) -> None:
+    """Merged result with an endpoint but no key → 422, nothing written."""
+    from aios.errors import ValidationError
+
+    pool = fake_pool_yielding_conn(MagicMock())
+    update = AsyncMock()
+    with (
+        _locked(crypto_box, payload={"extra_headers": {}}, api_base=None),
+        patch("aios.services.model_providers.queries.update_model_provider", update),
+        pytest.raises(ValidationError, match="requires api_key"),
+    ):
+        await service.update_model_provider(
+            pool,
+            crypto_box,
+            "mp_1",
+            account_id="acc_x",
+            api_key=None,
+            credentials={"base_url": "https://x.example"},
         )
+    update.assert_not_awaited()
+
+
+async def test_update_credentials_merge_onto_stored_set(crypto_box: CryptoBox) -> None:
+    import json
+
+    pool = fake_pool_yielding_conn(MagicMock())
+    captured: dict[str, Any] = {}
+
+    async def _update(_conn: Any, _id: str, **kwargs: Any) -> Any:
+        captured.update(kwargs)
+        return MagicMock()
+
+    with (
+        _locked(
+            crypto_box,
+            payload={"api_key": "sk-keep", "api_base": "https://p.example", "client_id": "c"},
+            api_base="https://p.example",
+        ),
+        patch("aios.services.model_providers.queries.update_model_provider", _update),
+    ):
+        await service.update_model_provider(
+            pool,
+            crypto_box,
+            "mp_1",
+            account_id="acc_x",
+            api_key=None,
+            credentials={"extra_headers": {"x": "y"}, "client_id": None},
+            expected_version=3,
+        )
+    stored = json.loads(crypto_box.derive_account_subkey("acc_x").decrypt(captured["blob"]))
+    assert stored == {
+        "api_key": "sk-keep",
+        "api_base": "https://p.example",
+        "extra_headers": {"x": "y"},
+    }
+    assert captured["api_base"] is ...
+    assert captured["expected_version"] == 3
 
 
 def test_create_defaults_reject_credential_and_endpoint_keys() -> None:

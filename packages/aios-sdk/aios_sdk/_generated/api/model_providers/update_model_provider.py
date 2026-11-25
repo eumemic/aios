@@ -76,11 +76,14 @@ def sync_detailed(
 ) -> Response[HTTPValidationError | ModelProvider]:
     """Update
 
-     Rotate the key and/or edit ``api_base``.
+     Rotate the key, patch credentials, and/or edit ``api_base``/defaults.
 
     ``api_key`` omitted → keep the existing key (there is no way to clear it
     back to unset — archive and recreate instead). ``api_base`` omitted →
-    keep; explicit ``null`` → clear.
+    keep; explicit ``null`` → clear. ``credentials`` is merged onto the stored
+    set: listed keys replace, explicit ``null`` removes, omitted keys are kept;
+    a result that leaves an endpoint without ``api_key`` is rejected (422).
+    ``version``, when sent, must equal the row's current version (409 if not).
 
     Args:
         model_provider_id (str):
@@ -123,11 +126,14 @@ def sync(
 ) -> HTTPValidationError | ModelProvider | None:
     """Update
 
-     Rotate the key and/or edit ``api_base``.
+     Rotate the key, patch credentials, and/or edit ``api_base``/defaults.
 
     ``api_key`` omitted → keep the existing key (there is no way to clear it
     back to unset — archive and recreate instead). ``api_base`` omitted →
-    keep; explicit ``null`` → clear.
+    keep; explicit ``null`` → clear. ``credentials`` is merged onto the stored
+    set: listed keys replace, explicit ``null`` removes, omitted keys are kept;
+    a result that leaves an endpoint without ``api_key`` is rejected (422).
+    ``version``, when sent, must equal the row's current version (409 if not).
 
     Args:
         model_provider_id (str):
@@ -165,11 +171,14 @@ async def asyncio_detailed(
 ) -> Response[HTTPValidationError | ModelProvider]:
     """Update
 
-     Rotate the key and/or edit ``api_base``.
+     Rotate the key, patch credentials, and/or edit ``api_base``/defaults.
 
     ``api_key`` omitted → keep the existing key (there is no way to clear it
     back to unset — archive and recreate instead). ``api_base`` omitted →
-    keep; explicit ``null`` → clear.
+    keep; explicit ``null`` → clear. ``credentials`` is merged onto the stored
+    set: listed keys replace, explicit ``null`` removes, omitted keys are kept;
+    a result that leaves an endpoint without ``api_key`` is rejected (422).
+    ``version``, when sent, must equal the row's current version (409 if not).
 
     Args:
         model_provider_id (str):
@@ -210,11 +219,14 @@ async def asyncio(
 ) -> HTTPValidationError | ModelProvider | None:
     """Update
 
-     Rotate the key and/or edit ``api_base``.
+     Rotate the key, patch credentials, and/or edit ``api_base``/defaults.
 
     ``api_key`` omitted → keep the existing key (there is no way to clear it
     back to unset — archive and recreate instead). ``api_base`` omitted →
-    keep; explicit ``null`` → clear.
+    keep; explicit ``null`` → clear. ``credentials`` is merged onto the stored
+    set: listed keys replace, explicit ``null`` removes, omitted keys are kept;
+    a result that leaves an endpoint without ``api_key`` is rejected (422).
+    ``version``, when sent, must equal the row's current version (409 if not).
 
     Args:
         model_provider_id (str):

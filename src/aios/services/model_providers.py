@@ -32,6 +32,7 @@ import litellm
 from aios.config import get_settings
 from aios.crypto.vault import CryptoBox
 from aios.db import queries
+from aios.errors import ValidationError
 from aios.models.attenuation import api_base_of
 from aios.models.model_providers import (
     CREDENTIAL_KWARGS,
@@ -40,6 +41,7 @@ from aios.models.model_providers import (
     ModelProvider,
     ProviderAuth,
     provider_auth_conflict,
+    validate_row_content,
 )
 from aios.services.inference_credential_telemetry import observe_env_fallback
 
@@ -201,6 +203,52 @@ async def list_model_providers(
         )
 
 
+def _decode_credentials(plaintext: str) -> dict[str, Any]:
+    """Parse a decrypted blob: JSON credentials, or a 0140-era bare API key."""
+    try:
+        credentials = json.loads(plaintext)
+    except json.JSONDecodeError:
+        return {"api_key": plaintext}
+    if not isinstance(credentials, dict):
+        return {"api_key": plaintext}
+    return credentials
+
+
+def _merge_credentials(
+    existing: dict[str, Any],
+    *,
+    credentials: dict[str, Any] | None,
+    api_key: str | None,
+    api_base: str | EllipsisType | None,
+) -> dict[str, Any]:
+    """Apply a partial credentials update onto the stored (decrypted) set.
+
+    PATCH semantics, matching how ``api_key``/``api_base`` already behave on
+    this endpoint (omitted → keep): a key present in ``credentials`` replaces
+    the stored value, an explicit ``null`` removes it, and an omitted key is
+    kept. Credentials are write-only (never echoed), so replace-the-whole-blob
+    semantics would force a caller to re-send a secret it cannot read back
+    merely to add a header — and silently drop the key when it does not.
+    """
+    merged = dict(existing)
+    for key, value in (credentials or {}).items():
+        if value is None:
+            merged.pop(key, None)
+        else:
+            merged[key] = value
+    if api_key is not None:
+        merged["api_key"] = api_key
+    if api_base is not ...:
+        # One endpoint source: the explicit api_base replaces (or, on null,
+        # clears) every alias the blob may carry, so the stored blob, the
+        # plaintext column, and what resolution sees cannot disagree.
+        merged.pop("api_base", None)
+        merged.pop("base_url", None)
+        if api_base is not None:
+            merged["api_base"] = api_base
+    return merged
+
+
 async def update_model_provider(
     pool: asyncpg.Pool[Any],
     crypto_box: CryptoBox,
@@ -211,31 +259,71 @@ async def update_model_provider(
     api_base: str | EllipsisType | None = ...,
     credentials: dict[str, Any] | None = None,
     litellm_defaults: dict[str, Any] | EllipsisType | None = ...,
+    expected_version: int | None = None,
 ) -> ModelProvider:
-    """Rotate the key and/or edit ``api_base``.
+    """Rotate the key, patch credentials, and/or edit ``api_base``/defaults.
 
     ``api_key=None`` means "keep the existing key" (rotation is opt-in via an
     explicit value). ``api_base`` follows the ``model_fields_set`` convention
     at the router — pass ``...`` (the default) to keep, an explicit value
-    (including ``None``) to set/clear.
+    (including ``None``) to set/clear. ``credentials`` is a partial update
+    merged onto the stored set (see :func:`_merge_credentials`).
+
+    Any credential-touching change is a read-modify-write of the encrypted
+    blob under a row lock, so the stored key survives a partial update and two
+    concurrent partial updates serialize rather than merge onto the same stale
+    blob. The merged result is validated before it is written: a set that
+    would leave an endpoint without ``api_key`` (which
+    :func:`_resolve_provider_auth` refuses at call time) is rejected with a
+    422 and nothing is written.
+
+    ``expected_version``, when given, is checked (409 on mismatch) — see
+    :func:`aios.db.queries.update_model_provider`.
     """
-    payload = dict(credentials or {})
-    if api_key is not None:
-        payload["api_key"] = api_key
-    # An api_base-only edit stays a plaintext-column update: folding it into
-    # the blob would re-encrypt the credentials WITHOUT the existing key.
-    if payload and api_base is not ... and api_base is not None:
-        payload["api_base"] = api_base
-    blob = _encrypt_credentials(payload, crypto_box, account_id=account_id) if payload else None
+    touches_blob = credentials is not None or api_key is not None or api_base is not ...
     async with pool.acquire() as conn:
-        return await queries.update_model_provider(
-            conn,
-            model_provider_id,
-            account_id=account_id,
-            blob=blob,
-            api_base=api_base,
-            litellm_defaults=litellm_defaults,
-        )
+        if not touches_blob:
+            return await queries.update_model_provider(
+                conn,
+                model_provider_id,
+                account_id=account_id,
+                blob=None,
+                api_base=...,
+                litellm_defaults=litellm_defaults,
+                expected_version=expected_version,
+            )
+        async with conn.transaction():
+            locked = await queries.lock_model_provider(
+                conn, model_provider_id, account_id=account_id
+            )
+            # Owned-row edit: the blob is under THIS account's subkey. An
+            # archived row was rejected by the lock (ciphertext is zeroed).
+            existing = _decode_credentials(
+                crypto_box.derive_account_subkey(account_id).decrypt(locked.blob)
+            )
+            merged = _merge_credentials(
+                existing, credentials=credentials, api_key=api_key, api_base=api_base
+            )
+            retained_base = locked.api_base if api_base is ... else api_base
+            effective = dict(merged)
+            if api_base_of(effective) is None and retained_base is not None:
+                effective["api_base"] = retained_base
+            try:
+                validate_row_content(effective, {})
+            except ValueError as exc:
+                raise ValidationError(
+                    f"model provider config {model_provider_id}: {exc}",
+                    detail={"id": model_provider_id},
+                ) from exc
+            return await queries.update_model_provider(
+                conn,
+                model_provider_id,
+                account_id=account_id,
+                blob=_encrypt_credentials(merged, crypto_box, account_id=account_id),
+                api_base=api_base,
+                litellm_defaults=litellm_defaults,
+                expected_version=expected_version,
+            )
 
 
 async def archive_model_provider(
@@ -334,14 +422,8 @@ async def _resolve_provider_auth(
             # are never inherited by a descendant under a non-legacy policy.
             return None
     subkey = crypto_box.derive_account_subkey(resolved.owner_account_id)
-    plaintext = subkey.decrypt(resolved.blob)
-    try:
-        credentials = json.loads(plaintext)
-    except json.JSONDecodeError:
-        # Migration compatibility for rows written by 0140 as a bare API key.
-        credentials = {"api_key": plaintext}
-    if not isinstance(credentials, dict):
-        credentials = {"api_key": plaintext}
+    # Migration compatibility: rows written by 0140 hold a bare API key.
+    credentials = _decode_credentials(subkey.decrypt(resolved.blob))
     if (
         (api_base_of(credentials) is not None or resolved.api_base is not None)
         and CREDENTIAL_KWARGS & credentials.keys()

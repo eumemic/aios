@@ -73,8 +73,11 @@ def _inline_secret_present(litellm_extra: dict[str, Any]) -> bool:
     )
 
 
-def _validate_row_content(
-    credentials: dict[str, Any] | None, litellm_defaults: dict[str, Any]
+def validate_row_content(
+    credentials: dict[str, Any] | None,
+    litellm_defaults: dict[str, Any],
+    *,
+    require_key_with_endpoint: bool = True,
 ) -> None:
     forbidden = (CREDENTIAL_KWARGS | ENDPOINT_KWARGS) & litellm_defaults.keys()
     if forbidden:
@@ -85,7 +88,11 @@ def _validate_row_content(
         unknown = credentials.keys() - (CREDENTIAL_KWARGS | ENDPOINT_KWARGS)
         if unknown:
             raise ValueError(f"credentials contains unsupported keys: {sorted(unknown)}")
-        if api_base_of(credentials) is not None and not credentials.get("api_key"):
+        if (
+            require_key_with_endpoint
+            and api_base_of(credentials) is not None
+            and not credentials.get("api_key")
+        ):
             raise ValueError("credentials endpoint requires api_key")
 
 
@@ -115,7 +122,7 @@ class ModelProviderCreate(BaseModel):
             credentials["api_key"] = self.api_key.get_secret_value()
         if self.api_base is not None:
             credentials["api_base"] = self.api_base
-        _validate_row_content(credentials or None, self.litellm_defaults)
+        validate_row_content(credentials or None, self.litellm_defaults)
         return self
 
     @field_validator("provider")
@@ -140,15 +147,27 @@ class ModelProviderUpdate(BaseModel):
     api_base: str | None = None
     credentials: dict[str, Any] | None = None
     litellm_defaults: dict[str, Any] | None = None
+    version: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Optional optimistic-concurrency guard: the version the caller last "
+            "read. When set and the row has moved on, the update is rejected "
+            "with 409 and nothing is written."
+        ),
+    )
 
     @model_validator(mode="after")
     def _validate_content(self) -> ModelProviderUpdate:
-        credentials = dict(self.credentials or {})
-        if self.api_key is not None:
-            credentials["api_key"] = self.api_key.get_secret_value()
-        if credentials and "api_base" in self.model_fields_set and self.api_base is not None:
-            credentials["api_base"] = self.api_base
-        _validate_row_content(credentials or None, self.litellm_defaults or {})
+        # ``credentials`` is a PARTIAL update merged onto the stored set
+        # (omitted keys kept, explicit null removes), so the endpoint-needs-key
+        # rule can only be judged on the merged result — the service does that.
+        # Here: key-family shape only.
+        validate_row_content(
+            self.credentials,
+            self.litellm_defaults or {},
+            require_key_with_endpoint=False,
+        )
         return self
 
 

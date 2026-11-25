@@ -90,11 +90,14 @@ async def update(
     crypto_box: CryptoBoxDep,
     account_id: AccountIdDep,
 ) -> ModelProvider:
-    """Rotate the key and/or edit ``api_base``.
+    """Rotate the key, patch credentials, and/or edit ``api_base``/defaults.
 
     ``api_key`` omitted → keep the existing key (there is no way to clear it
     back to unset — archive and recreate instead). ``api_base`` omitted →
-    keep; explicit ``null`` → clear.
+    keep; explicit ``null`` → clear. ``credentials`` is merged onto the stored
+    set: listed keys replace, explicit ``null`` removes, omitted keys are kept;
+    a result that leaves an endpoint without ``api_key`` is rejected (422).
+    ``version``, when sent, must equal the row's current version (409 if not).
     """
     api_base = body.api_base if "api_base" in body.model_fields_set else ...
     litellm_defaults = body.litellm_defaults if "litellm_defaults" in body.model_fields_set else ...
@@ -107,6 +110,7 @@ async def update(
         api_base=api_base,
         credentials=body.credentials,
         litellm_defaults=litellm_defaults,
+        expected_version=body.version,
     )
 
 

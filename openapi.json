@@ -7709,7 +7709,7 @@
           "model-providers"
         ],
         "summary": "Update",
-        "description": "Rotate the key and/or edit ``api_base``.\n\n``api_key`` omitted \u2192 keep the existing key (there is no way to clear it\nback to unset \u2014 archive and recreate instead). ``api_base`` omitted \u2192\nkeep; explicit ``null`` \u2192 clear.",
+        "description": "Rotate the key, patch credentials, and/or edit ``api_base``/defaults.\n\n``api_key`` omitted \u2192 keep the existing key (there is no way to clear it\nback to unset \u2014 archive and recreate instead). ``api_base`` omitted \u2192\nkeep; explicit ``null`` \u2192 clear. ``credentials`` is merged onto the stored\nset: listed keys replace, explicit ``null`` removes, omitted keys are kept;\na result that leaves an endpoint without ``api_key`` is rejected (422).\n``version``, when sent, must equal the row's current version (409 if not).",
         "operationId": "update_model_provider",
         "parameters": [
           {
@@ -17719,6 +17719,19 @@
               }
             ],
             "title": "Litellm Defaults"
+          },
+          "version": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version",
+            "description": "Optional optimistic-concurrency guard: the version the caller last read. When set and the row has moved on, the update is rejected with 409 and nothing is written."
           }
         },
         "additionalProperties": false,

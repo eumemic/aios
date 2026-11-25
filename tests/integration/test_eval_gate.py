@@ -44,6 +44,7 @@ from aios.harness.completion import LlmRequest, LlmResponse
 from aios.harness.trigger_runner import run_trigger_step
 from aios.ids import EVENT, make_id
 from aios.models.agents import ToolSpec
+from aios.models.model_providers import ProviderAuth
 from aios.models.triggers import OperatorTriggerCreate
 from aios.models.workflows import TERMINAL_RUN_STATUSES, OperatorAuthority, WfRun
 from aios.services import agents as agents_service
@@ -504,6 +505,9 @@ async def _gate(
     return done.output, models
 
 
+_FAKE_AUTH = ProviderAuth(api_key="sk-fake", api_base=None, owner_account_id="acc_fake")
+
+
 @contextlib.contextmanager
 def _faked(models: FakeModels, settings: Settings | None = None) -> Iterator[None]:
     """Requests rebuild from the fake corpus and every inference goes to the fakes.
@@ -516,7 +520,9 @@ def _faked(models: FakeModels, settings: Settings | None = None) -> Iterator[Non
         mock.patch("aios.workflows.run_llm.runtime.require_crypto_box"),
         mock.patch(
             "aios.workflows.run_llm.model_providers_service.resolve_provider_auth_or_conflict",
-            AsyncMock(return_value=(object(), None)),
+            # A real ProviderAuth, not a bare object(): run_llm's admission gate
+            # reads ``auth.has_credentials`` (#1816), the production contract.
+            AsyncMock(return_value=(_FAKE_AUTH, None)),
         ),
         mock.patch("aios.workflows.service.get_settings", return_value=settings or get_settings()),
     ):
