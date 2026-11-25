@@ -21,6 +21,7 @@ added alongside this one without an explicit follow-up decision.
 
 from __future__ import annotations
 
+import json
 from functools import lru_cache
 from types import EllipsisType
 from typing import Any
@@ -31,8 +32,18 @@ import litellm
 from aios.config import get_settings
 from aios.crypto.vault import CryptoBox
 from aios.db import queries
+from aios.errors import ValidationError
 from aios.models.attenuation import api_base_of
-from aios.models.model_providers import ModelProvider, ProviderAuth, provider_auth_conflict
+from aios.models.model_providers import (
+    CREDENTIAL_KWARGS,
+    ENDPOINT_KWARGS,
+    REASONING_KWARGS,
+    ModelProvider,
+    ProviderAuth,
+    credential_flags,
+    provider_auth_conflict,
+    validate_row_content,
+)
 from aios.services.inference_credential_telemetry import observe_env_fallback
 
 # Surfaced as a session's stop_reason.message (session-visible) and, on the
@@ -51,8 +62,98 @@ PROVIDER_AUTH_CONFLICT_MESSAGE = (
 )
 
 
-def _encrypt_api_key(api_key: str, crypto_box: CryptoBox, *, account_id: str) -> Any:
-    return crypto_box.derive_account_subkey(account_id).encrypt(api_key)
+def inline_credentials_authoritative() -> bool:
+    """Whether an agent's inline credential kwargs may stand as their own source.
+
+    Under ``legacy_env``/``observe_legacy_env`` the issue #1816 all-or-nothing
+    rule applies: an agent ``litellm_extra`` carrying any ``CREDENTIAL_KWARGS``
+    key suppresses the matched row's credentials wholesale (today's oai-proxy
+    fleet). Under ``account_only`` (#1969) account rows are authoritative and
+    inline credential/endpoint kwargs are agent metadata that is stripped.
+    """
+    return get_settings().inference_credential_policy != "account_only"
+
+
+def _owned(value: Any) -> Any:
+    """Copy dict/list containers recursively; leave leaf objects shared.
+
+    ``deepcopy`` would choke on live objects an agent may pass through
+    ``litellm_extra`` (e.g. a ``client``), and copying the containers is all
+    ownership needs — in-place mutation only ever targets dicts.
+    """
+    if isinstance(value, dict):
+        return {k: _owned(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_owned(v) for v in value]
+    return value
+
+
+def merge_provider_config(
+    *,
+    harness_kwargs: dict[str, Any],
+    resolved: ProviderAuth | None,
+    agent_extra: dict[str, Any] | None,
+    inline_credentials: bool | None = None,
+) -> dict[str, Any]:
+    """The ONE merge of call kwargs, applied only at the litellm call boundary.
+
+    Precedence: harness kwargs < account ``litellm_defaults`` < account
+    credentials < agent ``litellm_extra``. Whole-key shallow merge with two
+    exceptions: an agent reasoning-family key drops the whole family from the
+    account defaults, and ``extra_body`` unions per key (agent wins). Returns
+    owned containers (deep copies) — callers mutate ``extra_body`` in place.
+
+    Credentials never enter ``LlmRequest.params``: this runs downstream of it.
+    ``inline_credentials`` defaults to :func:`inline_credentials_authoritative`.
+    """
+    agent = _owned(dict(agent_extra or {}))
+    if "model" in agent:
+        raise ValueError("model is forbidden in litellm_extra")
+    if inline_credentials is None:
+        inline_credentials = inline_credentials_authoritative()
+    defaults: dict[str, Any] = _owned(resolved.litellm_defaults if resolved else {})
+    if REASONING_KWARGS & agent.keys():
+        for key in REASONING_KWARGS:
+            defaults.pop(key, None)
+    credentials: dict[str, Any] = {}
+    if resolved is not None:
+        credentials = _owned(resolved.credentials)
+        if resolved.api_key:
+            credentials["api_key"] = resolved.api_key
+        if api_base_of(credentials) is None and resolved.api_base is not None:
+            credentials["api_base"] = resolved.api_base
+        if not inline_credentials:
+            # Account row is authoritative: inline credential/endpoint kwargs
+            # are agent metadata, never combined with the row's secret.
+            for key in CREDENTIAL_KWARGS | ENDPOINT_KWARGS:
+                agent.pop(key, None)
+        elif CREDENTIAL_KWARGS & agent.keys():
+            # All-or-nothing: the agent's endpoint+credential pair stands alone.
+            credentials = {}
+        if ENDPOINT_KWARGS & agent.keys():
+            # One endpoint source only — LiteLLM's api_base-over-base_url
+            # precedence would otherwise silently invert "agent wins".
+            for key in ENDPOINT_KWARGS:
+                credentials.pop(key, None)
+    merged: dict[str, Any] = _owned(harness_kwargs)
+    merged.update(defaults)
+    merged.update(credentials)
+    lower_extra_body = merged.get("extra_body")
+    agent_extra_body = agent.pop("extra_body", None)
+    merged.update(agent)
+    if isinstance(lower_extra_body, dict) and isinstance(agent_extra_body, dict):
+        merged["extra_body"] = {**lower_extra_body, **agent_extra_body}
+    elif agent_extra_body is not None:
+        merged["extra_body"] = agent_extra_body
+    return merged
+
+
+def _encrypt_credentials(
+    credentials: dict[str, Any], crypto_box: CryptoBox, *, account_id: str
+) -> Any:
+    return crypto_box.derive_account_subkey(account_id).encrypt(
+        json.dumps(credentials, separators=(",", ":"), sort_keys=True)
+    )
 
 
 async def create_model_provider(
@@ -61,16 +162,25 @@ async def create_model_provider(
     *,
     account_id: str,
     provider: str,
-    api_key: str,
+    api_key: str | None,
     api_base: str | None,
+    credentials: dict[str, Any] | None = None,
+    litellm_defaults: dict[str, Any] | None = None,
 ) -> ModelProvider:
+    payload = dict(credentials or {})
+    if api_key is not None:
+        payload["api_key"] = api_key
+    if api_base is not None:
+        payload["api_base"] = api_base
     async with pool.acquire() as conn:
         return await queries.insert_model_provider(
             conn,
             account_id=account_id,
             provider=provider,
             api_base=api_base,
-            blob=_encrypt_api_key(api_key, crypto_box, account_id=account_id),
+            blob=_encrypt_credentials(payload, crypto_box, account_id=account_id),
+            litellm_defaults=litellm_defaults,
+            flags=credential_flags(payload),
         )
 
 
@@ -95,6 +205,52 @@ async def list_model_providers(
         )
 
 
+def _decode_credentials(plaintext: str) -> dict[str, Any]:
+    """Parse a decrypted blob: JSON credentials, or a 0140-era bare API key."""
+    try:
+        credentials = json.loads(plaintext)
+    except json.JSONDecodeError:
+        return {"api_key": plaintext}
+    if not isinstance(credentials, dict):
+        return {"api_key": plaintext}
+    return credentials
+
+
+def _merge_credentials(
+    existing: dict[str, Any],
+    *,
+    credentials: dict[str, Any] | None,
+    api_key: str | None,
+    api_base: str | EllipsisType | None,
+) -> dict[str, Any]:
+    """Apply a partial credentials update onto the stored (decrypted) set.
+
+    PATCH semantics, matching how ``api_key``/``api_base`` already behave on
+    this endpoint (omitted → keep): a key present in ``credentials`` replaces
+    the stored value, an explicit ``null`` removes it, and an omitted key is
+    kept. Credentials are write-only (never echoed), so replace-the-whole-blob
+    semantics would force a caller to re-send a secret it cannot read back
+    merely to add a header — and silently drop the key when it does not.
+    """
+    merged = dict(existing)
+    for key, value in (credentials or {}).items():
+        if value is None:
+            merged.pop(key, None)
+        else:
+            merged[key] = value
+    if api_key is not None:
+        merged["api_key"] = api_key
+    if api_base is not ...:
+        # One endpoint source: the explicit api_base replaces (or, on null,
+        # clears) every alias the blob may carry, so the stored blob, the
+        # plaintext column, and what resolution sees cannot disagree.
+        merged.pop("api_base", None)
+        merged.pop("base_url", None)
+        if api_base is not None:
+            merged["api_base"] = api_base
+    return merged
+
+
 async def update_model_provider(
     pool: asyncpg.Pool[Any],
     crypto_box: CryptoBox,
@@ -103,23 +259,74 @@ async def update_model_provider(
     account_id: str,
     api_key: str | None,
     api_base: str | EllipsisType | None = ...,
+    credentials: dict[str, Any] | None = None,
+    litellm_defaults: dict[str, Any] | EllipsisType | None = ...,
+    expected_version: int | None = None,
 ) -> ModelProvider:
-    """Rotate the key and/or edit ``api_base``.
+    """Rotate the key, patch credentials, and/or edit ``api_base``/defaults.
 
     ``api_key=None`` means "keep the existing key" (rotation is opt-in via an
     explicit value). ``api_base`` follows the ``model_fields_set`` convention
     at the router — pass ``...`` (the default) to keep, an explicit value
-    (including ``None``) to set/clear.
+    (including ``None``) to set/clear. ``credentials`` is a partial update
+    merged onto the stored set (see :func:`_merge_credentials`).
+
+    Any credential-touching change is a read-modify-write of the encrypted
+    blob under a row lock, so the stored key survives a partial update and two
+    concurrent partial updates serialize rather than merge onto the same stale
+    blob. The merged result is validated before it is written: a set that
+    would leave an endpoint without ``api_key`` (which
+    :func:`_resolve_provider_auth` refuses at call time) is rejected with a
+    422 and nothing is written.
+
+    ``expected_version``, when given, is checked (409 on mismatch) — see
+    :func:`aios.db.queries.update_model_provider`.
     """
-    blob = (
-        _encrypt_api_key(api_key, crypto_box, account_id=account_id)
-        if api_key is not None
-        else None
-    )
+    touches_blob = credentials is not None or api_key is not None or api_base is not ...
     async with pool.acquire() as conn:
-        return await queries.update_model_provider(
-            conn, model_provider_id, account_id=account_id, blob=blob, api_base=api_base
-        )
+        if not touches_blob:
+            return await queries.update_model_provider(
+                conn,
+                model_provider_id,
+                account_id=account_id,
+                blob=None,
+                api_base=...,
+                litellm_defaults=litellm_defaults,
+                expected_version=expected_version,
+            )
+        async with conn.transaction():
+            locked = await queries.lock_model_provider(
+                conn, model_provider_id, account_id=account_id
+            )
+            # Owned-row edit: the blob is under THIS account's subkey. An
+            # archived row was rejected by the lock (ciphertext is zeroed).
+            existing = _decode_credentials(
+                crypto_box.derive_account_subkey(account_id).decrypt(locked.blob)
+            )
+            merged = _merge_credentials(
+                existing, credentials=credentials, api_key=api_key, api_base=api_base
+            )
+            retained_base = locked.api_base if api_base is ... else api_base
+            effective = dict(merged)
+            if api_base_of(effective) is None and retained_base is not None:
+                effective["api_base"] = retained_base
+            try:
+                validate_row_content(effective, {})
+            except ValueError as exc:
+                raise ValidationError(
+                    f"model provider config {model_provider_id}: {exc}",
+                    detail={"id": model_provider_id},
+                ) from exc
+            return await queries.update_model_provider(
+                conn,
+                model_provider_id,
+                account_id=account_id,
+                blob=_encrypt_credentials(merged, crypto_box, account_id=account_id),
+                flags=credential_flags(merged),
+                api_base=api_base,
+                litellm_defaults=litellm_defaults,
+                expected_version=expected_version,
+            )
 
 
 async def archive_model_provider(
@@ -218,10 +425,22 @@ async def _resolve_provider_auth(
             # are never inherited by a descendant under a non-legacy policy.
             return None
     subkey = crypto_box.derive_account_subkey(resolved.owner_account_id)
+    # Migration compatibility: rows written by 0140 hold a bare API key.
+    credentials = _decode_credentials(subkey.decrypt(resolved.blob))
+    if (
+        (api_base_of(credentials) is not None or resolved.api_base is not None)
+        and CREDENTIAL_KWARGS & credentials.keys()
+        and not credentials.get("api_key")
+    ):
+        # Merge-time backstop for pre-validator rows: a credentialed row that
+        # yields an endpoint without a key must never fall back to env keys.
+        raise ValueError("model-provider credentials endpoint requires api_key")
     return ProviderAuth(
-        api_key=subkey.decrypt(resolved.blob),
-        api_base=resolved.api_base,
+        api_key=str(credentials.get("api_key", "")),
+        api_base=api_base_of(credentials) or resolved.api_base,
         owner_account_id=resolved.owner_account_id,
+        credentials=credentials,
+        litellm_defaults=resolved.litellm_defaults or {},
     )
 
 
@@ -280,7 +499,12 @@ async def resolve_provider_auth_or_conflict(
     auth = await _resolve_provider_auth(
         pool, crypto_box, account_id=account_id, model=model, litellm_extra=litellm_extra
     )
+    # Only a credentialed row constrains endpoint identity; a defaults-only row
+    # leaves the call on the env credential path, so it is checked as no-row.
     conflict = await _check_provider_auth_conflict(
-        pool, account_id=account_id, litellm_extra=litellm_extra, resolved=auth
+        pool,
+        account_id=account_id,
+        litellm_extra=litellm_extra,
+        resolved=auth if auth is not None and auth.has_credentials else None,
     )
     return auth, conflict

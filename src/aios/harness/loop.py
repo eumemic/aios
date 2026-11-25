@@ -1679,7 +1679,7 @@ async def _run_session_step_body(
                 account_id=account_id,
             )
             return _StepResult()
-        if auth is None and (
+        if (auth is None or not auth.has_credentials) and (
             get_settings().inference_credential_policy == "account_only"
             or get_settings().tenancy_posture == "external_byok"
         ):

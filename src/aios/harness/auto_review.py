@@ -348,7 +348,7 @@ async def _grade(
     if conflict is not None:
         blog.warning("auto_review.provider_conflict", conflict=conflict)
         return _unavailable()
-    if auth is None and (
+    if (auth is None or not auth.has_credentials) and (
         settings.inference_credential_policy == "account_only"
         or settings.tenancy_posture == "external_byok"
     ):

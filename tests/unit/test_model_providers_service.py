@@ -149,7 +149,7 @@ class TestProviderAuthConflict:
             is True
         )
 
-    def test_truthy_inline_key_does_not_exempt_redirect_guard(self) -> None:
+    def test_truthy_inline_key_forms_independent_credential_source(self) -> None:
         resolved = ProviderAuth(api_key="k", api_base=None, owner_account_id="acc_parent")
         assert (
             provider_auth_conflict(
@@ -158,7 +158,7 @@ class TestProviderAuthConflict:
                 account_id="acc_child",
                 account_is_root=False,
             )
-            is True
+            is False
         )
 
     @pytest.mark.parametrize("falsy_key", [None, ""])
@@ -283,10 +283,26 @@ async def test_create_encrypts_under_caller_subkey(crypto_box: CryptoBox) -> Non
 
     blob = captured["blob"]
     # Round-trips under the CALLER's own subkey.
-    assert crypto_box.derive_account_subkey("acc_x").decrypt(blob) == "sk-real"
+    assert crypto_box.derive_account_subkey("acc_x").decrypt(blob) == '{"api_key":"sk-real"}'
     # A different account's subkey (or the raw master key) cannot decrypt it.
     with pytest.raises(CryptoDecryptError):
         crypto_box.derive_account_subkey("acc_y").decrypt(blob)
+
+
+def _locked(
+    crypto_box: CryptoBox,
+    account_id: str = "acc_x",
+    payload: dict[str, Any] | None = None,
+    api_base: str | None = None,
+) -> Any:
+    """Patch the row-lock read the blob-touching update path performs."""
+    from aios.db.queries import LockedModelProvider
+
+    blob = _json_blob(crypto_box, account_id, payload if payload is not None else {"api_key": "k"})
+    return patch(
+        "aios.services.model_providers.queries.lock_model_provider",
+        AsyncMock(return_value=LockedModelProvider(api_base=api_base, blob=blob)),
+    )
 
 
 async def test_update_omitted_api_base_passes_ellipsis(crypto_box: CryptoBox) -> None:
@@ -336,7 +352,10 @@ async def test_update_explicit_null_api_base_clears(crypto_box: CryptoBox) -> No
             }
         )
 
-    with patch("aios.services.model_providers.queries.update_model_provider", _update):
+    with (
+        _locked(crypto_box, api_base="https://old.example"),
+        patch("aios.services.model_providers.queries.update_model_provider", _update),
+    ):
         await service.update_model_provider(
             pool, crypto_box, "mp_1", account_id="acc_x", api_key=None, api_base=None
         )
@@ -369,12 +388,21 @@ async def test_update_service_layer_uses_presence_not_truthiness(crypto_box: Cry
             }
         )
 
-    with patch("aios.services.model_providers.queries.update_model_provider", _update):
+    from aios.errors import ValidationError
+
+    # "" is PRESENT, not omitted: it must (attempt to) rotate. Rotating onto an
+    # empty key leaves the row with no secret, so the merged-set validation
+    # refuses it (422) — it is neither silently kept nor written.
+    with (
+        _locked(crypto_box, payload={"api_key": "k", "extra_headers": {"x": "y"}}),
+        patch("aios.services.model_providers.queries.update_model_provider", _update),
+        pytest.raises(ValidationError, match="non-empty secret"),
+    ):
         await service.update_model_provider(
             pool, crypto_box, "mp_1", account_id="acc_x", api_key=""
         )
 
-    assert captured["blob"] is not None  # "" is present, not omitted — must (attempt to) rotate
+    assert captured == {}
 
 
 async def test_update_racing_archive_raises_conflict(crypto_box: CryptoBox) -> None:
@@ -385,6 +413,7 @@ async def test_update_racing_archive_raises_conflict(crypto_box: CryptoBox) -> N
     pool = fake_pool_yielding_conn(conn)
 
     with (
+        _locked(crypto_box),
         patch(
             "aios.services.model_providers.queries.update_model_provider",
             AsyncMock(side_effect=ConflictError("model provider config mp_1 is archived")),
@@ -614,3 +643,271 @@ async def test_fused_entry_point_surfaces_conflict_with_resolved_auth(
     assert conflict == service.PROVIDER_AUTH_CONFLICT_MESSAGE
     assert auth is not None  # still resolved — the CALLER decides not to use it on conflict
     assert auth.owner_account_id == "acc_parent"
+
+
+class TestCredentialFamilies:
+    def test_non_secret_family_member_does_not_exempt_redirect(self) -> None:
+        """aws_region_name alone suppresses row injection but LiteLLM would
+        still fall back to env keys, so it must not exempt the guard."""
+        assert (
+            provider_auth_conflict(
+                litellm_extra={"base_url": "https://x.example", "aws_region_name": "us-east-1"},
+                resolved=None,
+                account_id="acc_child",
+                account_is_root=False,
+            )
+            is True
+        )
+
+    def test_inline_aws_secret_forms_independent_source(self) -> None:
+        assert (
+            provider_auth_conflict(
+                litellm_extra={
+                    "aws_bedrock_runtime_endpoint": "https://x.example",
+                    "aws_access_key_id": "AKIA",
+                    "aws_secret_access_key": "secret",
+                },
+                resolved=None,
+                account_id="acc_child",
+                account_is_root=False,
+            )
+            is False
+        )
+
+    def test_bedrock_endpoint_is_a_redirect(self) -> None:
+        assert (
+            provider_auth_conflict(
+                litellm_extra={"aws_bedrock_runtime_endpoint": "https://x.example"},
+                resolved=None,
+                account_id="acc_child",
+                account_is_root=False,
+            )
+            is True
+        )
+
+
+def _json_blob(crypto_box: CryptoBox, account_id: str, payload: dict[str, Any]) -> Any:
+    import json
+
+    return crypto_box.derive_account_subkey(account_id).encrypt(json.dumps(payload))
+
+
+async def test_resolve_returns_generalized_credentials_and_defaults(
+    crypto_box: CryptoBox,
+) -> None:
+    resolved = ResolvedModelProvider(
+        owner_account_id="acc_parent",
+        api_base=None,
+        blob=_json_blob(
+            crypto_box,
+            "acc_parent",
+            {"aws_access_key_id": "AKIA", "aws_secret_access_key": "s", "api_key": "k"},
+        ),
+        litellm_defaults={"thinking": {"type": "adaptive", "display": "summarized"}},
+    )
+    pool = fake_pool_yielding_conn(MagicMock())
+    with patch(
+        "aios.services.model_providers.queries.resolve_model_provider",
+        AsyncMock(return_value=resolved),
+    ):
+        auth = await service._resolve_provider_auth(
+            pool, crypto_box, account_id="acc_child", model="anthropic/claude-x", litellm_extra=None
+        )
+    assert auth is not None
+    assert auth.credentials["aws_secret_access_key"] == "s"
+    assert auth.litellm_defaults == {"thinking": {"type": "adaptive", "display": "summarized"}}
+    assert auth.has_credentials
+
+
+async def test_credentialed_row_endpoint_without_key_is_hard_error(crypto_box: CryptoBox) -> None:
+    """Merge-time backstop for pre-validator rows: never env-key fallback."""
+    resolved = ResolvedModelProvider(
+        owner_account_id="acc_x",
+        api_base="https://proxy.example",
+        blob=_json_blob(crypto_box, "acc_x", {"extra_headers": {"x": "y"}}),
+    )
+    pool = fake_pool_yielding_conn(MagicMock())
+    with (
+        patch(
+            "aios.services.model_providers.queries.resolve_model_provider",
+            AsyncMock(return_value=resolved),
+        ),
+        pytest.raises(ValueError, match="requires api_key"),
+    ):
+        await service._resolve_provider_auth(
+            pool, crypto_box, account_id="acc_x", model="anthropic/claude-x", litellm_extra=None
+        )
+
+
+async def test_defaults_only_ancestor_row_does_not_constrain_endpoint(
+    crypto_box: CryptoBox,
+) -> None:
+    """A defaults-only ancestor row is checked as no-row: a root account's
+    redirect is admissible (it holds the env keys), no ancestor-row conflict."""
+    resolved = ResolvedModelProvider(
+        owner_account_id="acc_parent",
+        api_base=None,
+        blob=_json_blob(crypto_box, "acc_parent", {}),
+        litellm_defaults={"reasoning_effort": "high"},
+    )
+    conn = MagicMock()
+    pool = fake_pool_yielding_conn(conn)
+    root = MagicMock(parent_account_id=None)
+    with (
+        patch(
+            "aios.services.model_providers.queries.resolve_model_provider",
+            AsyncMock(return_value=resolved),
+        ),
+        patch("aios.services.model_providers.queries.get_account", AsyncMock(return_value=root)),
+    ):
+        auth, conflict = await service.resolve_provider_auth_or_conflict(
+            pool,
+            crypto_box,
+            account_id="acc_root",
+            model="anthropic/claude-x",
+            litellm_extra={"api_base": "https://trusted.example"},
+        )
+    assert conflict is None
+    assert auth is not None and not auth.has_credentials
+
+
+def test_update_api_base_only_is_valid_and_keeps_blob() -> None:
+    from aios.models.model_providers import ModelProviderUpdate
+
+    body = ModelProviderUpdate.model_validate({"api_base": "https://new.example"})
+    assert body.api_base == "https://new.example"
+
+
+def test_update_body_credentials_are_partial_so_endpoint_rule_is_deferred() -> None:
+    """A credentials patch is merged onto the stored set, so whether an
+    endpoint still has a key can only be judged on the merged result (the
+    service does that — below). The body validator still rejects unknown and
+    forbidden keys."""
+    from pydantic import ValidationError
+
+    from aios.models.model_providers import ModelProviderUpdate
+
+    ModelProviderUpdate.model_validate(
+        {"credentials": {"base_url": "https://x.example", "extra_headers": {}}}
+    )
+    with pytest.raises(ValidationError, match="unsupported keys"):
+        ModelProviderUpdate.model_validate({"credentials": {"model": "x"}})
+    with pytest.raises(ValidationError, match="credential or endpoint keys"):
+        ModelProviderUpdate.model_validate({"litellm_defaults": {"api_key": "x"}})
+
+
+async def test_update_credentials_endpoint_without_key_rejected(crypto_box: CryptoBox) -> None:
+    """Merged result with an endpoint but no key → 422, nothing written."""
+    from aios.errors import ValidationError
+
+    pool = fake_pool_yielding_conn(MagicMock())
+    update = AsyncMock()
+    with (
+        _locked(crypto_box, payload={"extra_headers": {}}, api_base=None),
+        patch("aios.services.model_providers.queries.update_model_provider", update),
+        pytest.raises(ValidationError, match="requires api_key"),
+    ):
+        await service.update_model_provider(
+            pool,
+            crypto_box,
+            "mp_1",
+            account_id="acc_x",
+            api_key=None,
+            credentials={"base_url": "https://x.example"},
+        )
+    update.assert_not_awaited()
+
+
+async def test_update_credentials_merge_onto_stored_set(crypto_box: CryptoBox) -> None:
+    import json
+
+    pool = fake_pool_yielding_conn(MagicMock())
+    captured: dict[str, Any] = {}
+
+    async def _update(_conn: Any, _id: str, **kwargs: Any) -> Any:
+        captured.update(kwargs)
+        return MagicMock()
+
+    with (
+        _locked(
+            crypto_box,
+            payload={"api_key": "sk-keep", "api_base": "https://p.example", "client_id": "c"},
+            api_base="https://p.example",
+        ),
+        patch("aios.services.model_providers.queries.update_model_provider", _update),
+    ):
+        await service.update_model_provider(
+            pool,
+            crypto_box,
+            "mp_1",
+            account_id="acc_x",
+            api_key=None,
+            credentials={"extra_headers": {"x": "y"}, "client_id": None},
+            expected_version=3,
+        )
+    stored = json.loads(crypto_box.derive_account_subkey("acc_x").decrypt(captured["blob"]))
+    assert stored == {
+        "api_key": "sk-keep",
+        "api_base": "https://p.example",
+        "extra_headers": {"x": "y"},
+    }
+    assert captured["api_base"] is ...
+    assert captured["expected_version"] == 3
+
+
+def test_create_defaults_reject_credential_and_endpoint_keys() -> None:
+    from pydantic import ValidationError
+
+    from aios.models.model_providers import ModelProviderCreate
+
+    for key in ("api_key", "base_url", "extra_headers", "aws_secret_access_key"):
+        with pytest.raises(ValidationError, match="litellm_defaults"):
+            ModelProviderCreate.model_validate(
+                {"provider": "anthropic", "api_key": "k", "litellm_defaults": {key: "x"}}
+            )
+
+
+def test_update_litellm_defaults_null_normalizes_to_empty() -> None:
+    from aios.models.model_providers import ModelProviderUpdate
+
+    body = ModelProviderUpdate.model_validate({"litellm_defaults": None})
+    assert "litellm_defaults" in body.model_fields_set
+    assert body.litellm_defaults == {}
+
+
+def test_row_flags_come_from_persisted_columns_not_blob_length() -> None:
+    base = {
+        "id": "mp_1",
+        "provider": "anthropic",
+        "api_base": None,
+        "ciphertext": b"nonempty-encrypted-{}",
+        "created_at": datetime(2024, 1, 1, tzinfo=UTC),
+        "updated_at": datetime(2024, 1, 1, tzinfo=UTC),
+        "archived_at": None,
+    }
+    view = _row_to_model_provider({**base, "api_key_set": False, "credentials_set": False})
+    assert view.api_key_set is False and view.credentials_set is False
+    legacy = _row_to_model_provider(base)  # pre-0196 row: NULL flags → blob-length rule
+    assert legacy.api_key_set is True and legacy.credentials_set is True
+
+
+def test_create_body_rejects_nonsecret_only_credentials() -> None:
+    from pydantic import ValidationError as PydanticValidationError
+
+    from aios.models.model_providers import ModelProviderCreate
+
+    with pytest.raises(PydanticValidationError, match="non-empty secret"):
+        ModelProviderCreate.model_validate(
+            {"provider": "bedrock", "credentials": {"aws_region_name": "us-east-1"}}
+        )
+    ok = ModelProviderCreate.model_validate(
+        {
+            "provider": "bedrock",
+            "credentials": {
+                "aws_region_name": "us-east-1",
+                "aws_access_key_id": "a",
+                "aws_secret_access_key": "s",
+            },
+        }
+    )
+    assert ok.credentials is not None

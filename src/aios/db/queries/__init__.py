@@ -618,12 +618,14 @@ from .memory_stores import (  # noqa: E402
     update_session_github_repo_blob,
 )
 from .model_providers import (  # noqa: E402
+    LockedModelProvider,
     ResolvedModelProvider,
     archive_model_provider,
     audit_credentialless_root,
     get_model_provider,
     insert_model_provider,
     list_model_providers,
+    lock_model_provider,
     resolve_model_provider,
     update_model_provider,
 )
@@ -840,6 +842,7 @@ __all__ = [
     "EnvVarCredentialEcho",
     "EnvVarCredentialRow",
     "Err",
+    "LockedModelProvider",
     "Ok",
     "OperatorOwner",
     "Outcome",
@@ -1112,6 +1115,7 @@ __all__ = [
     "list_vault_credentials",
     "list_vaults",
     "lock_active_session_for_update",
+    "lock_model_provider",
     "lock_oauth_credential_for_refresh",
     "lookup_account_by_key_hash",
     "lookup_chat_session",

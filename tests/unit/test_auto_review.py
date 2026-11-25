@@ -31,6 +31,7 @@ from aios.harness.auto_review import (
     _recent_user_lines,
     launch_auto_review,
 )
+from aios.models.model_providers import ProviderAuth
 from aios.services import model_providers as model_providers_service
 from aios.services import sessions as sessions_service
 
@@ -144,7 +145,12 @@ class _Recorder:
         ]
 
 
-_ENV_AUTH = (SimpleNamespace(kind="env"), None)
+# The real producer returns ``None`` or a real ``ProviderAuth`` (see
+# test_provider_auth_seam.py); the gate reads ``auth.has_credentials``.
+_ENV_AUTH = (
+    ProviderAuth(api_key="sk-acct", api_base=None, owner_account_id="acct_1"),
+    None,
+)
 
 
 async def _run_review(
@@ -484,6 +490,30 @@ async def test_account_only_without_auth_fails_closed() -> None:
         settings=_settings(inference_credential_policy="account_only"),
         auth_result=(None, None),
     )
+    assert rec.markers()[0]["reason"] == CHECKER_UNAVAILABLE_REASON
+
+
+@pytest.mark.asyncio
+async def test_account_only_with_nonsecret_only_row_fails_closed() -> None:
+    """A row holding only non-secret credential keys is credentialless: it
+    must not satisfy account_only admission (LiteLLM would use the env key)."""
+    rec = _Recorder()
+    # A model result is queued so an (incorrectly) admitted call would
+    # succeed with "allow" — the gate must refuse before any model call.
+    results = [_response('{"verdict": "allow", "reason": "user asked"}')]
+    nonsecret = ProviderAuth(
+        api_key="",
+        api_base=None,
+        owner_account_id="acct_1",
+        credentials={"extra_headers": {"x": "y"}},
+    )
+    await _run_review(
+        rec,
+        model_results=results,
+        settings=_settings(inference_credential_policy="account_only"),
+        auth_result=(nonsecret, None),
+    )
+    assert len(results) == 1, "no model call may be made"
     assert rec.markers()[0]["reason"] == CHECKER_UNAVAILABLE_REASON
 
 

@@ -291,6 +291,7 @@ _DB_HELPER_SYMBOLS = frozenset(
         "queries.list_vault_credentials",
         "queries.list_vaults",
         "queries.lock_active_session_for_update",
+        "queries.lock_model_provider",
         "queries.lock_oauth_credential_for_refresh",
         "queries.lookup_account_by_key_hash",
         "queries.lookup_chat_session",

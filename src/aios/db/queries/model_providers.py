@@ -31,12 +31,29 @@ from aios.ids import MODEL_PROVIDER, make_id
 from aios.models.model_providers import ModelProvider
 
 
+def _flag(row: asyncpg.Record, column: str) -> bool:
+    """A persisted credential-presence flag; NULL → the pre-0196 blob-length rule.
+
+    The flags are computed from the plaintext at write time (see
+    ``aios.models.model_providers.credential_flags``). NULL only on rows
+    written without them (pre-0196 bare-key rows, raw test inserts), for which
+    "non-empty ciphertext" is exactly "holds a key".
+    """
+    value = row.get(column)
+    if value is None:
+        return len(row["ciphertext"]) > 0
+    return bool(value)
+
+
 def _row_to_model_provider(row: asyncpg.Record) -> ModelProvider:
     return ModelProvider(
         id=row["id"],
         provider=row["provider"],
         api_base=row["api_base"],
-        api_key_set=len(row["ciphertext"]) > 0,
+        api_key_set=_flag(row, "api_key_set"),
+        credentials_set=_flag(row, "credentials_set"),
+        litellm_defaults=dict(row.get("litellm_defaults", {})),
+        version=row.get("version", 1),
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         archived_at=row["archived_at"],
@@ -81,14 +98,21 @@ async def insert_model_provider(
     provider: str,
     api_base: str | None,
     blob: EncryptedBlob,
+    litellm_defaults: dict[str, Any] | None = None,
+    flags: tuple[bool, bool] | None = None,
 ) -> ModelProvider:
+    """Insert a row. ``flags`` is ``(api_key_set, credentials_set)`` computed from
+    the plaintext (``credential_flags``); ``None`` stores NULL (blob-length rule)."""
     await assert_account_accepts_model_provider(conn, account_id=account_id)
     new_id = make_id(MODEL_PROVIDER)
+    api_key_set, credentials_set = flags if flags is not None else (None, None)
     try:
         row = await conn.fetchrow(
             """
-            INSERT INTO model_providers (id, account_id, provider, api_base, ciphertext, nonce)
-            VALUES ($1, $2, $3, $4, $5, $6)
+            INSERT INTO model_providers
+                (id, account_id, provider, api_base, ciphertext, nonce, litellm_defaults,
+                 api_key_set, credentials_set)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
             RETURNING *
             """,
             new_id,
@@ -97,6 +121,9 @@ async def insert_model_provider(
             api_base,
             blob.ciphertext,
             blob.nonce,
+            litellm_defaults or {},
+            api_key_set,
+            credentials_set,
         )
     except asyncpg.UniqueViolationError as exc:
         raise ConflictError(
@@ -146,8 +173,22 @@ async def update_model_provider(
     account_id: str,
     blob: EncryptedBlob | None = None,
     api_base: str | EllipsisType | None = ...,
+    litellm_defaults: dict[str, Any] | EllipsisType | None = ...,
+    expected_version: int | None = None,
+    flags: tuple[bool, bool] | None = None,
 ) -> ModelProvider:
     """Update a config's key and/or ``api_base``.
+
+    ``flags`` (``(api_key_set, credentials_set)`` of the new plaintext)
+    accompanies ``blob``: a new blob always rewrites both flags (NULL when not
+    given, i.e. the blob-length rule) so they can never describe a stale blob.
+    ``litellm_defaults=None`` is stored as ``{}`` (the column is NOT NULL).
+
+    ``expected_version`` (optional, agents-style optimistic concurrency): when
+    given, the write only lands if the row is still at that version — checked
+    up front (so a no-op body against a stale version still conflicts) AND in
+    the ``UPDATE`` predicate (the authoritative check against a concurrent
+    writer). A mismatch raises ``ConflictError`` (409) and writes nothing.
 
     Mirrors ``update_vault`` (pre-check + a ``WHERE ... archived_at IS NULL``
     guard that raises ``ConflictError`` when a concurrent archive won the
@@ -165,6 +206,8 @@ async def update_model_provider(
             f"model provider config {model_provider_id} is archived",
             detail={"id": model_provider_id},
         )
+    if expected_version is not None and current.version != expected_version:
+        raise _version_mismatch(model_provider_id, expected_version, current.version)
 
     args: list[Any] = [model_provider_id]
     sets: list[str] = []
@@ -173,24 +216,83 @@ async def update_model_provider(
         sets.append(f"ciphertext = ${len(args)}")
         args.append(blob.nonce)
         sets.append(f"nonce = ${len(args)}")
+        api_key_set, credentials_set = flags if flags is not None else (None, None)
+        args.append(api_key_set)
+        sets.append(f"api_key_set = ${len(args)}")
+        args.append(credentials_set)
+        sets.append(f"credentials_set = ${len(args)}")
     if api_base is not ...:
         args.append(api_base)
         sets.append(f"api_base = ${len(args)}")
+    if litellm_defaults is not ...:
+        args.append({} if litellm_defaults is None else litellm_defaults)
+        sets.append(f"litellm_defaults = ${len(args)}")
     if not sets:
         return current
-    sets.append("updated_at = now()")
+    sets.extend(("version = version + 1", "updated_at = now()"))
     args.append(account_id)
-    sql = (
-        f"UPDATE model_providers SET {', '.join(sets)} "
-        f"WHERE id = $1 AND account_id = ${len(args)} AND archived_at IS NULL RETURNING *"
-    )
+    where = f"WHERE id = $1 AND account_id = ${len(args)} AND archived_at IS NULL"
+    if expected_version is not None:
+        args.append(expected_version)
+        where += f" AND version = ${len(args)}"
+    sql = f"UPDATE model_providers SET {', '.join(sets)} {where} RETURNING *"
     row = await conn.fetchrow(sql, *args)
     if row is None:
+        # No row matched (id, account, NOT archived[, version]): a racing
+        # archive or a concurrent version bump. Re-read to say which.
+        fresh = await get_model_provider(conn, model_provider_id, account_id=account_id)
+        if fresh.archived_at is None and expected_version is not None:
+            raise _version_mismatch(model_provider_id, expected_version, fresh.version)
         raise ConflictError(
             f"model provider config {model_provider_id} is archived",
             detail={"id": model_provider_id},
         )
     return _row_to_model_provider(row)
+
+
+def _version_mismatch(model_provider_id: str, expected: int, current: int) -> ConflictError:
+    return ConflictError(
+        f"version mismatch: expected {expected}, current is {current}",
+        detail={"expected": expected, "current": current, "id": model_provider_id},
+    )
+
+
+class LockedModelProvider(NamedTuple):
+    """The credential-bearing state of a row, read under ``FOR UPDATE``."""
+
+    api_base: str | None
+    blob: EncryptedBlob
+
+
+async def lock_model_provider(
+    conn: asyncpg.Connection[Any], model_provider_id: str, *, account_id: str
+) -> LockedModelProvider:
+    """Row-lock an active config and return its stored endpoint + encrypted blob.
+
+    Must run inside a transaction. Used by read-modify-write credential updates
+    so two concurrent partial updates serialize instead of each merging onto
+    the same stale blob.
+    """
+    row = await conn.fetchrow(
+        "SELECT api_base, ciphertext, nonce, archived_at FROM model_providers "
+        "WHERE id = $1 AND account_id = $2 FOR UPDATE",
+        model_provider_id,
+        account_id,
+    )
+    if row is None:
+        raise NotFoundError(
+            f"model provider config {model_provider_id} not found",
+            detail={"id": model_provider_id},
+        )
+    if row["archived_at"] is not None:
+        raise ConflictError(
+            f"model provider config {model_provider_id} is archived",
+            detail={"id": model_provider_id},
+        )
+    return LockedModelProvider(
+        api_base=row["api_base"],
+        blob=EncryptedBlob(ciphertext=bytes(row["ciphertext"]), nonce=bytes(row["nonce"])),
+    )
 
 
 async def archive_model_provider(
@@ -210,7 +312,8 @@ async def archive_model_provider(
     """
     row = await conn.fetchrow(
         "UPDATE model_providers "
-        "SET ciphertext = ''::bytea, nonce = ''::bytea, archived_at = now(), updated_at = now() "
+        "SET ciphertext = ''::bytea, nonce = ''::bytea, api_key_set = FALSE, "
+        "credentials_set = FALSE, archived_at = now(), updated_at = now() "
         "WHERE id = $1 AND account_id = $2 AND archived_at IS NULL RETURNING *",
         model_provider_id,
         account_id,
@@ -235,6 +338,7 @@ class ResolvedModelProvider(NamedTuple):
     owner_account_id: str
     api_base: str | None
     blob: EncryptedBlob
+    litellm_defaults: dict[str, Any] | None = None
 
 
 async def resolve_model_provider(
@@ -269,7 +373,7 @@ async def resolve_model_provider(
         "    FROM accounts a JOIN chain c ON a.id = c.parent_account_id "
         "    WHERE a.archived_at IS NULL"
         ") "
-        "SELECT mp.account_id, mp.api_base, mp.ciphertext, mp.nonce "
+        "SELECT mp.account_id, mp.api_base, mp.ciphertext, mp.nonce, mp.litellm_defaults "
         "FROM chain c "
         "JOIN model_providers mp ON mp.account_id = c.id "
         "WHERE mp.provider = $2 AND mp.archived_at IS NULL "
@@ -283,4 +387,5 @@ async def resolve_model_provider(
         owner_account_id=row["account_id"],
         api_base=row["api_base"],
         blob=EncryptedBlob(ciphertext=bytes(row["ciphertext"]), nonce=bytes(row["nonce"])),
+        litellm_defaults=dict(row["litellm_defaults"]),
     )
