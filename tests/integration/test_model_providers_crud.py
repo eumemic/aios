@@ -510,3 +510,166 @@ async def test_version_predicate_rejects_a_write_that_raced_past_the_precheck(
     after = await service.get_model_provider(pool, created.id, account_id=account_id)
     assert after.version == 2
     assert after.litellm_defaults == {"reasoning_effort": "high"}
+
+
+# ─── secret-aware credential presence (PR #2609 review round 3) ───────────────
+
+
+async def test_nonsecret_only_credentials_rejected_at_create(
+    pool_with_account: tuple[asyncpg.Pool[Any], str], crypto_box: CryptoBox
+) -> None:
+    """F1: a row whose credentials hold only non-secret family keys must never
+    count as credentialed. It is rejected at create (request model), and a row
+    that got stored anyway (legacy/manual write) is credentialless at
+    resolution, so no admission gate admits a call with no api_key."""
+    from pydantic import ValidationError as PydanticValidationError
+
+    from aios.harness.completion import _build_litellm_kwargs
+    from aios.models.model_providers import ModelProviderCreate
+
+    for creds in (
+        {"extra_headers": {"x": "y"}},
+        {"aws_region_name": "us-east-1"},
+        {"vertex_project": "p", "vertex_location": "us"},
+        {"tenant_id": "t", "client_id": "c"},
+        {"extra_headers": {"x": "y"}, "client_secret": "   "},
+    ):
+        with pytest.raises(PydanticValidationError, match="non-empty secret"):
+            ModelProviderCreate.model_validate({"provider": "anthropic", "credentials": creds})
+
+    # Bypass the request model (as a legacy/manual write would): still credentialless.
+    pool, account_id = pool_with_account
+    await service.create_model_provider(
+        pool,
+        crypto_box,
+        account_id=account_id,
+        provider="anthropic",
+        api_key=None,
+        api_base=None,
+        credentials={"extra_headers": {"x": "y"}},
+    )
+    auth, conflict = await service.resolve_provider_auth_or_conflict(
+        pool, crypto_box, account_id=account_id, model="anthropic/claude-x", litellm_extra=None
+    )
+    assert auth is not None and conflict is None
+    assert auth.has_credentials is False
+    kwargs = _build_litellm_kwargs(
+        model="anthropic/claude-x",
+        messages=[],
+        tools=None,
+        auth=auth,
+        extra=None,
+        session_id=None,
+        stream=False,
+    )
+    assert "api_key" not in kwargs  # so a gate admitting this row would use the env key
+    fetched = (await service.list_model_providers(pool, account_id=account_id))[0]
+    assert fetched.credentials_set is False and fetched.api_key_set is False
+
+
+async def test_update_merging_to_nonsecret_only_is_rejected(
+    pool_with_account: tuple[asyncpg.Pool[Any], str], crypto_box: CryptoBox
+) -> None:
+    """F1 on the update path: removing the only secret while non-secret keys
+    remain is a 422 and writes nothing."""
+    from aios.errors import ValidationError
+
+    pool, account_id = pool_with_account
+    created = await service.create_model_provider(
+        pool,
+        crypto_box,
+        account_id=account_id,
+        provider="anthropic",
+        api_key="sk-keep",
+        api_base=None,
+        credentials={"extra_headers": {"x": "y"}},
+    )
+    with pytest.raises(ValidationError, match="non-empty secret"):
+        await service.update_model_provider(
+            pool,
+            crypto_box,
+            created.id,
+            account_id=account_id,
+            api_key=None,
+            credentials={"api_key": None},
+        )
+    auth = await _resolve(pool, crypto_box, account_id)
+    assert auth is not None and auth.api_key == "sk-keep" and auth.has_credentials
+
+
+async def test_update_litellm_defaults_null_clears_to_empty(
+    pool_with_account: tuple[asyncpg.Pool[Any], str], crypto_box: CryptoBox
+) -> None:
+    """F2: an explicit ``litellm_defaults: null`` PUT clears defaults to ``{}`` —
+    never a NOT NULL violation / 500."""
+    from aios.api.routers import model_providers as router
+    from aios.models.model_providers import ModelProviderUpdate
+
+    pool, account_id = pool_with_account
+    created = await service.create_model_provider(
+        pool,
+        crypto_box,
+        account_id=account_id,
+        provider="anthropic",
+        api_key="k1",
+        api_base=None,
+        litellm_defaults={"seed": 1},
+    )
+    body = ModelProviderUpdate.model_validate({"litellm_defaults": None})
+    assert "litellm_defaults" in body.model_fields_set
+    updated = await router.update(created.id, body, pool, crypto_box, account_id)
+    assert updated.litellm_defaults == {}
+    # The query layer is also safe if handed None directly.
+    updated = await service.update_model_provider(
+        pool, crypto_box, created.id, account_id=account_id, api_key=None, litellm_defaults=None
+    )
+    assert updated.litellm_defaults == {}
+
+
+@pytest.mark.parametrize(
+    ("api_key", "credentials", "expected_key_set", "expected_creds_set"),
+    [
+        (None, None, False, False),  # defaults-only
+        ("sk-1", None, True, True),
+        (None, {"aws_access_key_id": "a", "aws_secret_access_key": "s"}, False, True),
+        ("sk-1", {"extra_headers": {"x": "y"}}, True, True),
+    ],
+)
+async def test_read_flags_match_stored_credentials(
+    pool_with_account: tuple[asyncpg.Pool[Any], str],
+    crypto_box: CryptoBox,
+    api_key: str | None,
+    credentials: dict[str, Any] | None,
+    expected_key_set: bool,
+    expected_creds_set: bool,
+) -> None:
+    """F3: api_key_set / credentials_set reflect the decrypted stored set, and
+    credentials_set agrees with ProviderAuth.has_credentials — on create, get,
+    list, after an update that changes the blob, and after archive."""
+    pool, account_id = pool_with_account
+    created = await service.create_model_provider(
+        pool,
+        crypto_box,
+        account_id=account_id,
+        provider="anthropic",
+        api_key=api_key,
+        api_base=None,
+        credentials=credentials,
+        litellm_defaults={"seed": 1},
+    )
+    fetched = await service.get_model_provider(pool, created.id, account_id=account_id)
+    listed = (await service.list_model_providers(pool, account_id=account_id))[0]
+    auth = await _resolve(pool, crypto_box, account_id)
+    assert auth is not None
+    for view in (created, fetched, listed):
+        assert view.api_key_set is expected_key_set
+        assert view.credentials_set is expected_creds_set
+        assert view.credentials_set is auth.has_credentials
+
+    if not expected_key_set:
+        rotated = await service.update_model_provider(
+            pool, crypto_box, created.id, account_id=account_id, api_key="sk-added"
+        )
+        assert rotated.api_key_set is True and rotated.credentials_set is True
+    archived = await service.archive_model_provider(pool, created.id, account_id=account_id)
+    assert archived.api_key_set is False and archived.credentials_set is False

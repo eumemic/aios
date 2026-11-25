@@ -73,6 +73,38 @@ def _inline_secret_present(litellm_extra: dict[str, Any]) -> bool:
     )
 
 
+def _secret_value_present(value: Any) -> bool:
+    """A usable secret value: a stripped-non-empty string, or (``vertex_credentials``
+    may be a parsed service-account JSON) a non-empty dict."""
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, dict):
+        return bool(value)
+    return False
+
+
+def credentials_hold_secret(credentials: dict[str, Any]) -> bool:
+    """Whether a stored credential set carries at least one real secret.
+
+    Only ``SECRET_CREDENTIAL_KWARGS`` count. A set made solely of non-secret
+    family keys (``extra_headers``, ``aws_region_name``, ``vertex_project``, …)
+    gives LiteLLM nothing to authenticate with, so it falls back to the
+    worker's environment key — it must never count as credentialed.
+    """
+    return any(_secret_value_present(credentials.get(key)) for key in SECRET_CREDENTIAL_KWARGS)
+
+
+def credential_flags(credentials: dict[str, Any]) -> tuple[bool, bool]:
+    """``(api_key_set, credentials_set)`` for a decrypted credential set.
+
+    Computed at write time from the plaintext and persisted beside the blob,
+    so the read view reports what the stored set actually holds (an
+    encrypted ``{}`` is non-empty ciphertext, so blob length cannot answer).
+    ``credentials_set`` agrees with :attr:`ProviderAuth.has_credentials`.
+    """
+    return _secret_value_present(credentials.get("api_key")), credentials_hold_secret(credentials)
+
+
 def validate_row_content(
     credentials: dict[str, Any] | None,
     litellm_defaults: dict[str, Any],
@@ -94,6 +126,17 @@ def validate_row_content(
             and not credentials.get("api_key")
         ):
             raise ValueError("credentials endpoint requires api_key")
+        if (
+            require_key_with_endpoint
+            and CREDENTIAL_KWARGS & credentials.keys()
+            and not credentials_hold_secret(credentials)
+        ):
+            # Non-secret family keys alone would make the row look configured
+            # while LiteLLM silently authenticates with the worker env key.
+            raise ValueError(
+                "credentials require a non-empty secret "
+                f"(one of {sorted(SECRET_CREDENTIAL_KWARGS)})"
+            )
 
 
 class ModelProviderCreate(BaseModel):
@@ -170,6 +213,13 @@ class ModelProviderUpdate(BaseModel):
         )
         return self
 
+    @field_validator("litellm_defaults")
+    @classmethod
+    def _null_defaults_clear(cls, v: dict[str, Any] | None) -> dict[str, Any] | None:
+        # Explicit ``null`` means "clear the defaults": the column is
+        # ``jsonb NOT NULL``, so it is stored as ``{}``, never written as NULL.
+        return {} if v is None else v
+
 
 class ModelProvider(BaseModel):
     """Read view of a model-provider config. ``api_key`` is never returned."""
@@ -206,13 +256,15 @@ class ProviderAuth:
 
     @property
     def has_credentials(self) -> bool:
-        """Whether the matched row carries credentials (vs. a defaults-only row).
+        """Whether the matched row carries a real secret (vs. a defaults-only row).
 
-        A defaults-only row never constrains endpoint identity and never
-        satisfies credential admission: the call is credential-wise exactly
-        as if no row matched.
+        Only a non-empty ``SECRET_CREDENTIAL_KWARGS`` value counts: non-secret
+        family keys alone (``extra_headers``, ``aws_region_name``, …) leave
+        LiteLLM on the env-key fallback. A row without a secret never
+        constrains endpoint identity and never satisfies credential
+        admission: the call is credential-wise exactly as if no row matched.
         """
-        return bool(self.api_key) or bool(CREDENTIAL_KWARGS & self.credentials.keys())
+        return _secret_value_present(self.api_key) or credentials_hold_secret(self.credentials)
 
 
 def provider_auth_conflict(

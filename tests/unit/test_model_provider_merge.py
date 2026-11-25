@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from aios.models.model_providers import ProviderAuth
@@ -128,3 +130,28 @@ def test_defaults_only_row_has_no_credentials() -> None:
         harness_kwargs={}, resolved=auth, agent_extra=None, inline_credentials=False
     )
     assert merged == {"seed": 1}
+
+
+@pytest.mark.parametrize(
+    ("api_key", "credentials", "expected"),
+    [
+        ("", {"extra_headers": {"x": "y"}}, False),
+        ("", {"aws_region_name": "us-east-1", "aws_access_key_id": "AKIA"}, False),
+        ("", {"vertex_project": "p", "vertex_location": "us"}, False),
+        ("", {"tenant_id": "t", "client_id": "c"}, False),
+        ("", {"client_secret": "  ", "client_id": "c"}, False),
+        ("   ", {}, False),
+        ("sk", {}, True),
+        ("", {"aws_secret_access_key": "s"}, True),
+        ("", {"vertex_credentials": {"type": "service_account"}}, True),
+        ("", {"azure_ad_token": "t"}, True),
+        ("", {"client_secret": "s", "tenant_id": "t", "client_id": "c"}, True),
+    ],
+)
+def test_has_credentials_requires_a_real_secret(
+    api_key: str, credentials: dict[str, Any], expected: bool
+) -> None:
+    auth = ProviderAuth(
+        api_key=api_key, api_base=None, owner_account_id="acc", credentials=credentials
+    )
+    assert auth.has_credentials is expected

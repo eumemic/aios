@@ -40,6 +40,7 @@ from aios.models.model_providers import (
     REASONING_KWARGS,
     ModelProvider,
     ProviderAuth,
+    credential_flags,
     provider_auth_conflict,
     validate_row_content,
 )
@@ -179,6 +180,7 @@ async def create_model_provider(
             api_base=api_base,
             blob=_encrypt_credentials(payload, crypto_box, account_id=account_id),
             litellm_defaults=litellm_defaults,
+            flags=credential_flags(payload),
         )
 
 
@@ -320,6 +322,7 @@ async def update_model_provider(
                 model_provider_id,
                 account_id=account_id,
                 blob=_encrypt_credentials(merged, crypto_box, account_id=account_id),
+                flags=credential_flags(merged),
                 api_base=api_base,
                 litellm_defaults=litellm_defaults,
                 expected_version=expected_version,

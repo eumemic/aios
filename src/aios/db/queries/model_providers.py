@@ -31,13 +31,27 @@ from aios.ids import MODEL_PROVIDER, make_id
 from aios.models.model_providers import ModelProvider
 
 
+def _flag(row: asyncpg.Record, column: str) -> bool:
+    """A persisted credential-presence flag; NULL → the pre-0196 blob-length rule.
+
+    The flags are computed from the plaintext at write time (see
+    ``aios.models.model_providers.credential_flags``). NULL only on rows
+    written without them (pre-0196 bare-key rows, raw test inserts), for which
+    "non-empty ciphertext" is exactly "holds a key".
+    """
+    value = row.get(column)
+    if value is None:
+        return len(row["ciphertext"]) > 0
+    return bool(value)
+
+
 def _row_to_model_provider(row: asyncpg.Record) -> ModelProvider:
     return ModelProvider(
         id=row["id"],
         provider=row["provider"],
         api_base=row["api_base"],
-        api_key_set=len(row["ciphertext"]) > 0,
-        credentials_set=len(row["ciphertext"]) > 0,
+        api_key_set=_flag(row, "api_key_set"),
+        credentials_set=_flag(row, "credentials_set"),
         litellm_defaults=dict(row.get("litellm_defaults", {})),
         version=row.get("version", 1),
         created_at=row["created_at"],
@@ -85,15 +99,20 @@ async def insert_model_provider(
     api_base: str | None,
     blob: EncryptedBlob,
     litellm_defaults: dict[str, Any] | None = None,
+    flags: tuple[bool, bool] | None = None,
 ) -> ModelProvider:
+    """Insert a row. ``flags`` is ``(api_key_set, credentials_set)`` computed from
+    the plaintext (``credential_flags``); ``None`` stores NULL (blob-length rule)."""
     await assert_account_accepts_model_provider(conn, account_id=account_id)
     new_id = make_id(MODEL_PROVIDER)
+    api_key_set, credentials_set = flags if flags is not None else (None, None)
     try:
         row = await conn.fetchrow(
             """
             INSERT INTO model_providers
-                (id, account_id, provider, api_base, ciphertext, nonce, litellm_defaults)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
+                (id, account_id, provider, api_base, ciphertext, nonce, litellm_defaults,
+                 api_key_set, credentials_set)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
             RETURNING *
             """,
             new_id,
@@ -103,6 +122,8 @@ async def insert_model_provider(
             blob.ciphertext,
             blob.nonce,
             litellm_defaults or {},
+            api_key_set,
+            credentials_set,
         )
     except asyncpg.UniqueViolationError as exc:
         raise ConflictError(
@@ -154,8 +175,14 @@ async def update_model_provider(
     api_base: str | EllipsisType | None = ...,
     litellm_defaults: dict[str, Any] | EllipsisType | None = ...,
     expected_version: int | None = None,
+    flags: tuple[bool, bool] | None = None,
 ) -> ModelProvider:
     """Update a config's key and/or ``api_base``.
+
+    ``flags`` (``(api_key_set, credentials_set)`` of the new plaintext)
+    accompanies ``blob``: a new blob always rewrites both flags (NULL when not
+    given, i.e. the blob-length rule) so they can never describe a stale blob.
+    ``litellm_defaults=None`` is stored as ``{}`` (the column is NOT NULL).
 
     ``expected_version`` (optional, agents-style optimistic concurrency): when
     given, the write only lands if the row is still at that version — checked
@@ -189,11 +216,16 @@ async def update_model_provider(
         sets.append(f"ciphertext = ${len(args)}")
         args.append(blob.nonce)
         sets.append(f"nonce = ${len(args)}")
+        api_key_set, credentials_set = flags if flags is not None else (None, None)
+        args.append(api_key_set)
+        sets.append(f"api_key_set = ${len(args)}")
+        args.append(credentials_set)
+        sets.append(f"credentials_set = ${len(args)}")
     if api_base is not ...:
         args.append(api_base)
         sets.append(f"api_base = ${len(args)}")
     if litellm_defaults is not ...:
-        args.append(litellm_defaults)
+        args.append({} if litellm_defaults is None else litellm_defaults)
         sets.append(f"litellm_defaults = ${len(args)}")
     if not sets:
         return current
@@ -280,7 +312,8 @@ async def archive_model_provider(
     """
     row = await conn.fetchrow(
         "UPDATE model_providers "
-        "SET ciphertext = ''::bytea, nonce = ''::bytea, archived_at = now(), updated_at = now() "
+        "SET ciphertext = ''::bytea, nonce = ''::bytea, api_key_set = FALSE, "
+        "credentials_set = FALSE, archived_at = now(), updated_at = now() "
         "WHERE id = $1 AND account_id = $2 AND archived_at IS NULL RETURNING *",
         model_provider_id,
         account_id,

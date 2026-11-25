@@ -388,15 +388,21 @@ async def test_update_service_layer_uses_presence_not_truthiness(crypto_box: Cry
             }
         )
 
+    from aios.errors import ValidationError
+
+    # "" is PRESENT, not omitted: it must (attempt to) rotate. Rotating onto an
+    # empty key leaves the row with no secret, so the merged-set validation
+    # refuses it (422) — it is neither silently kept nor written.
     with (
-        _locked(crypto_box),
+        _locked(crypto_box, payload={"api_key": "k", "extra_headers": {"x": "y"}}),
         patch("aios.services.model_providers.queries.update_model_provider", _update),
+        pytest.raises(ValidationError, match="non-empty secret"),
     ):
         await service.update_model_provider(
             pool, crypto_box, "mp_1", account_id="acc_x", api_key=""
         )
 
-    assert captured["blob"] is not None  # "" is present, not omitted — must (attempt to) rotate
+    assert captured == {}
 
 
 async def test_update_racing_archive_raises_conflict(crypto_box: CryptoBox) -> None:
@@ -859,3 +865,49 @@ def test_create_defaults_reject_credential_and_endpoint_keys() -> None:
             ModelProviderCreate.model_validate(
                 {"provider": "anthropic", "api_key": "k", "litellm_defaults": {key: "x"}}
             )
+
+
+def test_update_litellm_defaults_null_normalizes_to_empty() -> None:
+    from aios.models.model_providers import ModelProviderUpdate
+
+    body = ModelProviderUpdate.model_validate({"litellm_defaults": None})
+    assert "litellm_defaults" in body.model_fields_set
+    assert body.litellm_defaults == {}
+
+
+def test_row_flags_come_from_persisted_columns_not_blob_length() -> None:
+    base = {
+        "id": "mp_1",
+        "provider": "anthropic",
+        "api_base": None,
+        "ciphertext": b"nonempty-encrypted-{}",
+        "created_at": datetime(2024, 1, 1, tzinfo=UTC),
+        "updated_at": datetime(2024, 1, 1, tzinfo=UTC),
+        "archived_at": None,
+    }
+    view = _row_to_model_provider({**base, "api_key_set": False, "credentials_set": False})
+    assert view.api_key_set is False and view.credentials_set is False
+    legacy = _row_to_model_provider(base)  # pre-0196 row: NULL flags → blob-length rule
+    assert legacy.api_key_set is True and legacy.credentials_set is True
+
+
+def test_create_body_rejects_nonsecret_only_credentials() -> None:
+    from pydantic import ValidationError as PydanticValidationError
+
+    from aios.models.model_providers import ModelProviderCreate
+
+    with pytest.raises(PydanticValidationError, match="non-empty secret"):
+        ModelProviderCreate.model_validate(
+            {"provider": "bedrock", "credentials": {"aws_region_name": "us-east-1"}}
+        )
+    ok = ModelProviderCreate.model_validate(
+        {
+            "provider": "bedrock",
+            "credentials": {
+                "aws_region_name": "us-east-1",
+                "aws_access_key_id": "a",
+                "aws_secret_access_key": "s",
+            },
+        }
+    )
+    assert ok.credentials is not None
