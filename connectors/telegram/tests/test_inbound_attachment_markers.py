@@ -11,6 +11,8 @@ import pytest
 import structlog
 from telegram.error import TelegramError
 
+from aios_connector_http import sandbox as sdk_sandbox
+
 from aios_telegram.connector import TelegramConnector, _TelegramConnectionState
 from aios_telegram.parse import Attachment, InboundMessage
 
@@ -21,6 +23,14 @@ DOSSIER_MARKER = (
     "[attachment not delivered: 'J.RA.5.102244 Dosier Macellinus.pdf', "
     "application/pdf, 7.8 MiB > 5 MiB limit]"
 )
+
+
+@pytest.fixture(autouse=True)
+def _legacy_5mib_document_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These #2551 exact-text tests predate the #2563 per-type caps; pin
+    the old single 5 MiB cap so they keep asserting the same markers."""
+    monkeypatch.delenv("AIOS_CONNECTOR_MAX_ATTACHMENT_BYTES", raising=False)
+    monkeypatch.setattr(sdk_sandbox, "MAX_ATTACHMENT_BYTES", 5 * 1024 * 1024)
 
 
 @pytest.fixture
@@ -68,7 +78,14 @@ async def _collect(
     state: _TelegramConnectionState, atts: tuple[Attachment, ...]
 ) -> tuple[list[tuple[str, bytes, str]] | None, list[str], list[dict[str, Any]]]:
     with structlog.testing.capture_logs() as logs:
-        tuples, markers = await _connector()._collect_attachments(state, atts)
+        handles, markers = await _connector()._collect_attachments(state, atts)
+    # Tuples carry open handles (aios#2563); read + close for assertions.
+    tuples = None
+    if handles is not None:
+        tuples = []
+        for name, fh, ctype in handles:
+            with fh:
+                tuples.append((name, fh.read(), ctype))
     return tuples, markers, logs
 
 
