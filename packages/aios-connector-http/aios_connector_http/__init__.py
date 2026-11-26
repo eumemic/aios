@@ -20,13 +20,17 @@ from .runner import (
 )
 from .sandbox import (
     FALLBACK_MARKER,
+    ATTACHMENT_CAP_ENV,
     MAX_ATTACHMENT_BYTES,
+    MAX_IMAGE_ATTACHMENT_BYTES,
     Attachment,
     AttachmentError,
     SandboxPath,
     append_markers,
     coerce_size,
+    document_attachment_cap,
     drop_attachment,
+    effective_attachment_cap,
     format_size,
     is_failed_download,
     is_over_cap,
@@ -37,7 +41,9 @@ from .spool import SqliteAnsweredSpool
 
 __all__ = [
     "FALLBACK_MARKER",
+    "ATTACHMENT_CAP_ENV",
     "MAX_ATTACHMENT_BYTES",
+    "MAX_IMAGE_ATTACHMENT_BYTES",
     "Attachment",
     "AttachmentError",
     "HttpConnector",
@@ -47,7 +53,9 @@ __all__ = [
     "SqliteAnsweredSpool",
     "append_markers",
     "coerce_size",
+    "document_attachment_cap",
     "drop_attachment",
+    "effective_attachment_cap",
     "format_size",
     "is_failed_download",
     "is_over_cap",

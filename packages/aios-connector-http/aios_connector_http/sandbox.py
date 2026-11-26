@@ -120,16 +120,78 @@ def resolve_sandbox_path(
     return resolved
 
 
-MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024
+MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024
+"""Default per-file cap for *documents* (every non-``image/*`` type), #2563.
+
+Overridable per connector process via ``AIOS_CONNECTOR_MAX_ATTACHMENT_BYTES``
+(see :func:`document_attachment_cap`).  Read at call time everywhere, so a
+monkeypatched value in a test flows through ``as_params`` and the markers.
+"""
 # Alias kept for existing internal / test references.  ``as_params`` and
 # the marker helpers read the public name at call time so a future cap
 # change (or a monkeypatched cap in a test) flows through everywhere.
 _MAX_ATTACHMENT_BYTES = MAX_ATTACHMENT_BYTES
 
+MAX_IMAGE_ATTACHMENT_BYTES = 5 * 1024 * 1024
+"""Per-file cap for ``image/*`` attachments (#2563).
+
+Images reach the model as pixels and the API reads them whole to
+downsample an inline copy, so they keep the historical 5 MiB cap.
+"""
+
+ATTACHMENT_CAP_ENV = "AIOS_CONNECTOR_MAX_ATTACHMENT_BYTES"
+
+_cap_log = logging.getLogger("aios_connector_http.sandbox")
+
+
+def document_attachment_cap() -> int:
+    """Effective document cap in bytes, evaluated on every call.
+
+    ``AIOS_CONNECTOR_MAX_ATTACHMENT_BYTES`` (a positive integer byte
+    count) wins when set; an unparsable or non-positive value logs
+    ``attachment.cap.invalid_env`` and falls back to the module attribute
+    :data:`MAX_ATTACHMENT_BYTES`.  Never raises.
+    """
+    raw = os.environ.get(ATTACHMENT_CAP_ENV)
+    if raw is not None and raw.strip() != "":
+        try:
+            value = int(raw.strip())
+        except ValueError:
+            value = 0
+        if value > 0:
+            return value
+        with contextlib.suppress(Exception):
+            _cap_log.warning(
+                "attachment.cap.invalid_env",
+                extra={"env_var": ATTACHMENT_CAP_ENV, "env_value": raw[:64]},
+            )
+    return int(MAX_ATTACHMENT_BYTES)
+
+
+def _is_image_type(content_type: object) -> bool:
+    if not isinstance(content_type, str):
+        return False
+    return content_type.split(";", 1)[0].strip().lower().startswith("image/")
+
+
+def effective_attachment_cap(content_type: object = None) -> int:
+    """Per-type cap in bytes for an attachment of ``content_type``.
+
+    ``image/*`` (case-insensitive, MIME parameters ignored) gets
+    ``min(MAX_IMAGE_ATTACHMENT_BYTES, document_attachment_cap())`` so one
+    lowered global knob still lowers everything; every other type — and
+    ``None`` — gets :func:`document_attachment_cap`.  Never raises.
+    """
+    doc_cap = document_attachment_cap()
+    if _is_image_type(content_type):
+        return min(int(MAX_IMAGE_ATTACHMENT_BYTES), doc_cap)
+    return doc_cap
+
 
 class AttachmentError(ValueError):
     """Raised by :meth:`Attachment.as_params` when the host path is unreadable
-    or exceeds the 5 MiB SDK boundary cap.
+    or exceeds the per-type SDK boundary cap (:func:`effective_attachment_cap`:
+    5 MiB for images, 50 MiB by default for documents).
 
     Connector code that catches this can decide whether to skip the
     attachment, send a placeholder text message, or fail loudly.
@@ -138,14 +200,16 @@ class AttachmentError(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class Attachment:
-    """Inbound attachment record handed to :meth:`HttpConnector.emit_inbound`.
+    """Inbound attachment record validated before :meth:`HttpConnector.emit_inbound`.
 
-    The connector hands aios a *host path* it owns; bytes never traverse
-    HTTP.  The API process stages the file into the session's read-only
-    ``/mnt/attachments`` bind mount before appending the inbound event.
-    The connector container and the API process must share a filesystem
-    view (typically a bind-mounted ``workspace_root``) so the staging
-    rename can see the source.
+    The bytes DO traverse HTTP: the connector opens the host path and
+    hands the open binary file handle to ``emit_inbound``, which streams
+    it as a multipart part to ``/v1/connectors/runtime/inbound``; the API
+    streams that part to disk under the session's ``/mnt/attachments``
+    staging dir.  The host path is used only to stat (cap check), sniff
+    image magic bytes, and open the handle — the file is never read whole
+    into connector memory.  (The earlier host-path / rename handoff
+    design was superseded by aios#2563, transport (a).)
     """
 
     host_path: str
@@ -156,7 +220,7 @@ class Attachment:
         """Validate the host path and return the JSON wire dict.
 
         Raises :class:`AttachmentError` when the file is missing or
-        exceeds the 5 MiB cap.  Stat'ing here rather than at construction
+        exceeds its per-type cap (:func:`effective_attachment_cap`).  Stat'ing here rather than at construction
         lets callers build :class:`Attachment` instances before their
         backing files are fully written.
 
@@ -172,10 +236,11 @@ class Attachment:
             ) from err
         if not stat.S_ISREG(st.st_mode):
             raise AttachmentError(f"attachment host_path is not a regular file: {self.host_path!r}")
-        if st.st_size > MAX_ATTACHMENT_BYTES:
+        cap = effective_attachment_cap(self.content_type)
+        if st.st_size > cap:
             raise AttachmentError(
                 f"attachment {self.filename!r} is {st.st_size} bytes; "
-                f"SDK cap is {MAX_ATTACHMENT_BYTES} bytes (5 MiB)."
+                f"SDK cap is {cap} bytes ({format_size(cap)})."
             )
         content_type = self.content_type
         if content_type.startswith("image/"):
@@ -259,11 +324,15 @@ def is_failed_download(st_size: int | None, declared_size: int | None) -> bool:
         return False
 
 
-def is_over_cap(size: int | None) -> bool:
-    """Single source of truth for "over the cap" (cap read at call time)."""
+def is_over_cap(size: int | None, content_type: object = None) -> bool:
+    """Single source of truth for "over the cap" (cap read at call time).
+
+    The cap is per-type (:func:`effective_attachment_cap`); with
+    ``content_type=None`` the document cap applies.
+    """
     try:
         coerced = coerce_size(size)
-        return coerced is not None and coerced > MAX_ATTACHMENT_BYTES
+        return coerced is not None and coerced > effective_attachment_cap(content_type)
     except Exception:
         return False
 
@@ -331,13 +400,15 @@ def rejection_marker(
     try:
         safe_name, safe_type = safe_marker(name, content_type)
         coerced = coerce_size(size)
-        over = is_over_cap(coerced) if over_cap is None else bool(over_cap)
+        over = is_over_cap(coerced, content_type) if over_cap is None else bool(over_cap)
         if coerced is None:
             over = False
         head = f"[attachment not delivered: '{safe_name}', {safe_type}"
         if over:
             assert coerced is not None
-            rendered_size, rendered_limit = _size_vs_limit(coerced, MAX_ATTACHMENT_BYTES)
+            rendered_size, rendered_limit = _size_vs_limit(
+                coerced, effective_attachment_cap(content_type)
+            )
             body = f"{head}, {rendered_size} > {rendered_limit} limit"
             return f"{body}: download failed]" if failed_download else f"{body}]"
         sized = head if coerced is None else f"{head}, {format_size(coerced)}"
