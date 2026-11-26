@@ -19,8 +19,8 @@ from .runner import (
     tool,
 )
 from .sandbox import (
-    FALLBACK_MARKER,
     ATTACHMENT_CAP_ENV,
+    FALLBACK_MARKER,
     MAX_ATTACHMENT_BYTES,
     MAX_IMAGE_ATTACHMENT_BYTES,
     Attachment,
@@ -40,8 +40,8 @@ from .sandbox import (
 from .spool import SqliteAnsweredSpool
 
 __all__ = [
-    "FALLBACK_MARKER",
     "ATTACHMENT_CAP_ENV",
+    "FALLBACK_MARKER",
     "MAX_ATTACHMENT_BYTES",
     "MAX_IMAGE_ATTACHMENT_BYTES",
     "Attachment",

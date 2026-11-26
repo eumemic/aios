@@ -101,7 +101,7 @@ class _SpyClient(httpx.AsyncClient):
         super().__init__(*a, **k)
         self.payload_types: list[type] = []
 
-    async def post(self, url: Any, **kwargs: Any) -> httpx.Response:  # type: ignore[override]
+    async def post(self, url: Any, **kwargs: Any) -> httpx.Response:
         for field, value in kwargs.get("files") or []:
             if field == "attachments":
                 self.payload_types.append(type(value[1]))
@@ -117,7 +117,7 @@ def _wire(connector: Any, app: FastAPI) -> _SpyClient:
 
 
 def _staged_file(workspace_root: Path, connector_name: str, record: dict[str, Any]) -> Path:
-    name = record["in_sandbox_path"].rsplit("/", 1)[1]
+    name = str(record["in_sandbox_path"]).rsplit("/", 1)[1]
     return workspace_root / "_attachments" / SESSION_ID / connector_name / name
 
 
@@ -262,7 +262,7 @@ def _tg_state(payload_path: Path) -> _TelegramConnectionState:
     state.bot_id = 42
 
     async def download_to_drive(custom_path: Path) -> Path:
-        Path(custom_path).write_bytes(payload_path.read_bytes())
+        Path(custom_path).write_bytes(payload_path.read_bytes())  # noqa: ASYNC240
         return Path(custom_path)
 
     fake = MagicMock()
@@ -322,7 +322,7 @@ async def test_telegram_9_mib_pdf_staged_byte_identical(
     out = _staged_file(workspace_root, "telegram", record)
     assert hashlib.sha256(out.read_bytes()).hexdigest() == sha
     assert http.payload_types and all(t is not bytes for t in http.payload_types)
-    assert list(isolated_tmp.glob("aios-telegram-*")) == []
+    assert list(isolated_tmp.glob("aios-telegram-*")) == []  # noqa: ASYNC240
 
 
 @pytest.mark.parametrize("raises", [False, True])
@@ -349,7 +349,7 @@ async def test_telegram_handles_closed_and_no_tempfile(
     else:
         await connector._emit_message("conn_1", _tg_state(src), _tg_msg(att))
     assert seen and all(h.closed for h in seen)
-    assert list(isolated_tmp.glob("aios-telegram-*")) == []
+    assert list(isolated_tmp.glob("aios-telegram-*")) == []  # noqa: ASYNC240
 
 
 async def test_telegram_6_mib_png_dropped_with_5_mib_marker(

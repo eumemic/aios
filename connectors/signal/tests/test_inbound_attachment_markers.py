@@ -15,7 +15,6 @@ from unittest.mock import AsyncMock
 
 import pytest
 import structlog
-
 from aios_connector_http import sandbox as sdk_sandbox
 
 from aios_signal import connector as connector_mod
