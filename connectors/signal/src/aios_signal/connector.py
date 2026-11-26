@@ -945,7 +945,7 @@ class SignalConnector(SignalManagementMixin, HttpConnector):
 
 
 def _open_binary(path: str) -> BinaryIO:
-    return open(path, "rb")  # noqa: SIM115 - caller owns + closes the handle
+    return open(path, "rb")
 
 
 def _close_attachment_handles(attachments: list[tuple[str, BinaryIO, str]] | None) -> None:

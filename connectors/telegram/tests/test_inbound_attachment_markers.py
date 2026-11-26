@@ -9,9 +9,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import structlog
-from telegram.error import TelegramError
-
 from aios_connector_http import sandbox as sdk_sandbox
+from telegram.error import TelegramError
 
 from aios_telegram.connector import TelegramConnector, _TelegramConnectionState
 from aios_telegram.parse import Attachment, InboundMessage

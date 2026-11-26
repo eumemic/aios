@@ -328,7 +328,9 @@ class TelegramConnector(HttpConnector):
         metadata = build_metadata(msg, state.bot_id)
         attachments, markers = await self._collect_attachments(state, msg.attachments)
         try:
-            await self._emit_message_inbound(connection_id, msg, sender_payload, metadata, attachments, markers)
+            await self._emit_message_inbound(
+                connection_id, msg, sender_payload, metadata, attachments, markers
+            )
         finally:
             # The tuples carry open file handles that ``emit_inbound``
             # streamed (aios#2563); the caller owns and closes them on
@@ -836,7 +838,7 @@ _AUDIO_EXTS = frozenset({".mp3", ".m4a", ".wav", ".flac"})
 
 
 def _open_binary(path: Path) -> BinaryIO:
-    return open(path, "rb")  # noqa: SIM115 - caller owns + closes the handle
+    return open(path, "rb")
 
 
 def _close_attachment_handles(attachments: list[tuple[str, BinaryIO, str]] | None) -> None:

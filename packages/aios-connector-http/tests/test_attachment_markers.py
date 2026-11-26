@@ -31,6 +31,7 @@ from aios_connector_http.sandbox import (
     safe_marker,
 )
 
+
 @pytest.fixture(autouse=True)
 def _no_cap_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("AIOS_CONNECTOR_MAX_ATTACHMENT_BYTES", raising=False)

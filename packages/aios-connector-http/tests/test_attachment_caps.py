@@ -54,8 +54,8 @@ def _sparse(path: Path, size: int, header: bytes = b"") -> Path:
 
 def test_defaults() -> None:
     assert ATTACHMENT_CAP_ENV == "AIOS_CONNECTOR_MAX_ATTACHMENT_BYTES"
-    assert MAX_ATTACHMENT_BYTES == 50 * MiB
-    assert MAX_IMAGE_ATTACHMENT_BYTES == 5 * MiB
+    assert 50 * MiB == MAX_ATTACHMENT_BYTES
+    assert 5 * MiB == MAX_IMAGE_ATTACHMENT_BYTES
     assert document_attachment_cap() == 50 * MiB
 
 
@@ -84,9 +84,7 @@ def test_env_override_read_at_call_time(monkeypatch: pytest.MonkeyPatch) -> None
     assert effective_attachment_cap("image/png") == 5 * MiB  # image cap is fixed
     assert is_over_cap(60 * MiB, "application/pdf") is False
     assert is_over_cap(65 * MiB, "application/pdf") is True
-    assert rejection_marker("x.pdf", "application/pdf", 65 * MiB).endswith(
-        "65 MiB > 64 MiB limit]"
-    )
+    assert rejection_marker("x.pdf", "application/pdf", 65 * MiB).endswith("65 MiB > 64 MiB limit]")
 
 
 def test_lowered_doc_cap_also_lowers_image_cap(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -164,9 +162,7 @@ def test_as_params_6_mib_png_rejected_naming_5_mib(tmp_path: Path) -> None:
     )
 
 
-def test_as_params_message_follows_env_cap(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_as_params_message_follows_env_cap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(ATTACHMENT_CAP_ENV, str(2 * MiB))
     p = _sparse(tmp_path / "a.pdf", 3 * MiB)
     with pytest.raises(AttachmentError, match=r"SDK cap is 2097152 bytes \(2 MiB\)"):
@@ -234,7 +230,7 @@ async def _emit_with_handle(path: Path) -> tuple[_HashingTransport, int]:
     transport = _HashingTransport()
     async with httpx.AsyncClient(base_url="http://x", transport=transport) as http:
         conn = _Conn(http)
-        with open(path, "rb") as fh:
+        with open(path, "rb") as fh:  # noqa: ASYNC230
             tracemalloc.start()
             try:
                 result = await conn.emit_inbound(
@@ -282,7 +278,7 @@ async def test_emit_inbound_file_handle_body_byte_identical(tmp_path: Path) -> N
             return httpx.Response(200, json={})
 
     async with httpx.AsyncClient(base_url="http://x", transport=_Capture()) as http:
-        with open(path, "rb") as fh:
+        with open(path, "rb") as fh:  # noqa: ASYNC230
             await _Conn(http).emit_inbound(
                 connection_id="conn_1",
                 chat_id="c",
@@ -309,4 +305,3 @@ async def test_emit_inbound_bytes_payload_still_works() -> None:
         )
     assert result == {"appended_event_id": "evt_1"}
     assert transport.total > len(b"hello")
-

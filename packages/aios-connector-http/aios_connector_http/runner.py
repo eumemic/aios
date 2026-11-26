@@ -65,7 +65,7 @@ import stat as _stat
 import tempfile
 import time
 import types
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, BinaryIO, Literal, Union, get_args, get_origin, get_type_hints
@@ -780,7 +780,7 @@ class HttpConnector:
         chat_id: str,
         sender: dict[str, Any],
         content: str,
-        attachments: list[tuple[str, bytes | BinaryIO, str]] | None = None,
+        attachments: Sequence[tuple[str, bytes | BinaryIO, str]] | None = None,
         metadata: dict[str, Any] | None = None,
         timestamp: str | None = None,
         event_id: str | None = None,
