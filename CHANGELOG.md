@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- Large inbound documents now reach the agent (#2563). Signal and Telegram
+  inbound attachments used to be read whole into connector memory and capped
+  at 5 MiB for every type, so scholarly PDFs were dropped. The connectors now
+  hand an open file handle to `emit_inbound`, and httpx streams it as a
+  multipart part in 64 KiB chunks (the API side already streamed to disk). The
+  SDK cap is now per type and read at call time. Documents (any non-`image/*`
+  type) default to 50 MiB, and each connector process can override that with
+  `AIOS_CONNECTOR_MAX_ATTACHMENT_BYTES`; an invalid value logs
+  `attachment.cap.invalid_env` and falls back to the default. Images stay at
+  5 MiB, because the model sees them as pixels. The #2551 drop markers report
+  the per-type limit. Files above signal-cli's own download ceiling still get
+  the #2551 `download failed` marker. Staged files are retained under the
+  existing `_attachments` orphan GC and session reaping; no new quota is added.
+
 - Per-account wake fairness (#418). One account's burst of session wakes can no
   longer fill every worker slot and hold back other accounts. Before a step
   starts, `run_session_step` checks a non-blocking per-account admission gate.
