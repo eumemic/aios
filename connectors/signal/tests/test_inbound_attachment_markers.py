@@ -16,6 +16,8 @@ from unittest.mock import AsyncMock
 import pytest
 import structlog
 
+from aios_connector_http import sandbox as sdk_sandbox
+
 from aios_signal import connector as connector_mod
 from aios_signal.connector import SignalConnector, _SignalConnectionState
 from aios_signal.parse import parse_envelope
@@ -26,6 +28,15 @@ ISSUE_MARKER = (
     "[attachment not delivered: 'Online FSOT Practice Test.pdf', "
     "application/pdf, 7.1 MiB > 5 MiB limit]"
 )
+
+
+@pytest.fixture(autouse=True)
+def _legacy_5mib_document_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These #2551 exact-text tests were written against the pre-#2563
+    single 5 MiB cap; pin it so they keep asserting the same markers.
+    The new per-type defaults are covered in ``test_large_attachments``."""
+    monkeypatch.delenv("AIOS_CONNECTOR_MAX_ATTACHMENT_BYTES", raising=False)
+    monkeypatch.setattr(sdk_sandbox, "MAX_ATTACHMENT_BYTES", 5 * 1024 * 1024)
 
 
 def _state() -> _SignalConnectionState:
@@ -64,13 +75,23 @@ def _envelope(attachments: list[dict[str, Any]], text: str | None = None) -> dic
 async def _run(
     connector: SignalConnector, monkeypatch: pytest.MonkeyPatch, envelope: dict[str, Any]
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    emit = AsyncMock(return_value={"ok": True})
+    seen: list[Any] = []
+
+    async def _snapshot(**kw: Any) -> dict[str, Any]:
+        # Attachments are streamed file handles (aios#2563), closed by the
+        # connector after emit; materialise them while still open.
+        atts = kw.get("attachments")
+        seen.append(None if atts is None else [(n, h.read(), c) for n, h, c in atts])
+        return {"ok": True}
+
+    emit = AsyncMock(side_effect=_snapshot)
     monkeypatch.setattr(connector, "emit_inbound", emit)
     monkeypatch.setattr(connector, "_send_read_receipt", AsyncMock())
     with structlog.testing.capture_logs() as logs:
         await connector._handle_envelope(CONNECTION_ID, _state(), envelope)
     emit.assert_awaited_once()
-    return emit.await_args.kwargs, logs
+    assert emit.await_args is not None
+    return {**emit.await_args.kwargs, "attachments": seen[0]}, logs
 
 
 def _count(kwargs: dict[str, Any]) -> int:

@@ -7,6 +7,7 @@ photos still reach the model as ``image_url`` parts.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import BinaryIO
 
 from aios_signal.config import Settings
 from aios_signal.connector import SignalConnector
@@ -19,6 +20,19 @@ def _make_connector(config_dir: Path) -> SignalConnector:
         cli_bin="/usr/bin/signal-cli",
     )
     return SignalConnector(cfg)
+
+
+def _materialise(
+    tuples: list[tuple[str, BinaryIO, str]] | None,
+) -> list[tuple[str, bytes, str]] | None:
+    """Read + close the streamed handles (aios#2563) for byte assertions."""
+    if tuples is None:
+        return None
+    out = []
+    for name, fh, ctype in tuples:
+        with fh:
+            out.append((name, fh.read(), ctype))
+    return out
 
 
 def _make_msg(attachments: tuple[Attachment, ...]) -> InboundMessage:
@@ -60,7 +74,7 @@ async def test_fallback_to_config_dir_when_file_field_omitted(tmp_path: Path) ->
 
     tuples = await connector._build_attachment_tuples(msg)
 
-    assert tuples == [("photo.png", b"fake-png-bytes", "image/png")]
+    assert _materialise(tuples) == [("photo.png", b"fake-png-bytes", "image/png")]
 
 
 async def test_fallback_skips_when_file_missing_on_disk(tmp_path: Path) -> None:
@@ -125,4 +139,4 @@ async def test_explicit_host_path_wins_over_id_fallback(tmp_path: Path) -> None:
     )
 
     tuples = await connector._build_attachment_tuples(msg)
-    assert tuples == [("photo.png", b"x", "image/png")]
+    assert _materialise(tuples) == [("photo.png", b"x", "image/png")]
