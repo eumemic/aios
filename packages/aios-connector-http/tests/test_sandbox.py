@@ -171,12 +171,14 @@ class TestAttachmentParams:
             att.as_params()
 
     def test_oversize_rejected(self, tmp_path: Path) -> None:
+        # Documents cap at 50 MiB by default (#2563); sparse file, no RAM.
         path = tmp_path / "big.bin"
-        path.write_bytes(b"\0" * (5 * 1024 * 1024 + 1))
+        with open(path, "wb") as f:
+            f.truncate(50 * 1024 * 1024 + 1)
         att = Attachment(
             host_path=str(path), filename="big.bin", content_type="application/octet-stream"
         )
-        with pytest.raises(AttachmentError, match="5242880 bytes"):
+        with pytest.raises(AttachmentError, match="52428800 bytes"):
             att.as_params()
 
     def test_mime_corrected_when_magic_disagrees(self, tmp_path: Path) -> None:

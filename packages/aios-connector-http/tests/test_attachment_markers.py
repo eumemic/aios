@@ -31,6 +31,17 @@ from aios_connector_http.sandbox import (
     safe_marker,
 )
 
+@pytest.fixture(autouse=True)
+def _no_cap_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("AIOS_CONNECTOR_MAX_ATTACHMENT_BYTES", raising=False)
+
+
+@pytest.fixture
+def legacy_5mib_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the pre-#2563 5 MiB document cap for the #2551 exact-text tests."""
+    monkeypatch.setattr(sandbox, "MAX_ATTACHMENT_BYTES", 5 * 1024 * 1024)
+
+
 ISSUE_MARKER = (
     "[attachment not delivered: 'Online FSOT Practice Test.pdf', "
     "application/pdf, 7.1 MiB > 5 MiB limit]"
@@ -106,7 +117,7 @@ def test_is_over_cap(monkeypatch: pytest.MonkeyPatch) -> None:
     assert is_over_cap(1048577) is True
 
 
-def test_marker_variants_exact() -> None:
+def test_marker_variants_exact(legacy_5mib_cap: None) -> None:
     assert (
         rejection_marker("Online FSOT Practice Test.pdf", "application/pdf", 7441443)
         == ISSUE_MARKER
@@ -146,11 +157,12 @@ def test_marker_reads_cap_at_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
-def test_no_contradiction_at_limit_plus_one() -> None:
-    assert rejection_marker("x", "application/pdf", MAX_ATTACHMENT_BYTES + 1).endswith(
+def test_no_contradiction_at_limit_plus_one(legacy_5mib_cap: None) -> None:
+    cap = 5 * 1024 * 1024
+    assert rejection_marker("x", "application/pdf", cap + 1).endswith(
         "5,242,881 bytes > 5,242,880 bytes limit]"
     )
-    for size in range(MAX_ATTACHMENT_BYTES + 1, MAX_ATTACHMENT_BYTES + 100000, 997):
+    for size in range(cap + 1, cap + 100000, 997):
         marker = rejection_marker("x", "application/pdf", size)
         lhs, rhs = marker.split(", ")[-1].rstrip("]").split(" > ")
         assert lhs != rhs.removesuffix(" limit")
@@ -229,7 +241,7 @@ def test_marker_deterministic() -> None:
     assert a == b
 
 
-def test_as_params_over_cap_message_unchanged(tmp_path: Path) -> None:
+def test_as_params_over_cap_message_unchanged(tmp_path: Path, legacy_5mib_cap: None) -> None:
     p = tmp_path / "big.pdf"
     with open(p, "wb") as f:
         f.truncate(7441443)
@@ -266,7 +278,7 @@ def test_emit_with_raising_logger_does_not_raise() -> None:
     _emit(Bad(), "evt", reason="x")
 
 
-def test_drop_attachment_appends_and_logs() -> None:
+def test_drop_attachment_appends_and_logs(legacy_5mib_cap: None) -> None:
     markers: list[str] = []
     with structlog.testing.capture_logs() as logs:
         drop_attachment(

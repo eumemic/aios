@@ -68,7 +68,7 @@ import types
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal, Union, get_args, get_origin, get_type_hints
+from typing import Any, BinaryIO, Literal, Union, get_args, get_origin, get_type_hints
 
 import httpx
 import structlog
@@ -780,7 +780,7 @@ class HttpConnector:
         chat_id: str,
         sender: dict[str, Any],
         content: str,
-        attachments: list[tuple[str, bytes, str]] | None = None,
+        attachments: list[tuple[str, bytes | BinaryIO, str]] | None = None,
         metadata: dict[str, Any] | None = None,
         timestamp: str | None = None,
         event_id: str | None = None,
@@ -788,8 +788,13 @@ class HttpConnector:
         """Forward a platform inbound to aios for ``connection_id``.
 
         Idempotent on ``event_id``.  ``attachments`` is a list of
-        ``(filename, bytes, content_type)`` tuples that ride as
-        multipart parts.
+        ``(filename, payload, content_type)`` tuples that ride as
+        multipart parts.  ``payload`` is either ``bytes`` or an open,
+        seekable binary file handle (aios#2563): httpx streams a file
+        handle in fixed-size chunks (re-``seek(0)``-ing it before each
+        render), so a 50 MiB document is never held whole in connector
+        memory.  The CALLER owns handle lifetime — this method never
+        closes them; close them in a ``finally`` after it returns/raises.
 
         HTTP errors other than ``401`` / ``403`` drop the envelope and
         return ``None`` so one bad inbound or transient API outage cannot
@@ -815,7 +820,7 @@ class HttpConnector:
         # field shape ``list[str]`` from the openapi spec (FastAPI's
         # ``UploadFile`` parts don't survive the schema round-trip),
         # so we POST directly via the underlying httpx client.
-        files: list[tuple[str, tuple[str | None, bytes, str]]] = [
+        files: list[tuple[str, tuple[str | None, bytes | BinaryIO, str]]] = [
             ("connection_id", (None, connection_id.encode(), "text/plain")),
             ("event_id", (None, eid.encode(), "text/plain")),
             ("chat_id", (None, chat_id.encode(), "text/plain")),
