@@ -35,12 +35,13 @@ mixed in via :class:`SignalManagementMixin`.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 from collections import deque
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 import structlog
 from aios_connector_http import (
@@ -415,6 +416,38 @@ class SignalConnector(SignalManagementMixin, HttpConnector):
             "display_name": msg.sender_name or msg.sender_uuid,
         }
         attachments, markers = await self._collect_attachments(msg)
+        try:
+            result = await self._emit_signal_inbound(
+                connection_id, state, msg, chat_id, sender_payload, attachments, markers
+            )
+        finally:
+            # The attachment tuples carry open file handles that
+            # ``emit_inbound`` streamed (aios#2563); the caller owns them.
+            _close_attachment_handles(attachments)
+        if result is None:
+            return
+        # Send a read receipt now that the message is persisted in the
+        # session event log — semantically, "the agent has seen it."
+        # signal-cli's automatic delivery receipts in daemon mode batch
+        # unpredictably (some receipts land seconds after the envelope,
+        # some get skipped until a later flush trigger), so the sender's
+        # UI checkmark state lags reality.  An explicit read receipt
+        # forces the 2nd checkmark immediately and gives the sender
+        # confirmation tied to actual consumption rather than to
+        # signal-cli's internal flush timing.  Best-effort: a failure
+        # here is cosmetic only — the inbound is already in the log.
+        await self._send_read_receipt(state, msg)
+
+    async def _emit_signal_inbound(
+        self,
+        connection_id: str,
+        state: _SignalConnectionState,
+        msg: InboundMessage,
+        chat_id: str,
+        sender_payload: dict[str, Any],
+        attachments: list[tuple[str, BinaryIO, str]] | None,
+        markers: list[str],
+    ) -> dict[str, Any] | None:
         # Signal envelope timestamps are ms since epoch.  Render as
         # ISO-8601 UTC so operators reading event logs see absolute
         # times rather than connector-source unix-ms.
@@ -423,7 +456,7 @@ class SignalConnector(SignalManagementMixin, HttpConnector):
             if msg.timestamp_ms
             else None
         )
-        result = await self.emit_inbound(
+        return await self.emit_inbound(
             connection_id=connection_id,
             # Signal's (sender_uuid, timestamp_ms) pair is the platform's
             # canonical message identity; feeding it as ``event_id`` lets
@@ -440,19 +473,6 @@ class SignalConnector(SignalManagementMixin, HttpConnector):
             metadata=build_metadata(msg, chat_id, state.bot_uuid),
             timestamp=timestamp_iso,
         )
-        if result is None:
-            return
-        # Send a read receipt now that the message is persisted in the
-        # session event log — semantically, "the agent has seen it."
-        # signal-cli's automatic delivery receipts in daemon mode batch
-        # unpredictably (some receipts land seconds after the envelope,
-        # some get skipped until a later flush trigger), so the sender's
-        # UI checkmark state lags reality.  An explicit read receipt
-        # forces the 2nd checkmark immediately and gives the sender
-        # confirmation tied to actual consumption rather than to
-        # signal-cli's internal flush timing.  Best-effort: a failure
-        # here is cosmetic only — the inbound is already in the log.
-        await self._send_read_receipt(state, msg)
 
     # ── model-facing tools ────────────────────────────────────────────
 
@@ -782,15 +802,15 @@ class SignalConnector(SignalManagementMixin, HttpConnector):
 
     async def _build_attachment_tuples(
         self, msg: InboundMessage
-    ) -> list[tuple[str, bytes, str]] | None:
+    ) -> list[tuple[str, BinaryIO, str]] | None:
         """Runtime tuples only; see :meth:`_collect_attachments`."""
         tuples, _ = await self._collect_attachments(msg)
         return tuples
 
     async def _collect_attachments(
         self, msg: InboundMessage
-    ) -> tuple[list[tuple[str, bytes, str]] | None, list[str]]:
-        """Read each attachment's bytes for multipart upload to aios.
+    ) -> tuple[list[tuple[str, BinaryIO, str]] | None, list[str]]:
+        """Open each attachment for streamed multipart upload to aios.
 
         Returns ``(tuples, markers)``: ``markers`` holds one
         ``[attachment not delivered: ...]`` line per attachment that was
@@ -802,10 +822,13 @@ class SignalConnector(SignalManagementMixin, HttpConnector):
         attachment bytes but omits the ``file`` field — we fall back to
         the storage-layout convention ``<config_dir>/attachments/<id>``
         for envelopes without a ``host_path``.  SDK :class:`Attachment`'s
-        ``as_params`` validates size + existence; we then read the bytes
-        off the event loop (multi-MiB photo+video attachments would
-        block the inbound dispatcher otherwise) for the runtime-multipart
-        ``emit_inbound`` shape.
+        ``as_params`` validates existence + the per-type cap (50 MiB
+        documents / 5 MiB images by default, aios#2563); we then OPEN each
+        file off the event loop and return the binary handle, which
+        ``emit_inbound`` streams in chunks — the file is never held whole
+        in connector memory.  The CALLER owns the returned handles and
+        must close them (:func:`_close_attachment_handles`) after
+        ``emit_inbound`` returns or raises.
 
         A 0-byte host file whose envelope declared ``size > 0`` is a
         failed signal-cli download (``Response exceeds max size!``), not
@@ -878,7 +901,7 @@ class SignalConnector(SignalManagementMixin, HttpConnector):
                     error=str(err),
                 )
                 size = st_size if st_size is not None else declared
-                over = is_over_cap(size)
+                over = is_over_cap(size, att.content_type)
                 _drop(
                     index,
                     name=filename,
@@ -892,21 +915,21 @@ class SignalConnector(SignalManagementMixin, HttpConnector):
                 continue
             validated.append((index, host_path, filename, att.content_type, declared))
 
-        out: list[tuple[str, bytes, str]] = []
+        out: list[tuple[str, BinaryIO, str]] = []
         if validated:
-            blobs = await asyncio.gather(
-                *(asyncio.to_thread(Path(p).read_bytes) for _, p, _, _, _ in validated),
+            handles = await asyncio.gather(
+                *(asyncio.to_thread(_open_binary, p) for _, p, _, _, _ in validated),
                 return_exceptions=True,
             )
-            for (index, host_path, filename, content_type, declared), blob in zip(
-                validated, blobs, strict=True
+            for (index, host_path, filename, content_type, declared), handle in zip(
+                validated, handles, strict=True
             ):
-                if isinstance(blob, BaseException):
+                if isinstance(handle, BaseException):
                     log.warning(
                         "signal.inbound.attachment_read_failed",
                         host_path=host_path,
                         filename=filename,
-                        error=str(blob),
+                        error=str(handle),
                     )
                     _drop(
                         index,
@@ -916,9 +939,20 @@ class SignalConnector(SignalManagementMixin, HttpConnector):
                         reason="rejected",
                     )
                     continue
-                out.append((filename, blob, content_type))
+                out.append((filename, handle, content_type))
         markers = [markers_by_index[i] for i in sorted(markers_by_index)]
         return (out or None), markers
+
+
+def _open_binary(path: str) -> BinaryIO:
+    return open(path, "rb")
+
+
+def _close_attachment_handles(attachments: list[tuple[str, BinaryIO, str]] | None) -> None:
+    """Close every handle returned by ``_collect_attachments``; never raises."""
+    for _, handle, _ in attachments or []:
+        with contextlib.suppress(Exception):
+            handle.close()
 
 
 def _recipient_params(chat_id: str) -> dict[str, Any]:

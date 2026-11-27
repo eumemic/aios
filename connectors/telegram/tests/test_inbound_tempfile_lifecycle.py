@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import tempfile
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -80,8 +81,10 @@ async def test_successful_download_does_not_leak_tempfile(
     # Success path: returned the runtime tuple with the bytes we wrote.
     assert result is not None
     assert len(result) == 1
-    filename, blob, content_type = result[0]
+    filename, handle, content_type = result[0]
     assert filename == "photo.png"
+    with handle:  # streamed handle (aios#2563); unlinked inode still readable
+        blob = handle.read()
     assert blob == payload
     assert content_type == "image/png"
 
@@ -111,6 +114,8 @@ async def test_multiple_attachments_all_cleaned_up(isolated_tmp: Path) -> None:
 
     assert result is not None
     assert len(result) == 5
+    for _, handle, _ in result:
+        handle.close()
 
     leaked = list(isolated_tmp.glob("aios-telegram-*"))  # noqa: ASYNC240
     assert leaked == [], f"multi-attachment inbound leaked: {leaked!r}"
@@ -125,19 +130,16 @@ async def test_read_failure_also_unlinks_tempfile(isolated_tmp: Path) -> None:
     connector = TelegramConnector.__new__(TelegramConnector)
     connector.state = {}
 
-    # Sabotage read_bytes by removing read permission *after* download
-    # but before the attachment loop reads. Easiest: monkeypatch
-    # ``Path.read_bytes`` for this scope to raise OSError.
-    real_read_bytes = Path.read_bytes
+    # Sabotage the open of the downloaded tempfile (aios#2563: the
+    # connector opens a handle instead of ``read_bytes``) to raise OSError.
+    from aios_telegram import connector as connector_mod
 
-    def boom(self: Path) -> bytes:
-        if "aios-telegram-" in str(self):
-            raise OSError("simulated read failure")
-        return real_read_bytes(self)
+    def boom(path: Path) -> Any:
+        raise OSError("simulated read failure")
 
     import unittest.mock as _mock
 
-    with _mock.patch.object(Path, "read_bytes", boom):
+    with _mock.patch.object(connector_mod, "_open_binary", boom):
         result = await connector._download_attachments(
             state,
             (Attachment(file_id="f", content_type="image/png", filename="x.png"),),

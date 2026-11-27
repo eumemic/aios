@@ -35,7 +35,7 @@ import tempfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, BinaryIO, Literal
 
 import structlog
 from aios_connector_http import (
@@ -327,6 +327,25 @@ class TelegramConnector(HttpConnector):
         }
         metadata = build_metadata(msg, state.bot_id)
         attachments, markers = await self._collect_attachments(state, msg.attachments)
+        try:
+            await self._emit_message_inbound(
+                connection_id, msg, sender_payload, metadata, attachments, markers
+            )
+        finally:
+            # The tuples carry open file handles that ``emit_inbound``
+            # streamed (aios#2563); the caller owns and closes them on
+            # both the success and the raising path.
+            _close_attachment_handles(attachments)
+
+    async def _emit_message_inbound(
+        self,
+        connection_id: str,
+        msg: InboundMessage,
+        sender_payload: dict[str, Any],
+        metadata: dict[str, Any],
+        attachments: list[tuple[str, BinaryIO, str]] | None,
+        markers: list[str],
+    ) -> None:
         # Telegram's (chat_id, message_id) pair is the platform's
         # canonical message identity; feeding it as ``event_id`` lets
         # aios's ``inbound_acks`` dedupe a redelivered update after a
@@ -409,7 +428,7 @@ class TelegramConnector(HttpConnector):
         self,
         state: _TelegramConnectionState,
         attachments: tuple[Attachment, ...],
-    ) -> list[tuple[str, bytes, str]] | None:
+    ) -> list[tuple[str, BinaryIO, str]] | None:
         """Runtime tuples only; see :meth:`_collect_attachments`."""
         tuples, _ = await self._collect_attachments(state, attachments)
         return tuples
@@ -418,8 +437,14 @@ class TelegramConnector(HttpConnector):
         self,
         state: _TelegramConnectionState,
         attachments: tuple[Attachment, ...],
-    ) -> tuple[list[tuple[str, bytes, str]] | None, list[str]]:
+    ) -> tuple[list[tuple[str, BinaryIO, str]] | None, list[str]]:
         """Download each attachment, validate size + bytes, return runtime tuples.
+
+        Each runtime tuple carries an OPEN binary file handle (aios#2563)
+        that ``emit_inbound`` streams in chunks, so a large document is
+        never held whole in connector memory.  The CALLER owns the
+        handles and must close them (:func:`_close_attachment_handles`)
+        after ``emit_inbound`` returns or raises.
 
         Returns ``(tuples, markers)``.  Every per-attachment exit that
         skips the attachment appends one ``[attachment not delivered:
@@ -431,10 +456,10 @@ class TelegramConnector(HttpConnector):
           ``download failed`` (never delivered as an empty file);
         * ``as_params`` raised :class:`AttachmentError` → over-cap or
           ``rejected``;
-        * reading the tempfile failed → ``rejected``.
+        * opening the tempfile failed → ``rejected``.
         """
         host_paths = await asyncio.gather(*(self._download_one(state, a) for a in attachments))
-        out: list[tuple[str, bytes, str]] = []
+        out: list[tuple[str, BinaryIO, str]] = []
         markers: list[str] = []
         for att, host_path in zip(attachments, host_paths, strict=True):
             declared = coerce_size(att.file_size)
@@ -458,8 +483,10 @@ class TelegramConnector(HttpConnector):
             # leaks one file into ``/tmp`` for the lifetime of the
             # connector container — eventual ``/tmp`` exhaustion kills
             # the next ``NamedTemporaryFile`` and tears the serve task
-            # down. The runtime tuple carries the in-memory ``blob``
-            # bytes; the on-disk path is single-use scratch.
+            # down. The runtime tuple carries an OPEN handle (aios#2563):
+            # on Linux the unlinked inode stays readable through it and
+            # its space is reclaimed when the caller closes the handle
+            # after ``emit_inbound``.  The on-disk path is single-use scratch.
             try:
                 try:
                     st_size: int | None = coerce_size(host_path.stat().st_size)
@@ -495,7 +522,7 @@ class TelegramConnector(HttpConnector):
                         error=str(err),
                     )
                     size = st_size if st_size is not None else declared
-                    over = is_over_cap(size)
+                    over = is_over_cap(size, att.content_type)
                     drop_attachment(
                         markers,
                         log,
@@ -511,7 +538,7 @@ class TelegramConnector(HttpConnector):
                     )
                     continue
                 try:
-                    blob = host_path.read_bytes()
+                    handle = await asyncio.to_thread(_open_binary, host_path)
                 except OSError as err:
                     log.warning(
                         "telegram.inbound.attachment_read_failed",
@@ -530,7 +557,7 @@ class TelegramConnector(HttpConnector):
                         file_id=att.file_id,
                     )
                     continue
-                out.append((att.filename, blob, att.content_type))
+                out.append((att.filename, handle, att.content_type))
             finally:
                 await asyncio.to_thread(host_path.unlink, missing_ok=True)
         return (out or None), markers
@@ -808,6 +835,17 @@ _ANIMATION_EXTS = frozenset({".gif"})
 _VIDEO_EXTS = frozenset({".mp4", ".mov", ".webm"})
 _VOICE_EXTS = frozenset({".ogg", ".oga"})
 _AUDIO_EXTS = frozenset({".mp3", ".m4a", ".wav", ".flac"})
+
+
+def _open_binary(path: Path) -> BinaryIO:
+    return open(path, "rb")
+
+
+def _close_attachment_handles(attachments: list[tuple[str, BinaryIO, str]] | None) -> None:
+    """Close every handle returned by ``_collect_attachments``; never raises."""
+    for _, handle, _ in attachments or []:
+        with contextlib.suppress(Exception):
+            handle.close()
 
 
 def _classify(host_path: Path) -> str:
