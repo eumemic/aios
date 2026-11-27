@@ -52,6 +52,7 @@ from aios.harness.production_watchdogs import (
 from aios.ids import sandbox_owner_kind
 from aios.logging import get_logger
 from aios.sandbox.backends.base import (
+    BASE_IMAGE_ID_LABEL_KEY,
     BASE_IMAGE_LABEL_KEY,
     ENV_KEYS_LABEL_KEY,
     FLATTENED_LABEL_KEY,
@@ -2206,16 +2207,37 @@ class SandboxRegistry:
             await self._reset_snapshot(session_id, reason="snapshot_missing", expected_ref=ref)
             return dataclasses.replace(spec, snapshot_image=None)
         snap_base = snap_labels.get(BASE_IMAGE_LABEL_KEY)
-        if snap_base != spec.image:
+        snap_base_id = snap_labels.get(BASE_IMAGE_ID_LABEL_KEY)
+        current_base_id: str | None = None
+        if snap_base_id is not None and snap_base == spec.image:
+            # #390: a mutable tag (``:stable``) can advance under an unchanged
+            # reference; compare the resolved content ID. Absent label (every
+            # pre-#390 snapshot) => no drift. Unresolvable (registry outage) =>
+            # no drift too: resuming the old base beats blocking provisioning
+            # or discarding the durable filesystem on a transient failure.
+            try:
+                current_base_id = await self._backend.image_id(spec.image)
+            except SandboxBackendError as exc:
+                log.warning(
+                    "sandbox.base_image_id_unresolved",
+                    session_id=session_id,
+                    image=spec.image,
+                    error=str(exc),
+                )
+                current_base_id = snap_base_id
+        if snap_base != spec.image or (
+            snap_base_id is not None and snap_base_id != current_base_id
+        ):
+            reason = (
+                "environment_image_changed" if snap_base != spec.image else "base_image_updated"
+            )
             # Discard — the artifact must actually be GONE: a surviving tag
             # would be re-pointered by GC pass 4, and the next idle's lineage
             # gate would see a corpse rooted on the new base against the old
             # tag and discard live post-drift work as skipped_stale. remove +
             # clear + event, in the same step.
             await self._store.remove(ref)
-            await self._reset_snapshot(
-                session_id, reason="environment_image_changed", expected_ref=ref
-            )
+            await self._reset_snapshot(session_id, reason=reason, expected_ref=ref)
             return dataclasses.replace(spec, snapshot_image=None)
 
         # Valid resume: use the locally materialized durable snapshot.

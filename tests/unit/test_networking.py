@@ -1179,7 +1179,10 @@ async def _capture_docker_argv(spec: SandboxSpec) -> list[str]:
     async def fake_run_docker(
         argv: list[str], *, timeout_s: float = 30.0, **kwargs: Any
     ) -> tuple[int, bytes, bytes]:
-        captured.append(argv)
+        if argv[1:3] == ["image", "inspect"]:
+            return 0, b"sha256:resolved\t1\t1\t{}\n", b""
+        if argv[1] == "run":
+            captured.append(argv)
         return 0, b"container_abc123\n", b""
 
     with patch("aios.sandbox.backends.docker.run_docker_cli", fake_run_docker):

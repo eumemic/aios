@@ -1,7 +1,9 @@
-"""Unit tests verifying ``--pull always`` is added to the docker run argv (#567).
+"""Unit tests for fresh-pull semantics on sandbox creation (#567, #390).
 
-Ensures the flag is present and appears before the image name so Docker
-pulls a fresh copy of the image on every sandbox creation.
+A registry image is pulled fresh on every cold start — but exactly ONCE, via an
+explicit ``docker pull``; the container then launches from the resolved
+immutable image ID with no ``--pull`` flag, so the image it runs is the one
+stamped as ``aios.base_image_id`` even if the tag moves mid-create.
 """
 
 from __future__ import annotations
@@ -37,12 +39,14 @@ def _spec(**overrides: object) -> SandboxSpec:
     return SandboxSpec(**base)  # type: ignore[arg-type]
 
 
-async def _capture_argv(spec: SandboxSpec) -> list[str]:
+async def _capture(spec: SandboxSpec) -> dict[str, list[str]]:
     """Run DockerBackend.create against a stubbed docker subprocess.
 
-    Returns the argv the backend would have invoked.
+    Returns the ``docker run`` argv (``"argv"``) and the refs passed to
+    ``docker pull`` (``"pulls"``).
     """
     captured: dict[str, list[str]] = {}
+    pulls: list[str] = []
 
     async def fake_run_docker(
         argv: list[str], *, timeout_s: float = 30.0, snapshot_timeout: bool = False
@@ -50,50 +54,43 @@ async def _capture_argv(spec: SandboxSpec) -> list[str]:
         del timeout_s, snapshot_timeout
         if argv[1] == "run":
             captured["argv"] = argv
+        if argv[1] == "pull":
+            pulls.append(argv[2])
+        if argv[1:3] == ["image", "inspect"]:
+            return 0, b"sha256:resolved\t1\t1\t{}\n", b""
         return 0, b"deadbeef1234\n", b""
 
     with patch("aios.sandbox.backends.docker.run_docker_cli", side_effect=fake_run_docker):
         await DockerBackend().create(spec)
-    return captured["argv"]
+    captured["pulls"] = pulls
+    return captured
 
 
-class TestPullAlwaysFlag:
+class TestFreshPull:
     @pytest.mark.asyncio
-    async def test_pull_always_flag_present(self) -> None:
-        """``--pull always`` must appear in the docker run argv."""
-        argv = await _capture_argv(_spec())
-        assert "--pull" in argv
-        i = argv.index("--pull")
-        assert argv[i + 1] == "always"
-
-    @pytest.mark.asyncio
-    async def test_pull_always_precedes_image(self) -> None:
-        """``--pull`` must appear before the image name in the argv."""
+    async def test_registry_image_pulled_exactly_once(self) -> None:
         spec = _spec()
-        argv = await _capture_argv(spec)
-        pull_index = argv.index("--pull")
-        image_index = argv.index(spec.image)
-        assert pull_index < image_index
+        out = await _capture(spec)
+        assert out["pulls"] == [spec.image]
+        assert "--pull" not in out["argv"]
 
     @pytest.mark.asyncio
-    async def test_pull_always_absent_for_local_image(self) -> None:
-        """``--pull`` must NOT appear when the image is a bare local tag."""
-        spec = _spec(image="aios-sandbox:latest")
-        argv = await _capture_argv(spec)
-        assert "--pull" not in argv
+    async def test_registry_image_launched_by_resolved_id(self) -> None:
+        out = await _capture(_spec())
+        assert out["argv"][-1] == "sha256:resolved"
 
     @pytest.mark.asyncio
-    async def test_pull_always_absent_for_bare_name_no_tag(self) -> None:
-        """``--pull`` must NOT appear for a bare image name without any tag."""
-        spec = _spec(image="aios-sandbox")
-        argv = await _capture_argv(spec)
-        assert "--pull" not in argv
-
-    @pytest.mark.asyncio
-    async def test_pull_always_present_for_localhost_registry(self) -> None:
-        """``--pull always`` must appear for a localhost-port private registry."""
+    async def test_localhost_registry_pulled_and_launched_by_id(self) -> None:
         spec = _spec(image="localhost:5000/foo:bar")
-        argv = await _capture_argv(spec)
-        assert "--pull" in argv
-        i = argv.index("--pull")
-        assert argv[i + 1] == "always"
+        out = await _capture(spec)
+        assert out["pulls"] == [spec.image]
+        assert "--pull" not in out["argv"]
+        assert out["argv"][-1] == "sha256:resolved"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("image", ["aios-sandbox:latest", "aios-sandbox"])
+    async def test_local_image_not_pulled(self, image: str) -> None:
+        out = await _capture(_spec(image=image))
+        assert out["pulls"] == []
+        assert "--pull" not in out["argv"]
+        assert out["argv"][-1] == "sha256:resolved"

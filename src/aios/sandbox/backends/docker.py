@@ -40,6 +40,7 @@ from aios.sandbox._subprocess import (
 )
 from aios.sandbox._tar_filter import EPHEMERAL_PREFIXES, TarPrefixFilter
 from aios.sandbox.backends.base import (
+    BASE_IMAGE_ID_LABEL_KEY,
     BASE_IMAGE_LABEL_KEY,
     ENV_KEYS_LABEL_KEY,
     FLATTENED_LABEL_KEY,
@@ -459,6 +460,9 @@ class DockerBackend:
         """Run ``docker run`` per ``spec`` and return a handle to the started container."""
         if spec.runtime == "runsc":
             _require_runsc_supported_machine("sandboxes")
+            # Fail closed on a tenant-supplied image BEFORE any daemon call
+            # (including the base-image resolution below).
+            operator_image = _runsc_operator_image(spec)
         argv: list[str] = [
             "docker",
             "run",
@@ -481,17 +485,34 @@ class DockerBackend:
                 ["--volume", _format_volume(mount.host_path, mount.sandbox_path, mount.read_only)]
             )
 
+        # Resolve the base ref before launch and stamp the immutable
+        # chain root on cold starts. Resumes retain the snapshot's inherited ID.
+        #
+        # The tag is resolved exactly ONCE and the container is launched from
+        # that immutable ID (no second ``--pull always``): a second, independent
+        # pull could land on a newer image if the tag moved in between, leaving
+        # the container running B while labelled A — and the next resume would
+        # misread that as ``base_image_updated`` and discard the snapshot. The
+        # reference itself (``spec.image``) still rides in ``aios.base_image``
+        # via ``spec.labels`` for environment_image_changed detection.
+        labels = dict(spec.labels)
+        resolved_base_id: str | None = None
+        # Every cold-start base is resolved — not only registry refs — so local
+        # tags and Docker Hub short forms also carry ``aios.base_image_id`` and
+        # an advance behind an unchanged ref is caught on resume.
+        if spec.snapshot_image is None:
+            resolved_base_id = await self.image_id(spec.image)
+            labels[BASE_IMAGE_ID_LABEL_KEY] = resolved_base_id
+
         # Labels (the registry/spec builder is responsible for setting the
         # managed/instance/session labels; backend just passes through).
-        for key, value in spec.labels.items():
+        for key, value in labels.items():
             argv.extend(["--label", f"{key}={value}"])
 
         network_name = spec.network_name or SANDBOX_NETWORK_NAME
         argv.extend(["--network", network_name])
 
         if spec.runtime == "runsc":
-            # Fail closed on a tenant-supplied image BEFORE any daemon call.
-            operator_image = _runsc_operator_image(spec)
             # A runsc sandbox cannot use Docker's embedded DNS at all: that
             # resolver lives on 127.0.0.11 in the netns, reached through
             # netfilter rules the Sentry never replays (google/gvisor#7469),
@@ -635,12 +656,15 @@ class DockerBackend:
         # (durable session sandboxes), else the cold-start base image. The
         # registry's provision path does the verified resolution and sets
         # ``spec.snapshot_image`` to a locally-runnable tag; here we run it
-        # blindly. A snapshot tag is single-component (``_is_registry_image``
-        # False), so ``--pull always`` is correctly skipped for it — the
-        # snapshot is local by construction and a registry lookup would fail.
-        run_image = spec.snapshot_image or spec.image
-        if _is_registry_image(run_image):
-            argv.extend(["--pull", "always"])
+        # blindly. A snapshot is local by construction, so it is never pulled.
+        # A cold start runs the content ID resolved above — the exact image stamped as ``aios.base_image_id`` — so no
+        # ``--pull`` here: a second pull could race a moving tag.
+        if spec.snapshot_image is not None:
+            run_image = spec.snapshot_image
+        elif resolved_base_id is not None:
+            run_image = resolved_base_id
+        else:
+            run_image = spec.image
         argv.append(run_image)
 
         rc, stdout_bytes, stderr_bytes = await run_docker_cli(argv)
@@ -1358,6 +1382,7 @@ class DockerBackend:
             SESSION_LABEL_KEY,
             ENV_KEYS_LABEL_KEY,
             BASE_IMAGE_LABEL_KEY,
+            BASE_IMAGE_ID_LABEL_KEY,
         ):
             value = labels.get(key)
             if value is not None:
@@ -1670,6 +1695,36 @@ class DockerBackend:
         if fields is None:
             raise SandboxBackendError(f"image not found: {image}")
         return fields[1]
+
+    async def image_id(self, image: str) -> str:
+        """Resolve ``image`` to the content ID the daemon would run for it.
+
+        Registry refs (``_is_registry_image``) are pulled fresh first. Every
+        other ref — bare local tags (``aios-sandbox:latest``) and Docker Hub
+        short forms (``ubuntu:latest``, ``myorg/image:stable``) — resolves to
+        whatever the local daemon currently holds, which is exactly what
+        ``docker run <ref>`` would launch; if it is absent locally we pull it,
+        mirroring ``docker run``'s implicit ``--pull missing``. Resolution is
+        thus independent of the conservative pull-always classifier, so a
+        locally rebuilt or re-pulled tag is detectable as base drift (#390).
+        """
+        if _is_registry_image(image):
+            await self._pull(image)
+            fields = await self._inspect_image_fields(image)
+        else:
+            fields = await self._inspect_image_fields(image)
+            if fields is None:
+                await self._pull(image)
+                fields = await self._inspect_image_fields(image)
+        if fields is None:
+            raise SandboxBackendError(f"image not found: {image}")
+        return fields[0]
+
+    async def _pull(self, image: str) -> None:
+        rc, _stdout, stderr_bytes = await run_docker_cli(["docker", "pull", image])
+        if rc != 0:
+            stderr = stderr_bytes.decode("utf-8", errors="replace").strip()
+            raise SandboxBackendError(f"docker pull failed for {image}: {stderr}")
 
     async def image_labels(self, image: str) -> dict[str, str] | None:
         fields = await self._inspect_image_fields(image)

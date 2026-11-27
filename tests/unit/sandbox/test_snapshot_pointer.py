@@ -223,6 +223,189 @@ async def test_resolve_base_drift_removes_and_resets(
 
 
 @pytest.mark.asyncio
+async def test_resolve_mutable_base_update_removes_and_resets(
+    harness: tuple[SandboxRegistry, FakeBackend, list[Any]],
+) -> None:
+    """An unchanged mutable ref whose resolved image ID advanced cold-starts."""
+    registry, backend, timeline = harness
+    from aios.sandbox.backends.base import (
+        BASE_IMAGE_ID_LABEL_KEY,
+        BASE_IMAGE_LABEL_KEY,
+        Mount,
+        SandboxSpec,
+    )
+
+    ref = "aios-sbx-default-sess_x:latest"
+    base = "ghcr.io/eumemic/aios-sandbox:stable"
+    backend.image_ids_by_ref[base] = "sha256:new"
+    backend.image_labels_by_ref[ref] = {
+        BASE_IMAGE_LABEL_KEY: base,
+        BASE_IMAGE_ID_LABEL_KEY: "sha256:old",
+    }
+    spec = SandboxSpec(
+        session_id="sess_x",
+        instance_id="default",
+        workspace=Mount(host_path=cast(Any, "/tmp/w"), sandbox_path="/workspace"),
+        extra_mounts=(),
+        environment={},
+        labels={},
+        network_policy=UnrestrictedNetworking(),
+        host_gateway_alias=None,
+        image=base,
+        snapshot_image=ref,
+    )
+
+    resolved = await registry._resolve_snapshot("sess_x", spec)
+
+    assert resolved.snapshot_image is None
+    assert ref in backend.removed_image_refs
+    assert ("fs_event", "sandbox_fs_reset", "base_image_updated") in timeline
+
+
+@pytest.mark.asyncio
+async def test_resolve_same_base_id_resumes(
+    harness: tuple[SandboxRegistry, FakeBackend, list[Any]],
+) -> None:
+    """#390: the common post-#390 resume path -- a stamped snapshot whose base
+    ref AND resolved content ID are unchanged -- must resume, never discard.
+
+    Pins the negative side of the ``base_image_updated`` guard: a guard that
+    discarded every stamped snapshot would delete every session's durable
+    filesystem on every resume.
+    """
+    registry, backend, timeline = harness
+    from aios.sandbox.backends.base import (
+        BASE_IMAGE_ID_LABEL_KEY,
+        BASE_IMAGE_LABEL_KEY,
+        ENV_KEYS_LABEL_KEY,
+        VAULT_PLACEHOLDER_KEYS_LABEL_KEY,
+        Mount,
+        SandboxSpec,
+    )
+
+    ref = "aios-sbx-default-sess_x:latest"
+    base = "ghcr.io/eumemic/aios-sandbox:stable"
+    backend.image_ids_by_ref[base] = "sha256:same"
+    backend.image_labels_by_ref[ref] = {
+        BASE_IMAGE_LABEL_KEY: base,
+        BASE_IMAGE_ID_LABEL_KEY: "sha256:same",
+        ENV_KEYS_LABEL_KEY: "",
+        VAULT_PLACEHOLDER_KEYS_LABEL_KEY: "",
+    }
+    spec = SandboxSpec(
+        session_id="sess_x",
+        instance_id="default",
+        workspace=Mount(host_path=cast(Any, "/tmp/w"), sandbox_path="/workspace"),
+        extra_mounts=(),
+        environment={},
+        labels={},
+        network_policy=UnrestrictedNetworking(),
+        host_gateway_alias=None,
+        image=base,
+        snapshot_image=ref,
+    )
+
+    resolved = await registry._resolve_snapshot("sess_x", spec)
+
+    assert resolved.snapshot_image == ref
+    assert ref not in backend.removed_image_refs
+    assert ("pointer_clear", "sess_x") not in timeline
+    assert not any(item[0] == "fs_event" for item in timeline)
+
+
+@pytest.mark.asyncio
+async def test_resolve_legacy_snapshot_without_base_id_resumes(
+    harness: tuple[SandboxRegistry, FakeBackend, list[Any]],
+) -> None:
+    """Snapshots created before the ID label shipped remain readable."""
+    registry, backend, timeline = harness
+    from aios.sandbox.backends.base import (
+        BASE_IMAGE_LABEL_KEY,
+        ENV_KEYS_LABEL_KEY,
+        VAULT_PLACEHOLDER_KEYS_LABEL_KEY,
+        Mount,
+        SandboxSpec,
+    )
+
+    ref = "aios-sbx-default-sess_x:latest"
+    base = "ghcr.io/eumemic/aios-sandbox:stable"
+    backend.image_ids_by_ref[base] = "sha256:new"
+    backend.image_labels_by_ref[ref] = {
+        BASE_IMAGE_LABEL_KEY: base,
+        ENV_KEYS_LABEL_KEY: "",
+        VAULT_PLACEHOLDER_KEYS_LABEL_KEY: "",
+    }
+    spec = SandboxSpec(
+        session_id="sess_x",
+        instance_id="default",
+        workspace=Mount(host_path=cast(Any, "/tmp/w"), sandbox_path="/workspace"),
+        extra_mounts=(),
+        environment={},
+        labels={},
+        network_policy=UnrestrictedNetworking(),
+        host_gateway_alias=None,
+        image=base,
+        snapshot_image=ref,
+    )
+
+    resolved = await registry._resolve_snapshot("sess_x", spec)
+
+    assert resolved.snapshot_image == ref
+    assert ref not in backend.removed_image_refs
+    assert not any(item[0] == "fs_event" for item in timeline)
+
+
+@pytest.mark.asyncio
+async def test_resolve_unresolvable_base_id_resumes(
+    harness: tuple[SandboxRegistry, FakeBackend, list[Any]],
+) -> None:
+    """#390: a registry outage while resolving the base ID must not discard
+    the durable filesystem or block resume — unknown is treated as no drift."""
+    registry, backend, timeline = harness
+    from aios.sandbox.backends.base import (
+        BASE_IMAGE_ID_LABEL_KEY,
+        BASE_IMAGE_LABEL_KEY,
+        ENV_KEYS_LABEL_KEY,
+        VAULT_PLACEHOLDER_KEYS_LABEL_KEY,
+        Mount,
+        SandboxBackendError,
+        SandboxSpec,
+    )
+
+    ref = "aios-sbx-default-sess_x:latest"
+    base = "ghcr.io/eumemic/aios-sandbox:stable"
+    backend.image_labels_by_ref[ref] = {
+        BASE_IMAGE_LABEL_KEY: base,
+        BASE_IMAGE_ID_LABEL_KEY: "sha256:old",
+        ENV_KEYS_LABEL_KEY: "",
+        VAULT_PLACEHOLDER_KEYS_LABEL_KEY: "",
+    }
+
+    async def _boom(image: str) -> str:
+        raise SandboxBackendError(f"docker pull failed for {image}: registry down")
+
+    backend.image_id = _boom  # type: ignore[method-assign]
+    spec = SandboxSpec(
+        session_id="sess_x",
+        instance_id="default",
+        workspace=Mount(host_path=cast(Any, "/tmp/w"), sandbox_path="/workspace"),
+        extra_mounts=(),
+        environment={},
+        labels={},
+        network_policy=UnrestrictedNetworking(),
+        host_gateway_alias=None,
+        image=base,
+        snapshot_image=ref,
+    )
+
+    resolved = await registry._resolve_snapshot("sess_x", spec)
+
+    assert resolved.snapshot_image == ref
+    assert ref not in backend.removed_image_refs
+    assert not any(item[0] == "fs_event" for item in timeline)
+
+
+@pytest.mark.asyncio
 async def test_resolve_snapshot_missing_resets(
     harness: tuple[SandboxRegistry, FakeBackend, list[Any]],
 ) -> None:

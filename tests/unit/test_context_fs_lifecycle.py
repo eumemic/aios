@@ -90,8 +90,16 @@ def test_reset_reasons_render_distinctly() -> None:
         ],
         system_prompt=None,
     ).messages[-1]["content"]
+    image_updated = build_messages(
+        [
+            _msg(1, "user", "x"),
+            _lifecycle(2, {"event": "sandbox_fs_reset", "reason": "base_image_updated"}),
+        ],
+        system_prompt=None,
+    ).messages[-1]["content"]
     assert "could no longer be found" in missing
     assert "base image was changed" in image_changed
+    assert "newer version of the environment's base image" in image_updated
 
 
 def test_expired_disk_pressure_vs_ttl_render_distinctly() -> None:

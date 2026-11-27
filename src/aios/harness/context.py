@@ -310,6 +310,8 @@ def _render_fs_lifecycle_notice(data: dict[str, Any]) -> str:
     # sandbox_fs_reset (or any other allowlisted reset-shaped event).
     if reason == "environment_image_changed":
         detail = "the environment's base image was changed"
+    elif reason == "base_image_updated":
+        detail = "a newer version of the environment's base image was published"
     elif reason == "snapshot_missing":
         detail = "the persisted filesystem could no longer be found"
     else:
